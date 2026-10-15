@@ -203,7 +203,8 @@ describe('Members panel: member (M6 §4)', () => {
     expect(document.querySelector('[data-members-view]')).toHaveAttribute('data-members-view', 'member')
     expect(within(row('alice')).getByText('Owner')).toBeInTheDocument()
     expect(within(row('bob')).getByText('Member')).toBeInTheDocument()
-    expect(screen.queryAllByRole('button')).toHaveLength(0)
+    // The only button is the panel's own fold toggle: nothing that changes the roster.
+    expect(screen.queryAllByRole('button')).toEqual([screen.getByRole('button', { name: 'Members' })])
     expect(screen.queryByLabelText('Google email')).toBeNull()
     expect(document.body).not.toHaveTextContent('@example.com')
     expect(screen.getByText(/Ask an owner to invite someone/)).toBeInTheDocument()

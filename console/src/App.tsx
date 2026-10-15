@@ -8,6 +8,7 @@ import { Header } from '@/components/console/header'
 import { JoinPanel } from '@/components/console/join'
 import { Members } from '@/components/console/members'
 import { RequestSheet } from '@/components/console/request-sheet'
+import { ResizableRow } from '@/components/console/resizable-row'
 import { Expired, Loading, MissingKey, NotOnTeam, SessionExpired, UnreachableBanner } from '@/components/console/states'
 import { mapMembers, TeamMap } from '@/components/console/team-map'
 import { CreateTeamDialog, NoTeamPage, TeamSettings } from '@/components/console/teams'
@@ -64,15 +65,24 @@ export function Console() {
       <main className="mx-auto flex max-w-[1440px] flex-col gap-4 px-3 py-4 sm:px-6 sm:py-5">
         {conn.state === 'unreachable' ? <UnreachableBanner conn={conn} /> : null}
         <JoinPanel owner={owner} />
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
-          <TeamMap members={members} requests={requests} stale={conn.state === 'unreachable'} />
-          <Agents
-            agents={teammates}
-            loading={directory.isPending}
-            now={now}
-            statsComplete={directory.data?.stats_complete !== false}
-            className="lg:max-h-[27rem]" />
-        </div>
+        <ResizableRow className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
+          {(sized) => (
+            <>
+              <TeamMap
+                members={members}
+                requests={requests}
+                stale={conn.state === 'unreachable'}
+                fill={sized}
+                className={sized ? 'lg:min-h-0' : undefined} />
+              <Agents
+                agents={teammates}
+                loading={directory.isPending}
+                now={now}
+                statsComplete={directory.data?.stats_complete !== false}
+                className={sized ? 'lg:min-h-0' : 'lg:max-h-[27rem]'} />
+            </>
+          )}
+        </ResizableRow>
         {rosterMissing ? null : (
           <Members roster={roster.data} loading={roster.isPending} failed={roster.isError} me={member} owner={owner} />
         )}

@@ -131,12 +131,15 @@ export function TeamMap({
   members,
   requests,
   stale = false,
+  fill = false,
   className,
 }: {
   members: MapMember[]
   requests: ActivityRequest[]
   /** The relay stopped answering: what is drawn is the last known state, so it holds still. */
   stale?: boolean
+  /** The panel has a set height (dragged by the viewer): the drawing scales to fill it. */
+  fill?: boolean
   className?: string
 }) {
   const fl = useMemo(() => flights(requests), [requests])
@@ -179,8 +182,17 @@ export function TeamMap({
       }
       bodyClassName="flex flex-col"
     >
-      <div ref={box} className={cn('relative flex flex-1 items-center px-2 py-2 transition-opacity', stale && 'map-stale opacity-55')}>
-        <svg viewBox={`0 0 ${geo.w} ${geo.h}`} role="img" aria-labelledby="team-map-desc" preserveAspectRatio="xMidYMid meet" className="block h-auto max-h-[330px] w-full select-none">
+      <div ref={box} className={cn('relative flex flex-1 items-center px-2 py-2 transition-opacity', fill && 'min-h-0', stale && 'map-stale opacity-55')}>
+        <svg
+          viewBox={`0 0 ${geo.w} ${geo.h}`}
+          role="img"
+          aria-labelledby="team-map-desc"
+          preserveAspectRatio="xMidYMid meet"
+          className={cn(
+            'block select-none',
+            fill ? 'absolute top-2 left-2 h-[calc(100%-1rem)] w-[calc(100%-1rem)]' : 'h-auto max-h-[330px] w-full',
+          )}
+        >
           <desc id="team-map-desc">{summary}</desc>
           <defs>
             <marker id="arrow-out" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse">

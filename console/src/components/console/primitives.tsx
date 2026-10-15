@@ -1,4 +1,4 @@
-import { LockKeyhole } from 'lucide-react'
+import { ChevronRight, LockKeyhole } from 'lucide-react'
 import type { ReactNode } from 'react'
 
 import type { Tone } from '@/lib/activity'
@@ -112,6 +112,12 @@ export function EnvBadge({ environment }: { environment: 'staging' | 'production
   )
 }
 
+/** A panel the viewer can close: the title becomes the toggle, the aside stays visible. */
+export interface PanelCollapse {
+  open: boolean
+  onToggle: () => void
+}
+
 export function Panel({
   title,
   aside,
@@ -119,6 +125,7 @@ export function Panel({
   className,
   bodyClassName,
   id,
+  collapse,
 }: {
   title: ReactNode
   aside?: ReactNode
@@ -126,20 +133,48 @@ export function Panel({
   className?: string
   bodyClassName?: string
   id?: string
+  collapse?: PanelCollapse
 }) {
   const headingId = id ? `${id}-title` : undefined
+  const bodyId = id ? `${id}-body` : undefined
+  const open = collapse ? collapse.open : true
   return (
     <section
       aria-labelledby={headingId}
       className={cn('flex min-w-0 flex-col rounded-xl border bg-card shadow-[0_1px_0_0_var(--hairline)]', className)}
+      data-collapsed={collapse ? (open ? 'open' : 'closed') : undefined}
     >
-      <header className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-2 border-b border-hairline px-4 py-2">
+      <header
+        className={cn(
+          'flex min-h-11 flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2',
+          open && 'border-b border-hairline',
+          collapse && 'pl-2',
+        )}
+      >
         <h2 id={headingId} className="text-[13px] font-semibold tracking-[-0.005em]">
-          {title}
+          {collapse ? (
+            <button
+              type="button"
+              aria-expanded={open}
+              aria-controls={bodyId}
+              onClick={collapse.onToggle}
+              className="-my-1 flex items-center gap-1.5 rounded-md px-2 py-1 text-left transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/40 focus-visible:outline-none"
+            >
+              <ChevronRight
+                aria-hidden
+                className={cn('size-4 shrink-0 text-subtle transition-transform motion-reduce:transition-none', open && 'rotate-90')}
+              />
+              {title}
+            </button>
+          ) : (
+            title
+          )}
         </h2>
         {aside ? <div className="ml-auto flex items-center gap-2">{aside}</div> : null}
       </header>
-      <div className={cn('min-h-0 flex-1', bodyClassName)}>{children}</div>
+      <div id={bodyId} hidden={!open} className={cn('min-h-0 flex-1', bodyClassName)}>
+        {open ? children : null}
+      </div>
     </section>
   )
 }

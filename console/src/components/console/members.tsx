@@ -1,5 +1,5 @@
 import { ShieldCheck } from 'lucide-react'
-import { useId, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useId, useRef, useState, type FormEvent } from 'react'
 
 import type { ChangeError } from '@/api/client'
 import type { Roster, RosterMember } from '@/api/types'
@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useRosterChange } from '@/hooks/queries'
 import { addProblem, entries, isInvited, ownerCount, sortedMembers, suggestMemberId, visibleEmails } from '@/lib/roster'
+import { readStored, writeStored } from '@/lib/stored'
 import { cn } from '@/lib/utils'
 import { Avatar, Panel } from './primitives'
 
@@ -15,7 +16,20 @@ import { Avatar, Panel } from './primitives'
 // names the person, and makes or unmakes owners; every refusal is shown inline, where it
 // happened. A member sees a read-only list of names and roles. M9 §7.2: an addition is an
 // invitation until its person accepts (at sign-in, or in the console); the owner sees it as
-// Invited, and can withdraw it (which retires nothing).
+// Invited, and can withdraw it (which retires nothing). The panel folds away to its header
+// (with the counts still showing), and stays as the viewer left it in this browser.
+
+export const MEMBERS_STORAGE_KEY = 'team-relay-console.members'
+
+function useMembersOpen(): [boolean, () => void] {
+  const [open, setOpen] = useState(() => readStored(MEMBERS_STORAGE_KEY) !== 'closed')
+  const toggle = useCallback(() => {
+    const next = !open
+    writeStored(MEMBERS_STORAGE_KEY, next ? 'open' : 'closed')
+    setOpen(next)
+  }, [open])
+  return [open, toggle]
+}
 
 function RoleBadge() {
   return (
@@ -304,11 +318,13 @@ export function Members({
   const owners = ownerCount(roster)
   const invitedCount = members.filter(isInvited).length
   const activeCount = members.length - invitedCount
+  const [open, toggle] = useMembersOpen()
   return (
     <Panel
       id="members"
       title="Members"
       className={className}
+      collapse={{ open, onToggle: toggle }}
       aside={
         roster ? (
           <span className="tnum text-[12px] text-subtle">
