@@ -90,15 +90,15 @@ describe('the console', () => {
     expect(within(carol).getByText('production_db_count')).toBeInTheDocument()
   })
 
-  it('shows each agent\'s shared folders, by name, or that it shares nothing (M4 §3)', async () => {
+  it('shows what each agent can answer from, by name, or that it shares nothing yet (M4 §3, M10 §2)', async () => {
     server()
     renderWithClient(<App />)
     await flush(10)
     const bob = document.querySelector('[data-agent="bob"]') as HTMLElement
     expect(bob.querySelector('[data-shares]')).toHaveAttribute('data-shares', 'orders-service,runbooks')
-    expect(bob.querySelector('[data-shares]')).toHaveTextContent('Shares: orders-service, runbooks')
+    expect(bob.querySelector('[data-shares]')).toHaveTextContent('Can answer from: orders-service, runbooks')
     const carol = document.querySelector('[data-agent="carol"]') as HTMLElement
-    expect(carol.querySelector('[data-shares]')).toHaveTextContent('Shares nothing')
+    expect(carol.querySelector('[data-shares]')).toHaveTextContent('Can answer from nothing shared yet')
   })
 
   it('says "shares nothing" for a teammate whose plugin publishes no shares list', async () => {
@@ -115,7 +115,7 @@ describe('the console', () => {
     renderWithClient(<App />)
     await flush(10)
     for (const m of ['bob', 'carol']) {
-      expect(document.querySelector(`[data-agent="${m}"] [data-shares]`)).toHaveTextContent('Shares nothing')
+      expect(document.querySelector(`[data-agent="${m}"] [data-shares]`)).toHaveTextContent('Can answer from nothing shared yet')
     }
   })
 

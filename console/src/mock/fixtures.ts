@@ -15,7 +15,7 @@
 //                       (M4 §2: the tool event is `waiting`)
 // bob shares two folders with his answering session; carol shares none (M4 §3).
 
-import type { ActivityPage, ActivityRequest, AdminTeam, Directory, Join, Manifest, Me, RequestDetail, Roster, Teams } from '@/api/types'
+import type { ActivityPage, ActivityRequest, AdminTeam, Directory, Join, Manifest, Me, RequestDetail, Roster, TeamBoundaries, Teams } from '@/api/types'
 
 export const FIXTURE_NOW = '2026-09-23T10:15:00.000Z'
 
@@ -30,6 +30,44 @@ export const fixtureJoin: Join = {
   marketplace: 'team-relay-dev',
   plugin: 'team-relay',
   default_relay: false,
+}
+
+/** GET /api/boundaries for `demo` (M10 §1): set by alice, an owner. Synthetic. */
+export const fixtureBoundaries: TeamBoundaries = {
+  team: 'demo',
+  version: 2,
+  boundaries: {
+    topic: 'Example Co: the orders and payments services, their runbooks, deploys and incidents, and how the team works.',
+    github_orgs: ['example-org'],
+    drives: [{ domain: 'example.com', shared_drive: 'Example Team Drive' }],
+    member_folders: true,
+  },
+  since: {
+    github_orgs: { 'example-org': 1 },
+    drives: [{ domain: 'example.com', shared_drive: 'Example Team Drive', since: 1 }],
+    member_folders: 2,
+  },
+  updated_at: '2026-09-21T09:30:00Z',
+  updated_by: 'alice',
+}
+
+/** GET /api/boundaries for `ops` (M10 §1), once alice has joined it as a member: set by olga. */
+export const fixtureOpsBoundaries: TeamBoundaries = {
+  team: 'ops',
+  version: 1,
+  boundaries: {
+    topic: 'Operations at Example Co: on-call, incidents, infrastructure and the runbooks behind them.',
+    github_orgs: ['example-ops'],
+    drives: [{ domain: 'example.com', shared_drive: 'Operations' }],
+    member_folders: false,
+  },
+  since: {
+    github_orgs: { 'example-ops': 1 },
+    drives: [{ domain: 'example.com', shared_drive: 'Operations', since: 1 }],
+    member_folders: null,
+  },
+  updated_at: '2026-09-14T08:00:00Z',
+  updated_by: 'olga',
 }
 
 /** GET /api/roster as alice, an owner, reads it (M6 §2): every email visible. */

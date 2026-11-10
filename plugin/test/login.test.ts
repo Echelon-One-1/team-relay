@@ -187,7 +187,10 @@ describe('RELAY_AUTH default (M5-SPEC §6)', () => {
   it('the default relay URL lives in exactly one file, plugin/relay.default.json', () => {
     const raw = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'relay.default.json'), 'utf8'));
     expect(Object.keys(raw)).toEqual(['relay_url']);
-    expect(raw.relay_url).toMatch(/^https:\/\/[a-z0-9.-]+\.run\.app$/);
+    // M10-SPEC §5: one public address (https, a host name only) for the relay and the console;
+    // the value itself is the maintainer's.
+    expect(raw.relay_url).toMatch(/^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/);
+    expect(raw.relay_url).not.toMatch(/\.run\.app$/);
     expect(defaultRelayUrl()).toBe(raw.relay_url);
     // Read at run time: no bundle carries a copy.
     for (const f of readdirSync(join(PLUGIN_ROOT, 'dist')).filter((n) => n.endsWith('.js'))) {

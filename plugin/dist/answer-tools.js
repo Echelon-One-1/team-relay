@@ -17078,9 +17078,67 @@ var ANSWER_TOOLS = [
     }
   }
 ];
+var PERMISSION_TOOL_DEF = ANSWER_TOOLS[2];
+var BOUNDARY_TOOLS = [
+  {
+    name: "reply",
+    description: "Send your answer to the teammate who asked. Call exactly once, at the end. When the question is not about the team's topic, set off_topic to true (the teammate then gets a fixed, polite decline instead of your text).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", minLength: 1, maxLength: 32e3 },
+        data: { type: "object", description: "Optional structured result (for example a capability tool result), at most 64 KiB as JSON." },
+        off_topic: { type: "boolean" }
+      },
+      required: ["text"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "list_files",
+    description: `List the files you may read (absolute paths, for Read), with the areas they are in (GitHub repositories, shared drives, the member's folders). Optionally only one area, and only paths matching a glob relative to the area (for example "**/*.md"; without a "/", it also matches file names). At most 500 paths per call.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        area: { type: "string", maxLength: 300 },
+        glob: { type: "string", maxLength: 300 }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "search_files",
+    description: "Search the files you may read for lines matching an RE2 regular expression ((?i) at the start ignores case). Optionally one area and a glob, as for list_files. Returns path, line number and the line (clipped). Google Docs/Sheets/Slides are not searched: read them with read_google_file.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", minLength: 1, maxLength: 300 },
+        area: { type: "string", maxLength: 300 },
+        glob: { type: "string", maxLength: 300 },
+        max_results: { type: "integer", minimum: 1, maximum: 200 }
+      },
+      required: ["pattern"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "read_google_file",
+    description: "Read a Google Doc, Sheet or Slides file from the team's shared drive: give the path of its .gdoc, .gsheet or .gslides file (from list_files). Returns its text (Docs as Markdown, Sheets as CSV, Slides as text), at most 200 KB.",
+    inputSchema: {
+      type: "object",
+      properties: { path: { type: "string", minLength: 1, maxLength: 4096 } },
+      required: ["path"],
+      additionalProperties: false
+    }
+  },
+  PERMISSION_TOOL_DEF
+];
+function toolsFor(mode) {
+  return mode === "boundaries" ? BOUNDARY_TOOLS : ANSWER_TOOLS;
+}
 function permissionResult(decision, input) {
   const d = isPlainObject3(decision) ? decision : {};
-  if (d.allow === true) return JSON.stringify({ behavior: "allow", updatedInput: input });
+  if (d.allow === true) return JSON.stringify({ behavior: "allow", updatedInput: isPlainObject3(d.updatedInput) ? d.updatedInput : input });
   const message = typeof d.message === "string" && d.message ? d.message : "The member did not allow this.";
   return JSON.stringify({ behavior: "deny", message });
 }
@@ -17099,7 +17157,10 @@ async function main() {
     process.exit(1);
   }
   const server = new Server({ name: "host", version: "0.1.0" }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: ANSWER_TOOLS.map((t) => ({ ...t })) }));
+  const mode = process.env.TEAM_RELAY_HOST_MODE;
+  const listed = toolsFor(mode);
+  const names = new Set(listed.map((t) => t.name));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listed.map((t) => ({ ...t })) }));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const name = req.params.name;
     const args = req.params.arguments ?? {};
@@ -17113,11 +17174,18 @@ async function main() {
         });
         return { content: [{ type: "text", text: permissionResult(decision, args.input) }] };
       }
+      if (!names.has(name)) return toolError(`unknown tool: ${name}`);
       if (name === "reply" || name === "request_approval") {
         const result = await host.call(name, args);
         const r = isPlainObject3(result) ? result : {};
         const text = typeof r.message === "string" ? r.message : "done";
         return r.ok === false ? toolError(text) : { content: [{ type: "text", text }] };
+      }
+      if (name === "list_files" || name === "search_files" || name === "read_google_file") {
+        const out = await host.call(name, args);
+        const r = isPlainObject3(out) ? out : {};
+        if (r.ok !== true) return toolError(typeof r.message === "string" ? r.message : "failed");
+        return { content: [{ type: "text", text: JSON.stringify(r.result ?? {}) }] };
       }
       return toolError(`unknown tool: ${name}`);
     } catch (err) {
@@ -17146,5 +17214,7 @@ if (process.argv[1] && /answer-tools\.(js|ts)$/.test(process.argv[1])) {
 }
 export {
   ANSWER_TOOLS,
-  permissionResult
+  BOUNDARY_TOOLS,
+  permissionResult,
+  toolsFor
 };

@@ -6,12 +6,15 @@
 //   refused (DNS rebinding).
 // - /api/* needs X-Console-Key equal to the per-launch key (compared in constant time):
 //   missing is 401, wrong is 403. No CORS headers, ever; a cross-site fetch is refused.
-// - A read-only proxy of exactly six GETs: /api/me, /api/directory, /api/activity,
-//   /api/requests/{id}, /api/roster (M6-SPEC §3) and /api/inbox/summary (M7-SPEC §3). The only writes are the owner's roster
-//   changes: POST /api/roster, PATCH and DELETE /api/roster/{member}, each with
-//   Content-Type: application/json and Sec-Fetch-Site: same-origin, and a body checked here
-//   before it is sent on. Nothing else is proxied, so there is no way to send, ack or reply
-//   from the console.
+// - A read-only proxy of exactly seven GETs: /api/me, /api/directory, /api/activity,
+//   /api/requests/{id}, /api/roster (M6-SPEC §3), /api/inbox/summary (M7-SPEC §3) and
+//   /api/boundaries (M10-SPEC §1). The only writes are the owner's roster changes: POST
+//   /api/roster, PATCH and DELETE /api/roster/{member}; and an owner's boundaries: PUT
+//   /api/boundaries (a body of at most BOUNDARIES_BODY_LIMIT, checked by checkSetBoundaries:
+//   the relay's own rules, unknown fields refused). Each has Content-Type: application/json
+//   and Sec-Fetch-Site: same-origin, no query but `team`, and a body checked here before it is
+//   sent on. Nothing else is proxied, so there is no way to send, ack or reply from the
+//   console.
 // - GET /api/approvals/summary (local mode only, M8-SPEC §5), answered by the console server
 //   itself: {"pending": n}, how many answers wait for this member's approval in their channel
 //   working session on this computer (from ~/.config/team-relay/approvals.json; counts only).
@@ -22,7 +25,7 @@
 // - Static files from dist/console/ under a strict CSP; a placeholder page when it is absent.
 //
 // Several teams (M9-SPEC §5): every team-scoped /api/* route (me, directory, activity,
-// requests, roster and its changes, inbox summary, join) takes the team from a `team` query
+// requests, roster and its changes, inbox summary, boundaries, join) takes the team from a `team` query
 // parameter or an X-Relay-Team header (the same value when both are sent), checked against
 // the viewer's active teams (GET /v1/me/teams, kept 15 s per viewer; a stored device
 // credential or a static token is bound to its one team, which is then the only one). Without
@@ -51,6 +54,9 @@
 //   appends the address the connection came from, so that entry is the only one a client
 //   cannot write; anything left of it is the client's own claim. IPv6 counts per /64, as the
 //   relay counts it. Without the header (not on Cloud Run) the socket's peer counts.
+//   Behind Google's external Application Load Balancer (M10-SPEC §5; CONSOLE_PROXY_HOPS=2)
+//   the balancer appends two entries, `<client address>,<balancer address>`, so the address
+//   is the second from the right; fewer entries than that count as one shared "unknown".
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
@@ -72,6 +78,23 @@ import {
   type RosterRole,
   type UpdateMemberBody,
 } from './relay-client.js';
+import type { Boundaries, DriveBoundary, SetBoundariesBody } from './boundaries-types.js';
+import {
+  BOUNDARIES_MAX_DRIVES,
+  BOUNDARIES_MAX_ORGS,
+  BOUNDARIES_VERSION_MAX,
+  DOMAIN_MAX,
+  DRIVE_DOMAIN_RE,
+  domainOk,
+  driveNameOk,
+  GITHUB_ORG_RE,
+  orgOk,
+  SHARED_DRIVE_MAX,
+  TOPIC_MAX,
+  topicOk,
+  trimText,
+  versionOk,
+} from './boundaries-rule.js';
 import { normaliseRelayUrl } from './credentials.js';
 import { defaultRelayUrl } from './relay-default.js';
 
@@ -157,6 +180,9 @@ export type ConsoleBackend = {
   /** M9-SPEC §4: relay admins. */
   adminTeams(q: { after?: string; limit?: number }, ctx?: ReadContext): Promise<unknown>;
   adminDeleteTeam(team: string, confirm: string, ctx?: ReadContext): Promise<unknown>;
+  /** M10-SPEC §1: the team's boundaries (any member), and an owner's replacement of them. */
+  boundaries(ctx?: ReadContext): Promise<unknown>;
+  setBoundaries(body: SetBoundariesBody, ctx?: ReadContext): Promise<unknown>;
 };
 
 /** At most this many per-team clients are kept (a hosted console serves many teams). */
@@ -212,6 +238,8 @@ export function relayBackend(client: RelayClient): ConsoleBackend {
     deleteTeam: (confirm, ctx) => on(ctx).deleteTeam(confirm, opts(ctx)),
     adminTeams: (q, ctx) => client.adminTeams(q, opts(ctx)),
     adminDeleteTeam: (team, confirm, ctx) => client.adminDeleteTeam(team, confirm, opts(ctx)),
+    boundaries: (ctx) => on(ctx).boundaries(opts(ctx)),
+    setBoundaries: (body, ctx) => on(ctx).setBoundaries(body, opts(ctx)),
   };
 }
 
@@ -254,6 +282,8 @@ export function demoBackend(account: DemoAccount): ConsoleBackend {
     deleteTeam: async (confirm, ctx) => account.deleteTeam(ctx?.team ?? account.defaultTeam, confirm),
     adminTeams: async (q) => account.adminTeams(q),
     adminDeleteTeam: async (team, confirm) => account.adminDeleteTeam(team, confirm),
+    boundaries: async (ctx) => account.team(ctx?.team).boundaries(),
+    setBoundaries: async (body, ctx) => account.team(ctx?.team).setBoundaries(body),
   };
 }
 
@@ -359,6 +389,80 @@ export function checkConfirm(raw: unknown, team: string): string {
 }
 
 // ---------------------------------------------------------------------------------------
+// The boundaries body (M10-SPEC §1), checked before anything reaches the relay.
+
+/**
+ * The largest PUT /api/boundaries body. The largest valid document (a 500-character topic, ten
+ * orgs, ten drives with 100-character names), every character escaped as \uXXXX, fits.
+ */
+export const BOUNDARIES_BODY_LIMIT = 32 * 1024;
+// The rule itself (limits, character classes, trimming) is boundaries-rule.ts, shared with the
+// host's check of what the relay hands it and of what a member accepted.
+export { BOUNDARIES_MAX_DRIVES, BOUNDARIES_MAX_ORGS, BOUNDARIES_VERSION_MAX, DOMAIN_MAX, DRIVE_DOMAIN_RE, GITHUB_ORG_RE, SHARED_DRIVE_MAX, TOPIC_MAX };
+
+/** A list as sent; the cap counts it before duplicates are dropped (M10-SPEC §7.5). */
+function list(v: unknown, field: string, max: number, what: string): unknown[] {
+  if (!Array.isArray(v)) throw new BodyError(`${field} must be a list`);
+  if (v.length > max) throw new BodyError(`at most ${max} ${what}`);
+  return v;
+}
+
+function drive(v: unknown): DriveBoundary {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new BodyError('each drive must be {"domain", "shared_drive"}');
+  const d = v as Record<string, unknown>;
+  onlyKeys(d, ['domain', 'shared_drive']);
+  // Neither is trimmed: a value with surrounding space is refused, as the relay refuses it.
+  if (!domainOk(d.domain)) {
+    throw new BodyError('a drive domain must be a lower-case domain name, such as example.com');
+  }
+  const name = d.shared_drive;
+  if (!driveNameOk(name)) {
+    throw new BodyError(
+      `a shared drive name must be 1 to ${SHARED_DRIVE_MAX} characters, with no /, no control or invisible characters and no leading or trailing space`,
+    );
+  }
+  return { domain: d.domain, shared_drive: name };
+}
+
+/**
+ * PUT /api/boundaries: exactly {"version", "boundaries": {"topic", "github_orgs", "drives",
+ * "member_folders"}}, by the one rule of M10-SPEC §7.5 (schema/boundaries-vectors.json). The
+ * topic is trimmed and the lists de-duplicated (orgs ignoring case, as GitHub does), as the
+ * relay stores them; the caps count the lists as sent.
+ */
+export function checkSetBoundaries(raw: unknown): SetBoundariesBody {
+  const b = object(raw);
+  onlyKeys(b, ['version', 'boundaries']);
+  if (!versionOk(b.version)) {
+    throw new BodyError('version must be the whole number the boundaries were read at');
+  }
+  if (typeof b.boundaries !== 'object' || b.boundaries === null || Array.isArray(b.boundaries)) {
+    throw new BodyError('boundaries must be {"topic", "github_orgs", "drives", "member_folders"}');
+  }
+  const x = b.boundaries as Record<string, unknown>;
+  onlyKeys(x, ['topic', 'github_orgs', 'drives', 'member_folders']);
+  // As the relay: refused characters are looked for in the topic as sent, before trimming.
+  if (!topicOk(x.topic)) {
+    throw new BodyError(`topic must be 1 to ${TOPIC_MAX} characters, with no control or invisible characters`);
+  }
+  const topic = trimText(x.topic);
+  const orgs: string[] = [];
+  for (const o of list(x.github_orgs, 'github_orgs', BOUNDARIES_MAX_ORGS, 'GitHub orgs')) {
+    if (!orgOk(o)) {
+      throw new BodyError('a GitHub org must be 1 to 39 letters, digits or -, not starting with -');
+    }
+    if (!orgs.some((have) => have.toLowerCase() === o.toLowerCase())) orgs.push(o);
+  }
+  const drives: DriveBoundary[] = [];
+  for (const d of list(x.drives, 'drives', BOUNDARIES_MAX_DRIVES, 'shared drives').map(drive)) {
+    if (!drives.some((have) => have.domain === d.domain && have.shared_drive === d.shared_drive)) drives.push(d);
+  }
+  if (typeof x.member_folders !== 'boolean') throw new BodyError('member_folders must be true or false');
+  const boundaries: Boundaries = { topic, github_orgs: orgs, drives, member_folders: x.member_folders };
+  return { version: b.version, boundaries };
+}
+
+// ---------------------------------------------------------------------------------------
 // The viewer's teams (M9-SPEC §2, §5), as the console hands them to its page.
 
 export type TeamEntry = { team: string; name: string; member: string; role: RosterRole };
@@ -417,19 +521,49 @@ export function parseTeams(raw: unknown): TeamsView {
 // ---------------------------------------------------------------------------------------
 // The viewer's address for the relay's per-address creation limit (M9-SPEC §7.6).
 
-/** The right-most X-Forwarded-For entry (the one Google's front end added), else the socket peer. */
-export function clientAddress(req: IncomingMessage): string {
+/**
+ * The viewer's address from X-Forwarded-For: the entry Google's front end wrote, `hops` from the
+ * right (1: Cloud Run's own front end; 2: the external Application Load Balancer, which appends
+ * the client's address and then its own). With one hop and no header (not on Cloud Run), the
+ * socket peer; behind the load balancer, a request without both of its entries did not come
+ * through it, and gets '' (one shared "unknown" bucket).
+ */
+export function clientAddress(req: IncomingMessage, hops: ProxyHops = 1): string {
   const raw = req.headers['x-forwarded-for'];
   const joined = Array.isArray(raw) ? raw.join(',') : raw;
-  if (joined) {
-    const last = joined
-      .split(',')
-      .map((p) => p.trim())
-      .filter((p) => p !== '')
-      .at(-1);
-    if (last !== undefined) return last;
+  const entries = (joined ?? '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter((p) => p !== '');
+  if (hops === 2) return entries.length >= 2 ? entries[entries.length - 2]! : '';
+  return entries.at(-1) ?? req.socket.remoteAddress ?? '';
+}
+
+/** How many X-Forwarded-For entries Google appends in front of the console (M10-SPEC §5). */
+export type ProxyHops = 1 | 2;
+
+/** Whether a public host is Cloud Run's own address (a name under run.app, port aside). */
+export function isRunAppHost(publicHost: string): boolean {
+  return /^[^:]+\.run\.app(?::[0-9]{1,5})?$/.test(publicHost);
+}
+
+/**
+ * CONSOLE_PROXY_HOPS: 1 (Cloud Run directly) or 2 (behind the load balancer). Unset means 1,
+ * but only on a run.app host: any other public host is served through the load balancer
+ * (M10-SPEC §5), so the count must be said there (§7.7); unset, every viewer would share the
+ * balancer's address in the per-address limits.
+ */
+export function checkProxyHops(raw: string | undefined, publicHost: string): ProxyHops {
+  const v = raw?.trim();
+  if (!v) {
+    if (isRunAppHost(publicHost)) return 1;
+    throw new Error(
+      `CONSOLE_PROXY_HOPS must be set when the public host (${publicHost}) is not a run.app address: 2 behind the load balancer`,
+    );
   }
-  return req.socket.remoteAddress ?? '';
+  if (v === '1') return 1;
+  if (v === '2') return 2;
+  throw new Error('CONSOLE_PROXY_HOPS must be 1 (Cloud Run) or 2 (behind the load balancer)');
 }
 
 function expandIpv6(a: string): string[] | null {
@@ -467,8 +601,8 @@ export function addressKey(address: string): string {
 }
 
 /** X-Relay-Client-IP-Hash: sha256(salt + the viewer's address key), 64 lower-case hex. */
-export function clientIpHash(salt: string, req: IncomingMessage): string {
-  return createHash('sha256').update(salt + addressKey(clientAddress(req)), 'utf8').digest('hex');
+export function clientIpHash(salt: string, req: IncomingMessage, hops: ProxyHops = 1): string {
+  return createHash('sha256').update(salt + addressKey(clientAddress(req, hops)), 'utf8').digest('hex');
 }
 
 /** CONSOLE_IP_HASH_SALT: required in hosted mode, at least 32 characters (surrounding space dropped). */
@@ -580,7 +714,7 @@ const PLACEHOLDER = `<!doctype html>
 <p>The console has not been built yet: <code>dist/console/</code> is missing. Build it from
 <code>console/</code> (it builds into <code>plugin/dist/console/</code>), then reload this page.</p>
 <p>The API is running: <code>/api/me</code>, <code>/api/directory</code>, <code>/api/activity</code>,
-<code>/api/requests/{id}</code>, <code>/api/roster</code>, <code>/api/inbox/summary</code> and <code>/api/join</code>, with the key from this page's
+<code>/api/requests/{id}</code>, <code>/api/roster</code>, <code>/api/inbox/summary</code>, <code>/api/boundaries</code> and <code>/api/join</code>, with the key from this page's
 address in an <code>X-Console-Key</code> header.</p>
 </body>
 </html>
@@ -602,6 +736,8 @@ export type HostedOptions = {
   verify: (assertion: string | undefined) => Promise<IapIdentity | null>;
   /** CONSOLE_IP_HASH_SALT (M9-SPEC §7.6): salts the viewer's address before it is hashed. */
   ipHashSalt: string;
+  /** CONSOLE_PROXY_HOPS (M10-SPEC §5): 2 behind the load balancer; 1 (the default) on Cloud Run alone. */
+  proxyHops?: ProxyHops;
 };
 
 export type ConsoleServerOptions = {
@@ -814,8 +950,11 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
   }
 
   /** The routes that change something, by path: which methods each allows. */
-  function changeRoute(path: string): { methods: string[]; kind: 'roster' | 'roster_one' | 'teams' | 'team' | 'invitation' | 'admin_team'; id: string | null } | null {
+  function changeRoute(
+    path: string,
+  ): { methods: string[]; kind: 'roster' | 'roster_one' | 'boundaries' | 'teams' | 'team' | 'invitation' | 'admin_team'; id: string | null } | null {
     if (path === '/api/roster') return { methods: ['POST'], kind: 'roster', id: null };
+    if (path === '/api/boundaries') return { methods: ['PUT'], kind: 'boundaries', id: null };
     let m = /^\/api\/roster\/([^/]+)$/.exec(path);
     if (m) return { methods: ['PATCH', 'DELETE'], kind: 'roster_one', id: m[1]! };
     if (path === '/api/teams') return { methods: ['POST'], kind: 'teams', id: null };
@@ -829,8 +968,8 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
   }
 
   /**
-   * The changes: the roster's (M6-SPEC §3) and the account's (M9-SPEC §2, §4, §7). Each is
-   * JSON from the console's own page, with a body checked here first.
+   * The changes: the roster's (M6-SPEC §3), the boundaries (M10-SPEC §1) and the account's
+   * (M9-SPEC §2, §4, §7). Each is JSON from the console's own page, with a body checked here first.
    */
   async function change(
     req: IncomingMessage,
@@ -840,7 +979,7 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     route: NonNullable<ReturnType<typeof changeRoute>>,
   ): Promise<void> {
     const method = req.method ?? '';
-    const reads = route.kind === 'teams' || route.kind === 'roster' ? ['GET'] : [];
+    const reads = route.kind === 'teams' || route.kind === 'roster' || route.kind === 'boundaries' ? ['GET'] : [];
     if (!route.methods.includes(method)) {
       req.resume();
       return sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: [...reads, ...route.methods].join(', ') });
@@ -855,9 +994,10 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
       req.resume();
       return sendJson(res, 415, { error: 'unsupported_media_type', detail: 'Content-Type must be application/json' });
     }
-    // Only a roster change names a team (the query's `team` or X-Relay-Team); nothing else here.
-    const rosterKind = route.kind === 'roster' || route.kind === 'roster_one';
-    const extra = [...url.searchParams.keys()].filter((k) => !(rosterKind && k === 'team'));
+    // Only a roster or boundaries change names a team (the query's `team` or X-Relay-Team);
+    // nothing else here.
+    const teamScoped = route.kind === 'roster' || route.kind === 'roster_one' || route.kind === 'boundaries';
+    const extra = [...url.searchParams.keys()].filter((k) => !(teamScoped && k === 'team'));
     if (extra.length > 0) {
       req.resume();
       return sendJson(res, 400, { error: 'bad_request', detail: 'no query parameters here' });
@@ -868,11 +1008,12 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
       req.resume();
       return sendJson(res, 404, { error: 'not_found' });
     }
+    const limit = route.kind === 'boundaries' ? BOUNDARIES_BODY_LIMIT : ROSTER_BODY_LIMIT;
     let text: string;
     try {
-      text = await readBody(req, ROSTER_BODY_LIMIT);
+      text = await readBody(req, limit);
     } catch {
-      return sendJson(res, 413, { error: 'too_large', detail: `at most ${ROSTER_BODY_LIMIT} bytes` });
+      return sendJson(res, 413, { error: 'too_large', detail: `at most ${limit} bytes` });
     }
     let raw: unknown = undefined;
     if (text.trim() !== '') {
@@ -910,10 +1051,20 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
           what = `roster ${method === 'POST' ? 'add' : method === 'PATCH' ? 'update' : 'remove'}${id ? ` ${id}` : ''} (team ${resolved})`;
           break;
         }
+        case 'boundaries': {
+          const body = checkSetBoundaries(raw);
+          const resolved = await resolveTeam(req, res, url, who);
+          if (resolved === null) return;
+          team = resolved;
+          call = () => opts.backend.setBoundaries(body, { ...who, team: resolved });
+          // Who and which version; never the text.
+          what = `boundaries set from version ${body.version} (team ${resolved})`;
+          break;
+        }
         case 'teams': {
           const body = checkCreateTeam(raw);
           // M9-SPEC §7.6: hosted, the relay counts the viewer's address, salted and hashed.
-          const ipHash = hosted ? { clientIpHash: clientIpHash(hosted.ipHashSalt, req) } : {};
+          const ipHash = hosted ? { clientIpHash: clientIpHash(hosted.ipHashSalt, req, hosted.proxyHops ?? 1) } : {};
           status = 201;
           call = () => opts.backend.createTeam(body, { ...who, ...ipHash });
           what = 'team create';
@@ -949,13 +1100,15 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     try {
       const out = await call();
       // What the viewer's teams are may have changed: read them again next time.
-      if (route.kind !== 'roster' && route.kind !== 'roster_one') forgetTeams(viewer);
+      if (!teamScoped) forgetTeams(viewer);
       return sendJson(res, status, out);
     } catch (err) {
-      if (route.kind !== 'roster' && route.kind !== 'roster_one') forgetTeams(viewer);
+      if (!teamScoped) forgetTeams(viewer);
       // A roster change's 404 is about the member (or the team: then not_on_team, from the
-      // relay's refusal of a non-member); an account route's 404 is the relay's own.
-      if (team !== undefined && route.kind === 'roster' && err instanceof RelayError && err.status === 404) return failure(res, err, viewer, team);
+      // relay's refusal of a non-member); so is a boundaries change's, which names no member.
+      // An account route's 404 is the relay's own.
+      const aboutTeam = route.kind === 'roster' || route.kind === 'boundaries';
+      if (team !== undefined && aboutTeam && err instanceof RelayError && err.status === 404) return failure(res, err, viewer, team);
       return failure(res, err, viewer);
     }
   }
@@ -1043,7 +1196,13 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
 
     // Every other route is about one team: `team` (query) or X-Relay-Team.
     const own = query.filter((k) => k !== 'team');
-    const known = path === '/api/join' || path === '/api/me' || path === '/api/directory' || path === '/api/roster' || path === '/api/inbox/summary';
+    const known =
+      path === '/api/join' ||
+      path === '/api/me' ||
+      path === '/api/directory' ||
+      path === '/api/roster' ||
+      path === '/api/inbox/summary' ||
+      path === '/api/boundaries';
     const requestMatch = /^\/api\/requests\/([^/]+)$/.exec(path);
     if (!known && path !== '/api/activity' && !requestMatch) return sendJson(res, 404, { error: 'not_found' });
     if (requestMatch && (!REQUEST_ID_RE.test(requestMatch[1]!) || own.length > 0)) return sendJson(res, 404, { error: 'not_found' });
@@ -1100,6 +1259,7 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     } else if (path === '/api/directory') call = () => opts.backend.directory(on);
     else if (path === '/api/inbox/summary') call = () => opts.backend.inboxSummary(on);
     else if (path === '/api/roster') call = () => opts.backend.roster(on);
+    else if (path === '/api/boundaries') call = () => opts.backend.boundaries(on);
     else if (path === '/api/activity') call = () => opts.backend.activity(q, on);
     else {
       const rid = requestMatch![1]!;
@@ -1109,8 +1269,10 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     try {
       return sendJson(res, 200, await call());
     } catch (err) {
-      // A request's 404 is about the request; any other read's is about the team.
-      return failure(res, err, viewer, requestMatch ? undefined : team);
+      // A request's 404 is about the request; any other read's is about the team, except the
+      // boundaries': membership was just checked, so a 404 there is a relay without the route
+      // (before M10), shown as "not available", never as "not on this team".
+      return failure(res, err, viewer, requestMatch || path === '/api/boundaries' ? undefined : team);
     }
   }
 

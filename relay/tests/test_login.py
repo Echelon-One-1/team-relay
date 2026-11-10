@@ -691,7 +691,7 @@ class _Req:
     ],
 )  # fmt: skip
 def test_client_ip(headers, peer, on_cloud_run, expected):
-    assert client_ip(_Req(headers, peer), on_cloud_run) == expected  # type: ignore[arg-type]
+    assert client_ip(_Req(headers, peer), on_cloud_run, 1) == expected  # type: ignore[arg-type]
 
 
 # The pages ------------------------------------------------------------------------------------

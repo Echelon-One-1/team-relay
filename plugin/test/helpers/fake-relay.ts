@@ -5,6 +5,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
+import { nextSince } from '../../src/boundaries-rule.js';
+import type { Boundaries, BoundariesSince } from '../../src/boundaries-types.js';
 
 export const TOKENS: Record<string, string> = {
   'tok-alice-0123456789': 'alice',
@@ -102,6 +104,37 @@ export class FakeRelay {
     { member: 'bob', emails: ['bob@example.com'], role: 'member' },
     { member: 'carol', emails: ['carol@example.com'], role: 'member' },
   ];
+
+  // --- M10-SPEC §1: the team's boundaries (never set: version 0, null) ----------------------
+  boundaries: {
+    version: number;
+    boundaries: Record<string, unknown> | null;
+    since: BoundariesSince | null;
+    updated_at: string | null;
+    updated_by: string | null;
+  } = {
+    version: 0,
+    boundaries: null,
+    since: null,
+    updated_at: null,
+    updated_by: null,
+  };
+  /** Tests only: the team a boundaries document names (null: this team), to play a relay that answers with another team's. */
+  boundariesTeam: string | null = null;
+  /** M10-SPEC §1: the team's display name /me reports (absent: the field is left out). */
+  teamName: string | null = null;
+
+  /**
+   * Set the team's boundaries, as an owner's PUT would (the version goes up by one), with the
+   * relay's `since` (M10-SPEC §7.1): an item the previous version holds keeps its version; one
+   * added, or added back after a removal, gets the new one.
+   */
+  setBoundaries(b: Record<string, unknown> | null): void {
+    const version = this.boundaries.version + 1;
+    const prev = { boundaries: this.boundaries.boundaries as unknown as Boundaries | null, since: this.boundaries.since };
+    const since = b ? nextSince(prev, version, b as unknown as Boundaries) : null;
+    this.boundaries = { version, boundaries: b, since, updated_at: iso(), updated_by: 'alice' };
+  }
 
   /** Mint a device credential for `member` directly (as a completed login would). */
   mintCredential(member: string): string {
@@ -245,7 +278,13 @@ export class FakeRelay {
     const body = (rec.body ?? {}) as Record<string, unknown>;
 
     if (m === 'GET' && rest.length === 1 && rest[0] === 'me') {
-      return this.send(res, 200, { team: TEAM, member, teammates: MEMBERS.filter((x) => x !== member) });
+      return this.send(res, 200, { team: TEAM, ...(this.teamName ? { name: this.teamName } : {}), member, teammates: MEMBERS.filter((x) => x !== member) });
+    }
+    if (m === 'GET' && rest.length === 1 && rest[0] === 'boundaries') {
+      return this.send(res, 200, { team: this.boundariesTeam ?? TEAM, ...this.boundaries });
+    }
+    if (m === 'GET' && rest.length === 1 && rest[0] === 'drive-client') {
+      return this.send(res, 404, { error: 'drive_not_configured' });
     }
     if (m === 'PUT' && rest[0] === 'members' && rest[2] === 'manifest' && rest.length === 3) {
       if (rest[1] !== member) return this.send(res, 403, { error: 'forbidden' });

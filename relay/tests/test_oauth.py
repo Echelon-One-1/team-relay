@@ -405,7 +405,9 @@ def test_the_login_settings_go_together_and_are_required_on_cloud_run(tmp_path: 
             Settings.from_env({k: v for k, v in both.items() if k != name})
     with pytest.raises(ConfigError, match="required on Cloud Run"):
         Settings.from_env({**base, "K_SERVICE": "team-relay"})
-    assert Settings.from_env({**both, "K_SERVICE": "team-relay"}).login_enabled
+    # M10-SPEC §5: a public URL that is not a run.app one says how many hops Google adds.
+    on_cloud_run = {**both, "K_SERVICE": "team-relay", "RELAY_FORWARDED_FOR_HOPS": "1"}
+    assert Settings.from_env(on_cloud_run).login_enabled
 
 
 def test_the_app_builds_googles_provider_from_the_settings_only():

@@ -99,6 +99,51 @@ export interface Join {
 
 export type RosterRole = 'owner' | 'member'
 
+/** A shared Google Drive the team answers from (M10 §1). */
+export interface DriveBoundary {
+  /** The Google Workspace domain, lower case, e.g. example.com. */
+  domain: string
+  /** The shared drive's name, as it appears under "Shared drives". */
+  shared_drive: string
+}
+
+/** What a team's answerers may read and talk about (M10 §1). */
+export interface Boundaries {
+  /** 1-500 characters: what the team talks about; anything else is declined on its own. */
+  topic: string
+  /** At most 10 GitHub orgs; members answer from the files git tracks in their clones. */
+  github_orgs: string[]
+  /** At most 10 shared drives. */
+  drives: DriveBoundary[]
+  /** Members may add their own local folders. */
+  member_folders: boolean
+}
+
+/**
+ * M10 §7.1: in which version each item was last added (kept while it stays; the version that
+ * added it back after a removal). Members' answerers use it; the console only passes it on.
+ */
+export interface BoundariesSince {
+  /** By lower-case org name. */
+  github_orgs: Record<string, number>
+  /** One per drive of `boundaries.drives`, in that order. */
+  drives: Array<DriveBoundary & { since: number }>
+  /** While members' folders are allowed; null while not. */
+  member_folders: number | null
+}
+
+/** GET /api/boundaries (M10 §1). Never set: version 0 and boundaries null. */
+export interface TeamBoundaries {
+  team: string
+  version: number
+  boundaries: Boundaries | null
+  /** M10 §7.1; null when `boundaries` is. */
+  since?: BoundariesSince | null
+  updated_at: Iso | null
+  /** The member who last set them. */
+  updated_by: string | null
+}
+
 /**
  * One entry of GET /api/roster (M6 §2). Owners see every email; a member sees their own and
  * null for everyone else's.

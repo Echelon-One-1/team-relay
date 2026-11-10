@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { credentialFileExists, credentialsPath, normaliseRelayUrl, readCredential } from './credentials.js';
 import { MEMBER_RE, TEAM_RE, parseRelayUrl } from './relay-client-core.js';
 import { defaultRelayUrl } from './relay-default.js';
+import type { SetBoundariesBody, TeamBoundaries } from './boundaries-types.js';
 
 export { MEMBER_RE, TEAM_RE, parseRelayUrl };
 export const REQUEST_ID_RE = /^rq_[0-9a-f]{32}$/;
@@ -754,6 +755,25 @@ export class RelayClient {
       attempts: 1,
       ...opts,
     });
+  }
+
+  /** M10-SPEC §1: the team's boundaries (any member). Never set: version 0, boundaries null. */
+  boundaries(opts?: CallOptions) {
+    return this.call<TeamBoundaries>('GET', this.teamPath('boundaries'), undefined, opts);
+  }
+
+  /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
+  setBoundaries(body: SetBoundariesBody, opts?: CallOptions) {
+    return this.call<TeamBoundaries>('PUT', this.teamPath('boundaries'), body, { attempts: 1, ...opts });
+  }
+
+  /**
+   * M10-SPEC §2a: the Desktop OAuth client members use to connect Google Drive (read-only).
+   * An installed-app client is not confidential (Google's rule); it is served to members so it
+   * stays out of git. Not configured: 404 drive_not_configured.
+   */
+  driveClient(opts?: CallOptions) {
+    return this.call<{ client_id: string; client_secret: string }>('GET', this.teamPath('drive-client'), undefined, opts);
   }
 
   /** M6-SPEC §2: the team's roster (owners see every email; members only their own). */

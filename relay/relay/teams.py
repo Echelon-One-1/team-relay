@@ -114,6 +114,15 @@ def valid_team_id(team: str) -> bool:
     return TEAM_RE.fullmatch(team) is not None or CREATED_TEAM_RE.fullmatch(team) is not None
 
 
+def domain_not_allowed() -> ApiError:
+    """M10-SPEC §7.2: an email outside RELAY_ALLOWED_DOMAINS."""
+    return ApiError(
+        403,
+        "domain_not_allowed",
+        "This relay accepts Google accounts of its own organisation's domains only.",
+    )
+
+
 def suggest_member_id(email: str) -> str:
     """A member id from an email's local part: lower case, anything outside ``[a-z0-9_]``
     becomes ``_``, starting with a letter, 2 to 32 characters."""
@@ -331,7 +340,10 @@ class Teams:
     ) -> dict[str, Any]:
         """Accept or decline the invitation ``email`` holds in ``team`` (M9-SPEC §7.2), in
         one roster transaction. No such invitation, or no such team: ``404``. Counted against
-        the account's roster changes per hour."""
+        the account's roster changes per hour. Accepting with an email outside
+        RELAY_ALLOWED_DOMAINS: ``403 domain_not_allowed`` (M10-SPEC §7.2)."""
+        if accept and not self._config.email_allowed(email):
+            raise domain_not_allowed()
         if await self.active(team) is None:
             raise not_found()
         now = self._now()
@@ -484,6 +496,8 @@ class Teams:
         delegate's own cap counts too. Raises :class:`ApiError`."""
         if self._config.is_delegate_email(email):
             raise ApiError(422, "invalid_body", "A delegate is not a person and owns no team.")
+        if not self._config.email_allowed(email):  # M10-SPEC §7.2
+            raise domain_not_allowed()
         if self._config.is_file_team_name(body.name):
             raise ApiError(
                 409,

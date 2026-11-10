@@ -35,24 +35,24 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * The folders the member's answering session reads without asking (M4 §3), by name: the
- * plugin publishes basenames only. Anything else it reads, the member allows at the time.
+ * What the member's answering session can answer from (M4 §3, M10 §2), by name: the plugin
+ * publishes names only (repositories, shared drives, folders), never paths.
  */
 function Shares({ agent }: { agent: DirectoryMember }) {
   const names = (agent.manifest?.shares ?? []).map((s) => s.name)
-  const text = names.length === 0 ? 'Shares nothing' : `Shares: ${names.join(', ')}`
+  const text = names.length === 0 ? 'Can answer from nothing shared yet' : `Can answer from: ${names.join(', ')}`
   return (
     <div
       className="flex min-w-0 basis-full items-center gap-1.5 pl-[38px] text-[11.5px] min-[420px]:ml-auto min-[420px]:max-w-[55%] min-[420px]:basis-auto min-[420px]:pl-0"
       data-shares={names.join(',')}
-      title={`${text}. Folders this member's answering session reads without asking; anything else, the member allows when asked.`}
+      title={`${text}. What this member's answering session reads to answer: repositories, shared drives and folders, by name.`}
     >
       <FolderOpen aria-hidden className="size-3.5 shrink-0 text-faint" />
       {names.length === 0 ? (
-        <span className="truncate text-subtle">Shares nothing</span>
+        <span className="truncate text-subtle">Can answer from nothing shared yet</span>
       ) : (
         <span className="min-w-0 truncate">
-          <span className="text-subtle">Shares: </span>
+          <span className="text-subtle">Can answer from: </span>
           <span className="font-mono text-[11px]">{names.join(', ')}</span>
         </span>
       )}

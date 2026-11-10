@@ -20,11 +20,13 @@ import {
   type CreateField,
 } from '@/lib/teams'
 import { cn } from '@/lib/utils'
+import { BoundariesSection } from './boundaries'
 import { Panel, RelayMark } from './primitives'
 
 // M9 §5 and §7: the viewer's teams. A switcher in the header (the teams, the open invitations,
-// Create team, Admin for relay admins), the Create team dialog, the owner's Team settings with
-// Delete team, and the page for a viewer who is on no team.
+// Create team, Admin for relay admins), the Create team dialog, Team settings (M10 §1: the
+// team's boundaries, which owners edit and members read; an owner's Delete team), and the page
+// for a viewer who is on no team.
 
 const inputClass =
   'h-8 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-[12.5px] text-foreground shadow-none outline-none transition-colors placeholder:text-faint focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 aria-invalid:border-bad'
@@ -303,7 +305,8 @@ export function CreateTeamDialog({ open, onOpenChange }: { open: boolean; onOpen
         onSuccess: (out) => {
           const created = (out as { team?: unknown } | null)?.team
           onOpenChange(false)
-          nav.selectTeam(typeof created === 'string' ? created : sentId)
+          // M10 §1: straight on to the new team's boundaries.
+          nav.selectTeam(typeof created === 'string' ? created : sentId, 'boundaries')
         },
         onError: (err: ChangeError) => setError(createRefusal(err, max)),
       },
@@ -424,9 +427,35 @@ export function CreateTeamDialog({ open, onOpenChange }: { open: boolean; onOpen
 }
 
 // ---------------------------------------------------------------------------------------
-// Team settings (owners, M9 §7.7)
+// Team settings: the boundaries (M10 §1) for everyone on the team; Delete team (M9 §7.7) for owners
 
-export function TeamSettings({ entry }: { entry: TeamEntry }) {
+export function TeamSettings({ entry, owner, roleKnown = true }: { entry: TeamEntry; owner: boolean; roleKnown?: boolean }) {
+  return (
+    <Panel id="team-settings" title="Team settings">
+      <BoundariesSection owner={owner} roleKnown={roleKnown} />
+      <div
+        className={cn(
+          'grid grid-cols-1 border-t border-hairline',
+          owner && 'lg:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)] lg:divide-x lg:divide-hairline',
+        )}
+      >
+        <dl className="grid grid-cols-[auto_1fr] content-start gap-x-6 gap-y-2 px-4 py-3.5 text-[12.5px]">
+          <dt className="text-subtle">Name</dt>
+          <dd className="min-w-0 truncate font-medium">{entry.name}</dd>
+          <dt className="text-subtle">Team id</dt>
+          <dd className="font-mono text-[12px]">{entry.team}</dd>
+          <dt className="text-subtle">You</dt>
+          <dd>
+            <span className="font-mono text-[12px]">{entry.member}</span>, {owner ? 'an owner' : 'a member'}
+          </dd>
+        </dl>
+        {owner ? <DeleteTeam entry={entry} /> : null}
+      </div>
+    </Panel>
+  )
+}
+
+function DeleteTeam({ entry }: { entry: TeamEntry }) {
   const change = useTeamChange()
   const [typed, setTyped] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -440,54 +469,40 @@ export function TeamSettings({ entry }: { entry: TeamEntry }) {
     change.mutate({ kind: 'delete', team: entry.team, confirm: typed }, { onError: (err: ChangeError) => setError(deleteRefusal(err)) })
   }
   return (
-    <Panel id="team-settings" title="Team settings">
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)] lg:divide-x lg:divide-hairline">
-        <dl className="grid grid-cols-[auto_1fr] content-start gap-x-6 gap-y-2 px-4 py-3.5 text-[12.5px]">
-          <dt className="text-subtle">Name</dt>
-          <dd className="min-w-0 truncate font-medium">{entry.name}</dd>
-          <dt className="text-subtle">Team id</dt>
-          <dd className="font-mono text-[12px]">{entry.team}</dd>
-          <dt className="text-subtle">You</dt>
-          <dd>
-            <span className="font-mono text-[12px]">{entry.member}</span>, an owner
-          </dd>
-        </dl>
-        <form onSubmit={submit} className="flex flex-col gap-2.5 border-t border-hairline px-4 py-3.5 lg:border-t-0" aria-label="Delete this team" data-delete-team>
-          <div className="flex flex-col gap-0.5">
-            <h3 className="text-[12.5px] font-semibold text-bad">Delete this team</h3>
-            <p className="text-[12px] leading-snug text-subtle">
-              Everyone loses access at once, signed-in devices are signed out, and its questions and answers are removed.
-              The id <span className="font-mono text-foreground">{entry.team}</span> stays reserved for 31 days. This
-              cannot be undone.
-            </p>
-          </div>
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
-            <label htmlFor={confirmId} className="flex min-w-0 flex-1 flex-col gap-1">
-              <span className="text-[11.5px] text-subtle">
-                Type <span className="font-mono text-foreground">{entry.team}</span> to confirm
-              </span>
-              <input
-                id={confirmId}
-                type="text"
-                autoComplete="off"
-                spellCheck={false}
-                value={typed}
-                onChange={(e) => {
-                  setTyped(e.target.value.trim())
-                  setError(null)
-                }}
-                aria-describedby={error ? errorId : undefined}
-                className={cn(inputClass, 'font-mono text-[12px]')}
-              />
-            </label>
-            <Button type="submit" variant="destructive" disabled={!matches || change.isPending}>
-              {change.isPending ? 'Deleting…' : 'Delete team'}
-            </Button>
-          </div>
-          <InlineError id={errorId}>{error}</InlineError>
-        </form>
+    <form onSubmit={submit} className="flex flex-col gap-2.5 border-t border-hairline px-4 py-3.5 lg:border-t-0" aria-label="Delete this team" data-delete-team>
+      <div className="flex flex-col gap-0.5">
+        <h3 className="text-[12.5px] font-semibold text-bad">Delete this team</h3>
+        <p className="text-[12px] leading-snug text-subtle">
+          Everyone loses access at once, signed-in devices are signed out, and its questions and answers are removed.
+          The id <span className="font-mono text-foreground">{entry.team}</span> stays reserved for 31 days. This
+          cannot be undone.
+        </p>
       </div>
-    </Panel>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <label htmlFor={confirmId} className="flex min-w-0 flex-1 flex-col gap-1">
+          <span className="text-[11.5px] text-subtle">
+            Type <span className="font-mono text-foreground">{entry.team}</span> to confirm
+          </span>
+          <input
+            id={confirmId}
+            type="text"
+            autoComplete="off"
+            spellCheck={false}
+            value={typed}
+            onChange={(e) => {
+              setTyped(e.target.value.trim())
+              setError(null)
+            }}
+            aria-describedby={error ? errorId : undefined}
+            className={cn(inputClass, 'font-mono text-[12px]')}
+          />
+        </label>
+        <Button type="submit" variant="destructive" disabled={!matches || change.isPending}>
+          {change.isPending ? 'Deleting…' : 'Delete team'}
+        </Button>
+      </div>
+      <InlineError id={errorId}>{error}</InlineError>
+    </form>
   )
 }
 

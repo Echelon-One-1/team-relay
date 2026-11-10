@@ -32418,6 +32418,22 @@ var RelayClient = class _RelayClient {
       ...opts
     });
   }
+  /** M10-SPEC §1: the team's boundaries (any member). Never set: version 0, boundaries null. */
+  boundaries(opts) {
+    return this.call("GET", this.teamPath("boundaries"), void 0, opts);
+  }
+  /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
+  setBoundaries(body, opts) {
+    return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
+  }
+  /**
+   * M10-SPEC §2a: the Desktop OAuth client members use to connect Google Drive (read-only).
+   * An installed-app client is not confidential (Google's rule); it is served to members so it
+   * stays out of git. Not configured: 404 drive_not_configured.
+   */
+  driveClient(opts) {
+    return this.call("GET", this.teamPath("drive-client"), void 0, opts);
+  }
   /** M6-SPEC §2: the team's roster (owners see every email; members only their own). */
   roster(opts) {
     return this.call("GET", this.teamPath("roster"), void 0, opts);

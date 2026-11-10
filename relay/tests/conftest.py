@@ -86,14 +86,15 @@ def principal(token: str) -> str:
 
 
 # Google ID tokens as the Google verifier would read them (a gcloud user's): token ->
-# (principal, sub). Tests register throwaway tokens of their own (unique per test).
-ID_TOKENS: dict[str, tuple[str, str]] = {}
+# (principal, sub, hd). Tests register throwaway tokens of their own (unique per test).
+ID_TOKENS: dict[str, tuple[str, str, str | None]] = {}
 
 
-def id_token(email: str, sub: str) -> str:
-    """A throwaway bearer token the test verifier reads as ``google:<email>`` with ``sub``."""
+def id_token(email: str, sub: str, hd: str | None = None) -> str:
+    """A throwaway bearer token the test verifier reads as ``google:<email>`` with ``sub``
+    and the ``hd`` claim ``hd`` (None: a consumer account's, which has none)."""
     token = "id-token-" + uuid.uuid4().hex
-    ID_TOKENS[token] = (f"google:{email}", sub)
+    ID_TOKENS[token] = (f"google:{email}", sub, hd)
     return token
 
 
@@ -113,8 +114,8 @@ class DelegateVerifier:
         if not token:
             raise Unauthenticated("empty_token")
         if token in ID_TOKENS:
-            principal, sub = ID_TOKENS[token]
-            return Verified(principal, sub)
+            principal, sub, hd = ID_TOKENS[token]
+            return Verified(principal, sub, hd)
         if token in self._delegates:
             return Verified(self._delegates[token], "delegate-sub-" + token[-4:])
         return await self._static.verify(token)
@@ -451,11 +452,13 @@ async def open_api(
     clock: FakeClock,
     *,
     configure: Callable[[dict[str, Any]], None] | None = None,
+    allowed_domains: frozenset[str] = frozenset(),
     **limits: int,
 ) -> AsyncIterator[Api]:
     """An :class:`Api` over a fresh ``kind`` store ("memory" or "firestore") for a unique
     team, with the teams' delegates configured, ``limits`` applied, and ``configure`` run on
-    the file's data last (it may rename the second team, ``other``, to isolate it)."""
+    the file's data last (it may rename the second team, ``other``, to isolate it).
+    ``allowed_domains`` is RELAY_ALLOWED_DOMAINS (M10-SPEC §7.2)."""
     if kind == "memory":
         store: Store = MemoryStore()
     else:
@@ -471,7 +474,7 @@ async def open_api(
     if configure is not None:
         configure(data)
     settings = Settings(
-        team_config=parse_team_config(data),
+        team_config=parse_team_config(data, allowed_domains),
         manifest_schema=load_schema(SCHEMA_PATH),
         auth_mode="static",
         public_url=PUBLIC_URL,

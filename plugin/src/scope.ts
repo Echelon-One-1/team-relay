@@ -42,8 +42,24 @@ export function shareName(path: string): string {
 }
 
 export function scopeFolder(cwd: string, env: NodeJS.ProcessEnv): Scope {
+  const { path, reason } = folderSafety(cwd, env);
+  const refuse = (why: string): Scope => ({ path, qualifies: false, reason: why, share: null });
+  if (reason) return refuse(reason);
+  const homeReal = realOr(env.HOME?.trim() || homedir());
+  if (!inGitWorkTree(path, homeReal)) return refuse('it is not inside a git work tree (no .git in it or in a folder above it, below your home directory)');
+  return { path, qualifies: true, reason: null, share: shareName(path) };
+}
+
+/**
+ * The folder rules every automatically readable folder follows (M8-SPEC §7 item 3, M10-SPEC §2),
+ * except the git work tree rule: the folder resolved (symlinks), and why it must not be read
+ * automatically (null: it may be). Not /, $HOME or above it, not directly in $HOME, not under
+ * or containing ~/Library or any ~/.* entry, not inside a configuration directory or the
+ * credential deny list.
+ */
+export function folderSafety(cwd: string, env: NodeJS.ProcessEnv): { path: string; reason: string | null } {
   const path = realOr(cwd);
-  const refuse = (reason: string): Scope => ({ path, qualifies: false, reason, share: null });
+  const refuse = (reason: string) => ({ path, reason });
   if (!isAbsolute(path)) return refuse('it is not an absolute path');
   try {
     if (!statSync(path).isDirectory()) return refuse('it is not a directory');
@@ -74,8 +90,7 @@ export function scopeFolder(cwd: string, env: NodeJS.ProcessEnv): Scope {
     if (within(path, e.path) || within(path, e.real)) return refuse(`it is inside ~/${e.name}`);
     if (within(e.real, path)) return refuse(`it contains ~/${e.name}`);
   }
-  if (!inGitWorkTree(path, homeReal)) return refuse('it is not inside a git work tree (no .git in it or in a folder above it, below your home directory)');
-  return { path, qualifies: true, reason: null, share: shareName(path) };
+  return { path, reason: null };
 }
 
 /** ~/Library and every ~/.* entry, with where each resolves to. */

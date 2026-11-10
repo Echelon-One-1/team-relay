@@ -46,6 +46,7 @@ import { checkIntervalMs, readSummary, waitingSentence, watchInbox, whoamiFields
 import { invitationFields } from './invitations.js';
 import { ActiveRequests, AnswerDeadlines, deadlineOf } from './active.js';
 import { AnswerHost, type HostConnection } from './answer-host.js';
+import { FOLDERS_TOOL, foldersTool } from './folders-tool.js';
 import { heldBy, lockPath, tryAcquire, type Acquired } from './answering-lock.js';
 import type { Elicit } from './approvals-review.js';
 import {
@@ -57,6 +58,7 @@ import {
   unknownKey,
   type ToolResult,
 } from './tool-util.js';
+import { validBoundaries } from './boundary-set.js';
 
 type Role = 'asker' | 'answerer';
 const log = makeLogger('channel');
@@ -518,6 +520,7 @@ const SESSION_TOOLS = [
       'Takes no arguments. The user decides each in the dialog; you only get the counts back.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
+  FOLDERS_TOOL,
 ] as const;
 
 const STATUS_NOTE =
@@ -1125,6 +1128,25 @@ async function main(): Promise<void> {
             void extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: ++n, message } }).catch(() => {});
           };
           return await connection.loginWait(args, progress);
+        }
+        if (name === 'folders') {
+          // M10-SPEC §2: every change is the member's, in a dialog (folders-tool.ts).
+          return await foldersTool(args, {
+            env,
+            elicit: elicitFor(server),
+            team: () => liveNow()?.client.team ?? null,
+            boundaries: async () => {
+              const live = liveNow();
+              if (!live) return null;
+              try {
+                // Checked like every other reader of the boundaries (session-start, the host).
+                const tb = await live.client.boundaries({ attempts: 1, timeoutMs: 5000 });
+                return validBoundaries(tb) ? tb : null;
+              } catch {
+                return null;
+              }
+            },
+          });
         }
         if (name === 'review_approvals') {
           if (Object.keys(args).length > 0) return toolError('review_approvals takes no arguments');

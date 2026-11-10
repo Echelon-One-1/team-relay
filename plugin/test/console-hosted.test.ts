@@ -722,6 +722,20 @@ describe('dist/console-server.js with CONSOLE_MODE=hosted', () => {
     }
   });
 
+  it('behind the load balancer (a public host not on run.app) starts with CONSOLE_PROXY_HOPS=2', async () => {
+    const port = await freePort();
+    const p = start({ ...GOOD, CONSOLE_PUBLIC_HOST: 'relay.example.com', CONSOLE_PROXY_HOPS: '2', PORT: String(port) });
+    try {
+      const deadline = Date.now() + 10_000;
+      while (!p.err().includes('hosted: serving') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+      expect(p.err()).toContain('for relay.example.com on 0.0.0.0:');
+      expect(p.err()).toContain('behind IAP on the load balancer');
+    } finally {
+      p.child.kill('SIGTERM');
+      expect(await p.exited).toBe(0);
+    }
+  });
+
   it('refuses a missing or wrong configuration, and any argument', async () => {
     const cases: Array<[Record<string, string>, RegExp]> = [
       [{ ...GOOD, CONSOLE_PUBLIC_HOST: '' }, /CONSOLE_PUBLIC_HOST/],
@@ -738,6 +752,12 @@ describe('dist/console-server.js with CONSOLE_MODE=hosted', () => {
       [{ ...GOOD, CONSOLE_IP_HASH_SALT: 'x'.repeat(31) }, /CONSOLE_IP_HASH_SALT/],
       [{ ...GOOD, JOIN_REPO_URL: 'http://github.com/example/multiagent' }, /JOIN_REPO_URL/],
       [{ ...GOOD, JOIN_REPO_URL: 'git@github.com:example/multiagent.git' }, /JOIN_REPO_URL/],
+      // M10-SPEC §7.7: a public host that is not run.app is behind the load balancer, so the
+      // hop count must be said; unset, every viewer would share the balancer's address.
+      [{ ...GOOD, CONSOLE_PUBLIC_HOST: 'relay.example.com' }, /CONSOLE_PROXY_HOPS/],
+      [{ ...GOOD, CONSOLE_PUBLIC_HOST: 'relay.example.com', CONSOLE_PROXY_HOPS: ' ' }, /CONSOLE_PROXY_HOPS/],
+      [{ ...GOOD, CONSOLE_PUBLIC_HOST: 'evil-run.app.example.com' }, /CONSOLE_PROXY_HOPS/],
+      [{ ...GOOD, CONSOLE_PROXY_HOPS: '3' }, /CONSOLE_PROXY_HOPS/],
     ];
     for (const [env, pattern] of cases) {
       const p = start(env);

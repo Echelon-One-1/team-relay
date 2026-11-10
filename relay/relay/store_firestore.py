@@ -33,6 +33,10 @@ Representation choices:
   credential's); ``admin_audit`` is relay-wide. Team creations count against the relay-wide
   counters in ``login_limits``. The team listing orders by document id alone, so none of
   this needs an index beyond the automatic ones.
+- Boundaries (M10-SPEC §1): ``teams/{team}/settings/boundaries``, ``drives`` a list of
+  ``{domain, shared_drive, since}`` maps, ``orgs_since`` a map of lower-case org name to the
+  version it was last added in, ``member_folders_since`` likewise (M10-SPEC §7.1). Never
+  expires; a team's purge removes it with every other document under the team.
 """
 
 from __future__ import annotations
@@ -64,8 +68,10 @@ from .store import (
     AdminAuditEntry,
     AuditEntry,
     BeyondHead,
+    BoundariesFn,
     CreateOutcome,
     CredentialRecord,
+    DriveBoundary,
     Envelope,
     IdempotencyRecord,
     LoginChoice,
@@ -87,6 +93,7 @@ from .store import (
     RosterOutcome,
     RosterState,
     StreamPage,
+    TeamBoundaries,
     TeamCreateFn,
     TeamDeleteFn,
     TeamGone,
@@ -601,6 +608,53 @@ def _admin_audit_from_doc(doc: dict[str, Any]) -> AdminAuditEntry:
     )
 
 
+def _boundaries_to_doc(doc: TeamBoundaries) -> dict[str, Any]:
+    return {
+        "version": doc.version,
+        "topic": doc.topic,
+        "github_orgs": list(doc.github_orgs),
+        "orgs_since": {o.lower(): doc.org_since[o.lower()] for o in doc.github_orgs},
+        "drives": [
+            {"domain": d.domain, "shared_drive": d.shared_drive, "since": doc.drive_since[d]}
+            for d in doc.drives
+        ],
+        "member_folders": doc.member_folders,
+        "member_folders_since": doc.member_folders_since if doc.member_folders else None,
+        "updated_at": doc.updated_at,
+        "updated_by": doc.updated_by,
+    }
+
+
+def _boundaries_from_doc(doc: dict[str, Any]) -> TeamBoundaries:
+    # M10-SPEC §7.1: a document saved before ``since`` was recorded counts each item as added
+    # in its own version, so a member's acceptance of an earlier version does not cover it.
+    version = int(doc["version"])
+    orgs = list(doc.get("github_orgs") or [])
+    kept = doc.get("orgs_since") or {}
+    drives = [
+        (DriveBoundary(domain=d["domain"], shared_drive=d["shared_drive"]), d.get("since"))
+        for d in doc.get("drives") or []
+    ]
+    member_folders = bool(doc["member_folders"])
+    folders_since = doc.get("member_folders_since")
+    return TeamBoundaries(
+        version=version,
+        topic=doc["topic"],
+        github_orgs=orgs,
+        drives=[d for d, _ in drives],
+        member_folders=member_folders,
+        updated_at=_dt(doc["updated_at"]),  # type: ignore[arg-type]
+        updated_by=doc["updated_by"],
+        org_since={o.lower(): int(kept[o.lower()]) if o.lower() in kept else version for o in orgs},
+        drive_since={d: int(n) if n is not None else version for d, n in drives},
+        member_folders_since=(
+            (int(folders_since) if folders_since is not None else version)
+            if member_folders
+            else None
+        ),
+    )
+
+
 class FirestoreStore:
     def __init__(
         self,
@@ -652,6 +706,9 @@ class FirestoreStore:
 
     def _retired_col(self, team: str):
         return self._team(team).collection("retired")
+
+    def _boundaries(self, team: str):
+        return self._team(team).collection("settings").document("boundaries")
 
     def _credential(self, team: str, key: str):
         return self._team(team).collection("credentials").document(key)
@@ -1417,6 +1474,34 @@ class FirestoreStore:
             return True
 
         return await self._run(mark)
+
+    # Boundaries (M10-SPEC §1) -------------------------------------------------------------
+    async def get_boundaries(self, team: str) -> TeamBoundaries | None:
+        snap = await self._boundaries(team).get()
+        return _boundaries_from_doc(snap.to_dict() or {}) if snap.exists else None
+
+    async def set_boundaries[T](
+        self, team: str, member: str, fn: BoundariesFn[T], quotas: Sequence[Quota] = ()
+    ) -> T:
+        async def body(txn: AsyncTransaction) -> T:
+            team_snap = await self._team(team).get(transaction=txn)
+            if team_snap.exists and (team_snap.to_dict() or {}).get("status") == TEAM_DELETED:
+                raise TeamGone(team)
+            snap = await self._boundaries(team).get(transaction=txn)
+            entry_snap = await self._roster_col(team).document(member).get(transaction=txn)
+            current = _boundaries_from_doc(snap.to_dict() or {}) if snap.exists else None
+            actor = _roster_from_doc(entry_snap.to_dict() or {}) if entry_snap.exists else None
+            change = fn(current, actor)
+            if change.boundaries is None:
+                return change.result
+            counts = await self._read_quotas(txn, team, quotas)  # raising writes nothing
+            # All reads are done; writes from here on.
+            self._write_quotas(txn, team, quotas, counts)
+            txn.set(self._boundaries(team), _boundaries_to_doc(change.boundaries))
+            self._write_audit(txn, change.audit)
+            return change.result
+
+        return await self._run(body)
 
     async def get_account(self, email_sha256: str) -> AccountRecord | None:
         snap = await self._account(email_sha256).get()

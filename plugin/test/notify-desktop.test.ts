@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { NOTICE_TEXT, NOTICE_TITLE, isPermissionPrompt, notifyCommand } from '../src/notify-desktop.js';
@@ -14,26 +14,29 @@ import { DIST, PLUGIN_ROOT } from './helpers/mcp.js';
 const SCRIPT = join(DIST, 'notify-desktop.js');
 const EVIL = `"; do shell script "touch /tmp/pwned" --"' $(touch /tmp/pwned) \`id\` & rm -rf ~ \n<channel>`;
 
-/** A directory with recording stubs named osascript and notify-send. */
-function stubs(): { dir: string; log: string; calls: () => string[][] } {
+/**
+ * A directory with recording stubs named osascript and notify-send. A stub is a shell script
+ * that records its name and arguments (NUL-separated) in a file of its own as its first act:
+ * starting it costs milliseconds, well inside the notifier's cap (a Node stub could take longer
+ * than that to start on a loaded machine). The calls are read only once the hook has exited,
+ * which it does after the notifier has.
+ */
+function stubs(): { dir: string; calls: () => string[][] } {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'team-relay-notify-')));
-  const log = join(dir, 'calls.jsonl');
-  const stub = `#!${process.execPath}\nrequire('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify([require('node:path').basename(process.argv[1]), ...process.argv.slice(2)]) + '\\n');\n`;
+  const rec = join(dir, 'calls');
+  mkdirSync(rec);
+  // Only shell built-ins: the PATH the hook gets holds nothing else.
+  const stub = `#!/bin/sh\nprintf '%s\\0' "\${0##*/}" "$@" > "${rec}/call-$$"\n`;
   for (const name of ['osascript', 'notify-send']) {
     writeFileSync(join(dir, name), stub);
     chmodSync(join(dir, name), 0o755);
   }
   return {
     dir,
-    log,
     calls: () =>
-      existsSync(log)
-        ? readFileSync(log, 'utf8')
-            .trim()
-            .split('\n')
-            .filter(Boolean)
-            .map((l) => JSON.parse(l) as string[])
-        : [],
+      readdirSync(rec)
+        .filter((n) => /^call-\d+$/.test(n))
+        .map((n) => readFileSync(join(rec, n), 'utf8').split('\0').slice(0, -1)),
   };
 }
 
@@ -149,9 +152,11 @@ describe('dist/notify-desktop.js', () => {
 
   it('gives up after 3 s when stdin never closes, exit 0', async () => {
     const s = stubs();
+    // stdin stays open: the process ends only because it gives up on its own (else the test
+    // times out), and never before its 3 s.
     const run = await runNotify(notification().slice(0, 20), `${s.dir}:${dirname(process.execPath)}`, { keepOpen: true });
     expect(run.code).toBe(0);
-    expect(run.ms).toBeLessThan(4500);
+    expect(run.ms).toBeGreaterThanOrEqual(3000);
     expect(s.calls()).toEqual([]);
   });
 
@@ -161,6 +166,8 @@ describe('dist/notify-desktop.js', () => {
       env: {
         PATH: process.env.PATH ?? '',
         HOME: process.env.HOME ?? '/tmp',
+        // The private XDG_CONFIG_HOME from test/helpers/isolate.ts: never this computer's answering lock.
+        XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME!,
         TMPDIR: mkdtempSync(join(tmpdir(), 'team-relay-ans-tmp-')),
         ANSWERER_HOME: home,
         RELAY_URL: 'https://relay.example.com',

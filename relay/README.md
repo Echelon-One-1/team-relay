@@ -67,6 +67,9 @@ points them at another copy (tests only).
 | `RELAY_TEAM_CONFIG` | required | path to the team YAML (`../config/team.example.yaml` shape, M6 below); on Cloud Run the mounted secret `/secrets/team/team.yaml` |
 | `RELAY_PUBLIC_URL` | unset; required on Cloud Run | the relay's own origin, e.g. `https://team-relay-….run.app` (no path, query or fragment; a trailing slash is dropped). Google's redirect URI is `{RELAY_PUBLIC_URL}/v1/login/callback`. `https` always, except `http://127.0.0.1` or `http://localhost` off Cloud Run |
 | `RELAY_OAUTH_CLIENT_FILE` | unset; required on Cloud Run | path to the relay's OAuth client, a JSON object with string `client_id` and `client_secret` (other keys ignored); on Cloud Run the mounted secret `team-relay-oauth-client`. Goes with `RELAY_PUBLIC_URL`: both or neither. Without them the login pages answer `404` |
+| `RELAY_DRIVE_CLIENT_FILE` | unset | M10-SPEC §2a: path to the Desktop OAuth client members connect Google Drive with: Google's downloaded JSON (`{"installed": {client_id, client_secret, …}}`) or a flat `{client_id, client_secret}`; on Cloud Run the optional mounted secret `team-relay-drive-client` (`/secrets/drive-oauth/client.json`). No setting or no file: `GET /drive-client` is `404 drive_not_configured`. A `"web"` client, an unreadable file, or the login's own client id is a startup error |
+| `RELAY_FORWARDED_FOR_HOPS` | `1`; required on Cloud Run when `RELAY_PUBLIC_URL` is not a `run.app` address | M10-SPEC §5: how many right-most `X-Forwarded-For` entries Google appends in front of the relay; the per-IP limits count the left-most of them. `1` when Cloud Run is reached directly (its front end's entry); `2` behind the external Application Load Balancer (the client's address, then the forwarding rule's). `1`, `2` or `3`. Check the `x_forwarded_for_hops` field of `login_started` on the live service |
+| `RELAY_ALLOWED_DOMAINS` | unset (any domain) | M10-SPEC §7.2: comma-separated lower-case domains, e.g. `example.com`; set it for any deployment meant for one organisation. When set, every Google identity needs a verified email whose domain is exactly one of them (a subdomain is not its parent) and an `hd` claim equal to that domain; see "Allowed domains" below. A malformed or empty entry, or a seed member or admin in the team file outside them, is a startup error |
 | `RELAY_AUTH_MODE` | `google` | `google` or `static`; `static` is refused when `K_SERVICE` is set |
 | `RELAY_AUDIENCE` | required for `google` | the accepted ID token audiences, comma-separated (on Cloud Run: gcloud's OAuth client id and the service URL); whitespace around an entry is dropped, an empty entry is a startup error |
 | `RELAY_MANIFEST_SCHEMA` | `../schema/manifest.schema.json` from this directory | the image sets `/app/schema/manifest.schema.json` |
@@ -604,6 +607,84 @@ names. A per-team
 delegate keeps working as before. A team in the file may carry an optional `name` (1..60
 characters, as above; its id otherwise).
 
+## Team boundaries (M10-SPEC §1, 10 Nov 2026)
+
+What a team's members answer about and from; the plugin's answerer and the console read them.
+Stored at `teams/{team}/settings/boundaries` (`version`, `topic`, `github_orgs`, `drives`,
+`member_folders`, `updated_at`, `updated_by`), never expiring, purged with the team. The JSON
+matches `plugin/src/boundaries-types.ts`.
+
+- `GET /v1/teams/{team}/boundaries` (any active member; a delegate reading for one) → `200
+  {team, version, boundaries | null, since | null, updated_at | null, updated_by | null}`;
+  never set: `version: 0`, `boundaries: null`, `since: null`. `since` (M10-SPEC §7.1) is
+  `{"github_orgs": {"<org, lower case>": n}, "drives": [{domain, shared_drive, since: n}],
+  "member_folders": n | null}`: the version in which each item was last added, kept while
+  it stays and set anew when it is added back after a removal (computed in the writing
+  transaction; a document stored before it counts every item from its own version). Counted per member and minute (`reads_per_minute`, its own
+  counter); over it `429 rate_limited`.
+- `PUT /v1/teams/{team}/boundaries` (an active owner; a `manage-roster` delegate for an
+  owner) with `{"version": <the one read>, "boundaries": {topic, github_orgs, drives,
+  member_folders}}` → `200`, the same shape with `version + 1`. A non-owner member is `403`
+  before the body is looked at; a non-member, an invitation or a deleted team `404` (`401`
+  for an account on no team), as the roster routes answer. The body is strict (`400
+  invalid_body`, never echoing the value): unknown fields; `version` an integer 0..2^31-1
+  (not a bool); `topic` with no control character other than newline and tab and no format,
+  surrogate, private-use, unassigned or separator character, then trimmed to 1-500
+  characters; at most 10 `github_orgs` (`^[A-Za-z0-9][A-Za-z0-9-]{0,38}$`, de-duplicated
+  case-insensitively); at most 10 `drives` (`domain` a lower-case DNS name of at most 253
+  characters, at least two labels, not an IP, no trailing dot, and with
+  `RELAY_ALLOWED_DOMAINS` set one of those, else `400 domain_not_allowed`; `shared_drive`
+  1-100 characters, no `/`, no control or format characters, not `.` or `..`, no leading or
+  trailing space; de-duplicated); `member_folders` a bool. The caps count the lists as sent.
+  `../schema/boundaries-vectors.json` holds the shared accepted and refused examples (M10-SPEC
+  §7.5); `tests/test_boundaries.py` loads it. The version and the owner rule are checked again in the writing transaction:
+  a stale version is `409 version_conflict`. The body cap is the usual 256 KiB. Owner writes
+  are counted per owner and hour (`roster_mutations_per_hour`, its own counter). Audited as
+  `boundaries_set` with `version N` (and `; via delegate`) in the detail, never the text;
+  refusals are audited like any other mutation's.
+
+## Google Drive's client (M10-SPEC §2a)
+
+`GET /v1/teams/{team}/drive-client` (any active member, by a device credential or a Google
+identity; not a delegate) → `{client_id, client_secret}` of the Desktop OAuth client from
+`RELAY_DRIVE_CLIENT_FILE`, with `Cache-Control: no-store`; not set up: `404
+drive_not_configured`. An installed app's secret is not confidential (Google's own words), but
+it is still only handed to members and never logged.
+
+## One address with the console (M10-SPEC §5)
+
+At one public address (e.g. `https://team.example.com`) a load balancer sends `/v1/*` and
+`/healthz` to the relay and everything else to the console behind IAP. Nothing in the relay assumes a `run.app`
+address: `RELAY_PUBLIC_URL` is the origin the login's redirect URI and the chooser's `Origin`
+check use, and `RELAY_AUDIENCE` lists every audience an ID token may carry (add the new
+address there if a caller mints tokens for it). The relay's only cookie, `trl`, is
+`Path=/v1/login` with no `Domain`, so it never meets IAP's cookies; a test checks every
+`Set-Cookie` the relay sends over the login flow and every `set_cookie` in the source. Behind
+the balancer set `RELAY_FORWARDED_FOR_HOPS=2`, or every client shares the balancer's address
+in the per-IP limits (on Cloud Run with a non-`run.app` public URL the relay refuses to start
+without it). Every per-address limit uses it: the login pages and `POST /v1/teams`.
+
+## Allowed domains (M10-SPEC §7.2)
+
+With `RELAY_ALLOWED_DOMAINS` set (e.g. `example.com`), the relay accepts only its own
+organisation's Google accounts. Every place an identity or an email enters is checked:
+
+| Where | Check | Refusal |
+|---|---|---|
+| A Google ID token (`Authorization: Bearer`, any `RELAY_AUDIENCE`: the service URL and gcloud's client), on team and account routes | the verifier requires `email_verified` (as always); the email's domain is in the list and the token's `hd` is that domain | `403 domain_not_allowed` (`401` for an unverified email, as before) |
+| The login callback (`/v1/login/callback`) | the same, on Google's ID token | a `403` page |
+| A delegate's `X-Relay-On-Behalf-Of` | the email's domain is in the list | `403 domain_not_allowed` |
+| A device credential (`trc_…`) | the email it was minted through is in the list (no recorded email: every email of the entry) | `403 domain_not_allowed` |
+| Roster `POST` (an invitation) and `PATCH` `add_email` | the email's domain | `403 domain_not_allowed` (`remove_email` is never refused) |
+| Creating a team (`POST /v1/teams`, the login's create page) and accepting an invitation | the creator's or invitee's email | `403 domain_not_allowed` |
+| The team file's seed members and `admins` | every `google:` principal | a startup error naming the member (or `admins.N`), never the email |
+| `PUT /boundaries` | every `drives[].domain` is in the list | `400 domain_not_allowed` |
+
+A delegate's own principal (the console's service account, `*.iam.gserviceaccount.com`) is
+not a person and is exempt; `token:sha256:` development principals have no email. Unset, all
+of this is as before. Turning it on later also stops existing members and credentials outside
+the domains at once (a roster entry stays until an owner removes it).
+
 ## The fake OAuth relay for end-to-end tests
 
 `tests/fake_oauth_app.py` serves the relay with a fake Google, so the plugin's e2e can run the
@@ -871,6 +952,11 @@ A question sent while its recipient's answering session is not running waits in 
   filter). `teams`, `accounts` and roster documents never expire (a deleted team's record is
   kept, the id reserved 31 days, then given again only after a fresh removal pass; an
   account document is deleted when it holds nothing). Team creations count in `login_limits`.
+- M10: no new index or TTL (`settings/boundaries` never expires). Behind the load balancer:
+  `RELAY_PUBLIC_URL=https://team.example.com`, `RELAY_FORWARDED_FOR_HOPS=2`, the OAuth
+  client's redirect URI `https://team.example.com/v1/login/callback`, and optionally
+  `RELAY_DRIVE_CLIENT_FILE=/secrets/drive-oauth/client.json` with the secret
+  `team-relay-drive-client` mounted there.
 
 ## Deliberately not done
 

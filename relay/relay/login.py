@@ -42,6 +42,10 @@
   Accepting makes the entry active, binds this Google account's ``sub`` and adds the team to
   the login's choices (preselected); declining removes the entry. Either way the chooser is
   shown again; an invitation no longer open shows it with a notice (``409``).
+- RELAY_ALLOWED_DOMAINS (M10-SPEC §7.2): the callback refuses (``403``) a Google account
+  whose email is not in one of the domains or whose ``hd`` claim is not that same domain,
+  after ``email_verified``. Team creation and invitations check the email again (:mod:`relay.teams`)
+  and a credential is refused while its email is outside them (:mod:`relay.app`).
 """
 
 from __future__ import annotations
@@ -140,19 +144,26 @@ def forwarded_hops(request: Request) -> int:
     )
 
 
-def client_ip(request: Request, on_cloud_run: bool) -> str:
+def client_ip(request: Request, on_cloud_run: bool, hops: int) -> str:
     """The address a login rate limit is counted against.
 
     Behind Cloud Run the socket peer is Google's front end, which appends the address it
-    received the connection from to ``X-Forwarded-For``. Anything to the left of that last
-    entry came from the client and can be forged, so the **right-most** entry is taken: the
-    only one Google wrote. Off Cloud Run (local development, the tests) the header is
+    received the connection from to ``X-Forwarded-For``. Anything to the left of what Google
+    appended came from the client and can be forged, so the entry ``hops`` from the right is
+    taken: with ``hops=1`` (Cloud Run reached directly) the right-most, the only one Google
+    wrote; with ``hops=2`` (behind the external Application Load Balancer, M10-SPEC §5) the
+    one left of the forwarding rule's own address, which the balancer wrote. Fewer entries
+    than that: ``unknown``. Off Cloud Run (local development, the tests) the header is
     ignored and the socket peer is used. IPv6 addresses count per /64, since one host
     commonly holds a whole /64. Unparseable values share one bucket, ``unknown``."""
     raw: str | None
     if on_cloud_run:
-        values = request.headers.getlist("x-forwarded-for")
-        raw = values[-1].split(",")[-1].strip() if values else None
+        entries = [
+            part.strip()
+            for value in request.headers.getlist("x-forwarded-for")
+            for part in value.split(",")
+        ]
+        raw = entries[-hops] if len(entries) >= hops else None
     else:
         raw = request.client.host if request.client else None
     try:
@@ -205,6 +216,7 @@ class LoginService:
         self._oauth = oauth
         self._now = now
         self._on_cloud_run = on_cloud_run
+        self._hops = settings.forwarded_for_hops
         self.public_url = settings.public_url
         self.redirect_uri = f"{settings.public_url}/v1/login/callback"
         self._retention = timedelta(days=settings.team_config.audit_retention_days)
@@ -214,7 +226,7 @@ class LoginService:
         now = self._now()
         start = int(now.timestamp()) // LOGIN_WINDOW_SECONDS * LOGIN_WINDOW_SECONDS
         # The address itself is never stored: only a hash of it, in the counter's key.
-        ip_hash = sha256_hex(client_ip(request, self._on_cloud_run))[:32]
+        ip_hash = sha256_hex(client_ip(request, self._on_cloud_run, self._hops))[:32]
         quota = Quota(
             key=f"{kind}.{ip_hash}.{start}",
             limit=limit,
@@ -378,6 +390,14 @@ class LoginService:
         sub = claims.get("sub")
         if not isinstance(sub, str) or SUB_RE.fullmatch(sub) is None:
             return await fail(400, "no_sub", "Sign-in with Google did not complete", AGAIN)
+        hd = claims.get("hd")
+        if not self._config.google_identity_allowed(email, hd if isinstance(hd, str) else None):
+            return await fail(
+                403,
+                "domain_not_allowed",
+                "This relay is for its organisation's Google accounts only",
+                "Sign in with your work Google account, then run /team-relay:login again.",
+            )
         memberships = await self._teams.memberships(email, fresh=True)
         for found in memberships:
             bound = (await self._roster.snapshot(found.team)).sub_for(found.member, email)
@@ -654,7 +674,7 @@ class LoginService:
             body: NewTeam = parse_new_team(
                 {"name": name, "owner_member_id": member, **({"id": team} if team else {})}
             )
-            ip_hash = sha256_hex(client_ip(request, self._on_cloud_run))[:32]
+            ip_hash = sha256_hex(client_ip(request, self._on_cloud_run, self._hops))[:32]
             created = await self._teams.create(
                 email=current.email, sub=current.sub, body=body, ip_hash=ip_hash, via=None
             )

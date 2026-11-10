@@ -1,7 +1,20 @@
 import { QueryClient, useMutation, useQuery, useQueryClient, type Query } from '@tanstack/react-query'
 
 import { ApiError, ChangeError, api } from '@/api/client'
-import type { AdminTeamsPage, ApprovalsSummary, Directory, InboxSummary, Join, Me, RequestDetail, Roster, RosterRole, Teams } from '@/api/types'
+import type {
+  AdminTeamsPage,
+  ApprovalsSummary,
+  Boundaries,
+  Directory,
+  InboxSummary,
+  Join,
+  Me,
+  RequestDetail,
+  Roster,
+  RosterRole,
+  TeamBoundaries,
+  Teams,
+} from '@/api/types'
 import { emptyActivity, pollActivity, PollError, type ActivityState } from '@/lib/activity'
 import { readTeams } from '@/lib/teams'
 import { useTeam } from './team'
@@ -170,6 +183,46 @@ export function useRosterChange() {
       void qc.invalidateQueries({ queryKey: rosterKey(team) })
       void qc.invalidateQueries({ queryKey: ['directory', team] })
       void qc.invalidateQueries({ queryKey: ['me', team] })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------------------
+// The team's boundaries (M10 §1).
+
+export const BOUNDARIES_INTERVAL_MS = 60_000
+export const boundariesKey = (team: string | null) => ['boundaries', team] as const
+
+/**
+ * GET /api/boundaries: read on start and every minute (another owner may change them). A
+ * console server or relay without the route (404) is not asked again.
+ */
+export function useBoundaries() {
+  const team = useTeam()
+  return useQuery<TeamBoundaries, ApiError>({
+    queryKey: boundariesKey(team),
+    queryFn: () => tracked('boundaries', async () => (await api.boundaries(team)).data),
+    refetchInterval: (query) =>
+      query.state.error?.kind === 'not_found' ? false : whileVisible<TeamBoundaries>('boundaries', BOUNDARIES_INTERVAL_MS)(query),
+  })
+}
+
+/**
+ * M10 §1: an owner's change, sent once from the version it was read at. The answer becomes the
+ * boundaries on screen; after a refusal they are read again (a 409 means someone else saved first).
+ */
+export function useSetBoundaries() {
+  const qc = useQueryClient()
+  const team = useTeam()
+  return useMutation<TeamBoundaries, ChangeError, { version: number; boundaries: Boundaries }>({
+    mutationFn: (c) => api.setBoundaries(c.version, c.boundaries, team),
+    retry: false,
+    onSuccess: (out) => {
+      if (out && typeof out === 'object' && typeof out.version === 'number') qc.setQueryData(boundariesKey(team), out)
+      else void qc.invalidateQueries({ queryKey: boundariesKey(team) })
+    },
+    onError: () => {
+      void qc.invalidateQueries({ queryKey: boundariesKey(team) })
     },
   })
 }

@@ -559,7 +559,7 @@ describe('bin/answerer session files drive working servers', () => {
         const def = mcp.mcpServers[name];
         const client = new Client({ name: 'test', version: '0' }, { capabilities: {} });
         await client.connect(
-          new StdioClientTransport({ command: def.command, args: def.args, env: { PATH: process.env.PATH ?? '', ...def.env }, stderr: 'pipe' }),
+          new StdioClientTransport({ command: def.command, args: def.args, env: { PATH: process.env.PATH ?? '', XDG_CONFIG_HOME: XDG, ...def.env }, stderr: 'pipe' }), // XDG: never this computer's answering lock
         );
         clients.push(client);
       }
@@ -751,7 +751,7 @@ describe('bin/answerer session files publish the shared folder names (M4-SPEC §
       const def = JSON.parse(readFileSync(join(home, 'mcp.json'), 'utf8')).mcpServers.relay;
       client = new Client({ name: 'test', version: '0' }, { capabilities: {} });
       await client.connect(
-        new StdioClientTransport({ command: def.command, args: def.args, env: { PATH: process.env.PATH ?? '', ...def.env }, stderr: 'pipe' }),
+        new StdioClientTransport({ command: def.command, args: def.args, env: { PATH: process.env.PATH ?? '', XDG_CONFIG_HOME: XDG, ...def.env }, stderr: 'pipe' }), // XDG: never this computer's answering lock
       );
       const published = relay.manifests.get('bob') as { shares: unknown };
       expect(published.shares).toEqual([{ name: 'orders-service' }, { name: 'Team_Runbooks' }]);

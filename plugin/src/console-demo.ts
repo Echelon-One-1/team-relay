@@ -24,8 +24,15 @@
 // `ops`, and, since she is a relay admin in the demo, other people's teams in the admin
 // listing. She can create teams (at most 3), accept or decline, and delete, by the relay's
 // rules and with its refusals; a new team is quiet (no traffic). Nothing leaves the process.
+//
+// M10-SPEC §1: each team has boundaries. `demo` and `ops` have them set (alice owns `demo`, so
+// she can change them; she is a member of `ops`, so she reads them only); `research` and any
+// new team have none yet. A change needs the current version (else 409 version_conflict), as
+// on the relay. The directory's shares read as what each member can answer from.
 
 import { createHash } from 'node:crypto';
+import { nextSince } from './boundaries-rule.js';
+import type { Boundaries, SetBoundariesBody, TeamBoundaries } from './boundaries-types.js';
 import { defaultManifestPath } from './exposed.js';
 import { loadManifest, type Capability, type Manifest } from './manifest.js';
 
@@ -463,6 +470,16 @@ export type DemoTeamOptions = {
   roster?: DemoRosterEntry[];
   /** The viewer's member id there (alice, unless she chose another when creating it). */
   viewer?: string;
+  /** M10-SPEC §1: the team's boundaries and who set them; absent, never set. */
+  boundaries?: { boundaries: Boundaries; version: number; updated_by: string };
+};
+
+/** M10-SPEC §1: the scripted demo team's boundaries (synthetic). */
+export const DEMO_BOUNDARIES: Boundaries = {
+  topic: 'Example Co: the orders and payments services, their runbooks, deploys and incidents, and how the team works.',
+  github_orgs: ['example-org'],
+  drives: [{ domain: 'example.com', shared_drive: 'Example Team Drive' }],
+  member_folders: true,
 };
 
 /** M6-SPEC §1: at most this many members per team. */
@@ -487,6 +504,8 @@ export class DemoTeam {
   private readonly publishedAt: string;
   /** M6-SPEC §1, in memory: alice owns the demo team; bob and carol are members. */
   private readonly rosterEntries: DemoRosterEntry[];
+  /** M10-SPEC §1, in memory. */
+  private bounds: TeamBoundaries;
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -506,7 +525,7 @@ export class DemoTeam {
       capabilities: manifest.capabilities.filter((c: Capability) => names.includes(c.name)),
     });
     for (const c of manifest.capabilities) this.environments.set(c.name, c.environment);
-    // M4-SPEC §3: bob shares two folders by name; carol shares none.
+    // M4-SPEC §3, M10-SPEC §2: bob can answer from two folders, by name; carol from nothing yet.
     this.manifests = {
       alice: null,
       bob: { ...pick(['staging_db_query']), shares: [{ name: 'orders-service' }, { name: 'runbooks' }] },
@@ -523,6 +542,41 @@ export class DemoTeam {
           // M9-SPEC §7.2: an invitation dana has not answered yet.
           { member: 'dana', emails: ['dana@example.com'], role: 'member', added_by: 'alice', added_at: iso(this.epoch - DAY_MS), status: 'invited' },
         ];
+    const set = options.roster === undefined ? { boundaries: DEMO_BOUNDARIES, version: 2, updated_by: DEMO_ME } : options.boundaries;
+    // M10-SPEC §7.1: every item of the scripted boundaries has been there since version 1.
+    this.bounds = set
+      ? {
+          team: this.team,
+          version: set.version,
+          boundaries: structuredClone(set.boundaries),
+          since: nextSince(null, 1, set.boundaries),
+          updated_at: iso(this.epoch - 2 * DAY_MS),
+          updated_by: set.updated_by,
+        }
+      : { team: this.team, version: 0, boundaries: null, since: null, updated_at: null, updated_by: null };
+  }
+
+  /** GET /v1/teams/{team}/boundaries (M10-SPEC §1): any member. Never set: version 0, null. */
+  boundaries(): TeamBoundaries {
+    return structuredClone(this.bounds);
+  }
+
+  /** PUT /v1/teams/{team}/boundaries (M10-SPEC §1): owners, at the current version. */
+  setBoundaries(body: SetBoundariesBody): TeamBoundaries {
+    if (this.viewerRole() !== 'owner') throw new RosterRefusal(403, 'forbidden', 'Only team owners can set the boundaries.');
+    if (body.version !== this.bounds.version) {
+      throw new RosterRefusal(409, 'version_conflict', 'The boundaries changed since you read them. Read them again.');
+    }
+    const version = this.bounds.version + 1;
+    this.bounds = {
+      team: this.team,
+      version,
+      boundaries: structuredClone(body.boundaries),
+      since: nextSince(this.bounds, version, body.boundaries),
+      updated_at: iso(this.now()),
+      updated_by: this.viewer,
+    };
+    return this.boundaries();
   }
 
   /** The viewer's role here, by the roster's active entries. */
@@ -818,7 +872,15 @@ type WorldTeam = {
   reserved_until?: string;
 };
 
-type DemoInvitation = { team: string; name: string; member: string; role: 'owner' | 'member'; invited_by_member: string; roster: DemoRosterEntry[] };
+type DemoInvitation = {
+  team: string;
+  name: string;
+  member: string;
+  role: 'owner' | 'member';
+  invited_by_member: string;
+  roster: DemoRosterEntry[];
+  boundaries?: DemoTeamOptions['boundaries'];
+};
 
 /** M9-SPEC §2 on the relay: the team id made from a name when none is given. */
 export function teamIdFromName(name: string): string {
@@ -873,6 +935,16 @@ export class DemoAccount {
         role: 'member',
         invited_by_member: 'olga',
         roster: [entry('olga', 'owner', 'active', 'olga', 12), entry('pat', 'member', 'active', 'olga', 9), entry('alice', 'member', 'active', 'olga', 0)],
+        boundaries: {
+          boundaries: {
+            topic: 'Operations at Example Co: on-call, incidents, infrastructure and the runbooks behind them.',
+            github_orgs: ['example-ops'],
+            drives: [{ domain: 'example.com', shared_drive: 'Operations' }],
+            member_folders: false,
+          },
+          version: 1,
+          updated_by: 'olga',
+        },
       },
     ];
     this.world.set('ops', { id: 'ops', name: 'Operations', seed: false, status: 'active', created_at: at(12), created_by_member: 'olga', members: 2, owners: 1, last_activity_at: at(0.2) });
@@ -954,7 +1026,16 @@ export class DemoAccount {
     if (!inv) throw new RosterRefusal(404, 'not_found', 'That invitation is no longer open.');
     this.invitations = this.invitations.filter((i) => i !== inv);
     if (!accept) return { team, member: inv.member, status: 'declined' };
-    this.held.set(team, new DemoTeam(this.now, this.manifestPath, { team, name: inv.name, viewer: inv.member, roster: inv.roster }));
+    this.held.set(
+      team,
+      new DemoTeam(this.now, this.manifestPath, {
+        team,
+        name: inv.name,
+        viewer: inv.member,
+        roster: inv.roster,
+        ...(inv.boundaries ? { boundaries: inv.boundaries } : {}),
+      }),
+    );
     return { team, name: inv.name, member: inv.member, role: inv.role, status: 'active' };
   }
 

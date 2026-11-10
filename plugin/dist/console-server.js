@@ -6349,15 +6349,15 @@ var require_parser = __commonJS({
     var node_process = __require("process");
     var cst = require_cst();
     var lexer = require_lexer();
-    function includesToken(list, type) {
-      for (let i = 0; i < list.length; ++i)
-        if (list[i].type === type)
+    function includesToken(list2, type) {
+      for (let i = 0; i < list2.length; ++i)
+        if (list2[i].type === type)
           return true;
       return false;
     }
-    function findNonEmptyIndex(list) {
-      for (let i = 0; i < list.length; ++i) {
-        switch (list[i].type) {
+    function findNonEmptyIndex(list2) {
+      for (let i = 0; i < list2.length; ++i) {
+        switch (list2[i].type) {
           case "space":
           case "comment":
           case "newline":
@@ -14803,6 +14803,51 @@ import { extname, join as join2, sep } from "node:path";
 // src/console-demo.ts
 import { createHash } from "node:crypto";
 
+// src/boundaries-rule.ts
+var TOPIC_MAX = 500;
+var SHARED_DRIVE_MAX = 100;
+var DOMAIN_MAX = 253;
+var BOUNDARIES_MAX_ORGS = 10;
+var BOUNDARIES_MAX_DRIVES = 10;
+var BOUNDARIES_VERSION_MAX = 2 ** 31 - 1;
+var GITHUB_ORG_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+var DRIVE_DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
+var DRIVE_NAME_FORBIDDEN_RE = /[/\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/u;
+var EDGE_SPACE_RE = /^[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+var chars = (s) => [...s].length;
+var trimText = (s) => s.replace(EDGE_SPACE_RE, "");
+function topicOk(topic) {
+  if (typeof topic !== "string") return false;
+  const t = trimText(topic);
+  return chars(t) >= 1 && chars(t) <= TOPIC_MAX && !TOPIC_FORBIDDEN_RE.test(topic);
+}
+var orgOk = (org) => typeof org === "string" && GITHUB_ORG_RE.test(org);
+function domainOk(domain) {
+  if (typeof domain !== "string" || domain.length > DOMAIN_MAX || !DRIVE_DOMAIN_RE.test(domain)) return false;
+  return !/^[0-9]+$/.test(domain.slice(domain.lastIndexOf(".") + 1));
+}
+function driveNameOk(name) {
+  return typeof name === "string" && chars(name) >= 1 && chars(name) <= SHARED_DRIVE_MAX && !DRIVE_NAME_FORBIDDEN_RE.test(name) && name === trimText(name) && name !== "." && name !== "..";
+}
+var versionOk = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= BOUNDARIES_VERSION_MAX;
+function nextSince(prev, version, next) {
+  const p = prev?.boundaries ? prev.since ?? null : null;
+  const org = (o) => {
+    const key = o.toLowerCase();
+    return p && Object.prototype.hasOwnProperty.call(p.github_orgs, key) ? p.github_orgs[key] ?? version : version;
+  };
+  return {
+    github_orgs: Object.fromEntries(next.github_orgs.map((o) => [o.toLowerCase(), org(o)])),
+    drives: next.drives.map((d) => ({
+      domain: d.domain,
+      shared_drive: d.shared_drive,
+      since: p?.drives.find((x) => x.domain === d.domain && x.shared_drive === d.shared_drive)?.since ?? version
+    })),
+    member_folders: next.member_folders ? p?.member_folders ?? version : null
+  };
+}
+
 // src/exposed.ts
 import { fileURLToPath } from "node:url";
 
@@ -21768,6 +21813,12 @@ var RosterRefusal = class extends Error {
   code;
   detail;
 };
+var DEMO_BOUNDARIES = {
+  topic: "Example Co: the orders and payments services, their runbooks, deploys and incidents, and how the team works.",
+  github_orgs: ["example-org"],
+  drives: [{ domain: "example.com", shared_drive: "Example Team Drive" }],
+  member_folders: true
+};
 var ROSTER_MAX = 50;
 var BadRequest = class extends Error {
   constructor(detail) {
@@ -21806,6 +21857,15 @@ var DemoTeam = class {
       // M9-SPEC §7.2: an invitation dana has not answered yet.
       { member: "dana", emails: ["dana@example.com"], role: "member", added_by: "alice", added_at: iso(this.epoch - DAY_MS), status: "invited" }
     ];
+    const set = options.roster === void 0 ? { boundaries: DEMO_BOUNDARIES, version: 2, updated_by: DEMO_ME } : options.boundaries;
+    this.bounds = set ? {
+      team: this.team,
+      version: set.version,
+      boundaries: structuredClone(set.boundaries),
+      since: nextSince(null, 1, set.boundaries),
+      updated_at: iso(this.epoch - 2 * DAY_MS),
+      updated_by: set.updated_by
+    } : { team: this.team, version: 0, boundaries: null, since: null, updated_at: null, updated_by: null };
   }
   now;
   team;
@@ -21819,6 +21879,29 @@ var DemoTeam = class {
   publishedAt;
   /** M6-SPEC §1, in memory: alice owns the demo team; bob and carol are members. */
   rosterEntries;
+  /** M10-SPEC §1, in memory. */
+  bounds;
+  /** GET /v1/teams/{team}/boundaries (M10-SPEC §1): any member. Never set: version 0, null. */
+  boundaries() {
+    return structuredClone(this.bounds);
+  }
+  /** PUT /v1/teams/{team}/boundaries (M10-SPEC §1): owners, at the current version. */
+  setBoundaries(body) {
+    if (this.viewerRole() !== "owner") throw new RosterRefusal(403, "forbidden", "Only team owners can set the boundaries.");
+    if (body.version !== this.bounds.version) {
+      throw new RosterRefusal(409, "version_conflict", "The boundaries changed since you read them. Read them again.");
+    }
+    const version = this.bounds.version + 1;
+    this.bounds = {
+      team: this.team,
+      version,
+      boundaries: structuredClone(body.boundaries),
+      since: nextSince(this.bounds, version, body.boundaries),
+      updated_at: iso(this.now()),
+      updated_by: this.viewer
+    };
+    return this.boundaries();
+  }
   /** The viewer's role here, by the roster's active entries. */
   viewerRole() {
     return this.rosterEntries.find((e) => e.member === this.viewer && e.status === "active")?.role ?? "member";
@@ -22092,7 +22175,17 @@ var DemoAccount = class {
         member: "alice",
         role: "member",
         invited_by_member: "olga",
-        roster: [entry("olga", "owner", "active", "olga", 12), entry("pat", "member", "active", "olga", 9), entry("alice", "member", "active", "olga", 0)]
+        roster: [entry("olga", "owner", "active", "olga", 12), entry("pat", "member", "active", "olga", 9), entry("alice", "member", "active", "olga", 0)],
+        boundaries: {
+          boundaries: {
+            topic: "Operations at Example Co: on-call, incidents, infrastructure and the runbooks behind them.",
+            github_orgs: ["example-ops"],
+            drives: [{ domain: "example.com", shared_drive: "Operations" }],
+            member_folders: false
+          },
+          version: 1,
+          updated_by: "olga"
+        }
       }
     ];
     this.world.set("ops", { id: "ops", name: "Operations", seed: false, status: "active", created_at: at(12), created_by_member: "olga", members: 2, owners: 1, last_activity_at: at(0.2) });
@@ -22177,7 +22270,16 @@ var DemoAccount = class {
     if (!inv) throw new RosterRefusal(404, "not_found", "That invitation is no longer open.");
     this.invitations = this.invitations.filter((i) => i !== inv);
     if (!accept) return { team, member: inv.member, status: "declined" };
-    this.held.set(team, new DemoTeam(this.now, this.manifestPath, { team, name: inv.name, viewer: inv.member, roster: inv.roster }));
+    this.held.set(
+      team,
+      new DemoTeam(this.now, this.manifestPath, {
+        team,
+        name: inv.name,
+        viewer: inv.member,
+        roster: inv.roster,
+        ...inv.boundaries ? { boundaries: inv.boundaries } : {}
+      })
+    );
     return { team, name: inv.name, member: inv.member, role: inv.role, status: "active" };
   }
   remove(team, confirm) {
@@ -22988,10 +23090,10 @@ var IapKeySet = class {
     } catch {
       throw new Error("IAP key set is not JSON");
     }
-    const list = body?.keys;
-    if (!Array.isArray(list)) throw new Error("IAP key set has no keys");
+    const list2 = body?.keys;
+    if (!Array.isArray(list2)) throw new Error("IAP key set has no keys");
     const next = /* @__PURE__ */ new Map();
-    for (const jwk of list) {
+    for (const jwk of list2) {
       if (!jwk || typeof jwk !== "object") continue;
       const k = jwk;
       if (typeof k.kid !== "string" || !k.kid || k.kty !== "EC" || k.crv !== "P-256") continue;
@@ -23701,6 +23803,22 @@ var RelayClient = class _RelayClient {
       ...opts
     });
   }
+  /** M10-SPEC §1: the team's boundaries (any member). Never set: version 0, boundaries null. */
+  boundaries(opts) {
+    return this.call("GET", this.teamPath("boundaries"), void 0, opts);
+  }
+  /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
+  setBoundaries(body, opts) {
+    return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
+  }
+  /**
+   * M10-SPEC §2a: the Desktop OAuth client members use to connect Google Drive (read-only).
+   * An installed-app client is not confidential (Google's rule); it is served to members so it
+   * stays out of git. Not configured: 404 drive_not_configured.
+   */
+  driveClient(opts) {
+    return this.call("GET", this.teamPath("drive-client"), void 0, opts);
+  }
   /** M6-SPEC §2: the team's roster (owners see every email; members only their own). */
   roster(opts) {
     return this.call("GET", this.teamPath("roster"), void 0, opts);
@@ -23867,7 +23985,9 @@ function relayBackend(client) {
     answerInvitation: (team, accept, ctx) => client.answerInvitation(team, accept, opts(ctx)),
     deleteTeam: (confirm, ctx) => on(ctx).deleteTeam(confirm, opts(ctx)),
     adminTeams: (q, ctx) => client.adminTeams(q, opts(ctx)),
-    adminDeleteTeam: (team, confirm, ctx) => client.adminDeleteTeam(team, confirm, opts(ctx))
+    adminDeleteTeam: (team, confirm, ctx) => client.adminDeleteTeam(team, confirm, opts(ctx)),
+    boundaries: (ctx) => on(ctx).boundaries(opts(ctx)),
+    setBoundaries: (body, ctx) => on(ctx).setBoundaries(body, opts(ctx))
   };
 }
 function boundTeams(me, team) {
@@ -23900,7 +24020,9 @@ function demoBackend(account) {
     answerInvitation: async (team, accept) => account.answerInvitation(team, accept),
     deleteTeam: async (confirm, ctx) => account.deleteTeam(ctx?.team ?? account.defaultTeam, confirm),
     adminTeams: async (q) => account.adminTeams(q),
-    adminDeleteTeam: async (team, confirm) => account.adminDeleteTeam(team, confirm)
+    adminDeleteTeam: async (team, confirm) => account.adminDeleteTeam(team, confirm),
+    boundaries: async (ctx) => account.team(ctx?.team).boundaries(),
+    setBoundaries: async (body, ctx) => account.team(ctx?.team).setBoundaries(body)
   };
 }
 var ROSTER_EMAIL_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$/;
@@ -23980,21 +24102,72 @@ function checkConfirm(raw, team) {
   if (b.confirm !== team) throw new BodyError('type the team id to confirm: {"confirm": "<team id>"}');
   return team;
 }
+var BOUNDARIES_BODY_LIMIT = 32 * 1024;
+function list(v, field, max, what) {
+  if (!Array.isArray(v)) throw new BodyError(`${field} must be a list`);
+  if (v.length > max) throw new BodyError(`at most ${max} ${what}`);
+  return v;
+}
+function drive(v) {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) throw new BodyError('each drive must be {"domain", "shared_drive"}');
+  const d = v;
+  onlyKeys(d, ["domain", "shared_drive"]);
+  if (!domainOk(d.domain)) {
+    throw new BodyError("a drive domain must be a lower-case domain name, such as example.com");
+  }
+  const name = d.shared_drive;
+  if (!driveNameOk(name)) {
+    throw new BodyError(
+      `a shared drive name must be 1 to ${SHARED_DRIVE_MAX} characters, with no /, no control or invisible characters and no leading or trailing space`
+    );
+  }
+  return { domain: d.domain, shared_drive: name };
+}
+function checkSetBoundaries(raw) {
+  const b = object(raw);
+  onlyKeys(b, ["version", "boundaries"]);
+  if (!versionOk(b.version)) {
+    throw new BodyError("version must be the whole number the boundaries were read at");
+  }
+  if (typeof b.boundaries !== "object" || b.boundaries === null || Array.isArray(b.boundaries)) {
+    throw new BodyError('boundaries must be {"topic", "github_orgs", "drives", "member_folders"}');
+  }
+  const x = b.boundaries;
+  onlyKeys(x, ["topic", "github_orgs", "drives", "member_folders"]);
+  if (!topicOk(x.topic)) {
+    throw new BodyError(`topic must be 1 to ${TOPIC_MAX} characters, with no control or invisible characters`);
+  }
+  const topic = trimText(x.topic);
+  const orgs = [];
+  for (const o of list(x.github_orgs, "github_orgs", BOUNDARIES_MAX_ORGS, "GitHub orgs")) {
+    if (!orgOk(o)) {
+      throw new BodyError("a GitHub org must be 1 to 39 letters, digits or -, not starting with -");
+    }
+    if (!orgs.some((have) => have.toLowerCase() === o.toLowerCase())) orgs.push(o);
+  }
+  const drives = [];
+  for (const d of list(x.drives, "drives", BOUNDARIES_MAX_DRIVES, "shared drives").map(drive)) {
+    if (!drives.some((have) => have.domain === d.domain && have.shared_drive === d.shared_drive)) drives.push(d);
+  }
+  if (typeof x.member_folders !== "boolean") throw new BodyError("member_folders must be true or false");
+  const boundaries = { topic, github_orgs: orgs, drives, member_folders: x.member_folders };
+  return { version: b.version, boundaries };
+}
 var count = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 1e6 ? v : null;
 var displayName = (v, team) => typeof v === "string" && v.trim() !== "" && [...v].length <= 60 && !NAME_FORBIDDEN_RE.test(v) ? v : team;
 var roleOf = (v) => v === "owner" ? "owner" : "member";
 function parseTeams(raw) {
   const r = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-  const list = (v) => Array.isArray(v) ? v.filter((x) => !!x && typeof x === "object" && !Array.isArray(x)).slice(0, 500) : [];
+  const list2 = (v) => Array.isArray(v) ? v.filter((x) => !!x && typeof x === "object" && !Array.isArray(x)).slice(0, 500) : [];
   const seen = /* @__PURE__ */ new Set();
   const teams = [];
-  for (const t of list(r.teams)) {
+  for (const t of list2(r.teams)) {
     if (typeof t.team !== "string" || !TEAM_RE.test(t.team) || typeof t.member !== "string" || !MEMBER_RE.test(t.member) || seen.has(t.team)) continue;
     seen.add(t.team);
     teams.push({ team: t.team, name: displayName(t.name, t.team), member: t.member, role: roleOf(t.role) });
   }
   const invitations = [];
-  for (const t of list(r.invitations)) {
+  for (const t of list2(r.invitations)) {
     if (typeof t.team !== "string" || !TEAM_RE.test(t.team) || typeof t.member !== "string" || !MEMBER_RE.test(t.member) || seen.has(t.team)) continue;
     seen.add(t.team);
     invitations.push({
@@ -24015,14 +24188,27 @@ function parseTeams(raw) {
     can_manage_teams: r.can_manage_teams !== false
   };
 }
-function clientAddress(req) {
+function clientAddress(req, hops = 1) {
   const raw = req.headers["x-forwarded-for"];
   const joined = Array.isArray(raw) ? raw.join(",") : raw;
-  if (joined) {
-    const last = joined.split(",").map((p) => p.trim()).filter((p) => p !== "").at(-1);
-    if (last !== void 0) return last;
+  const entries = (joined ?? "").split(",").map((p) => p.trim()).filter((p) => p !== "");
+  if (hops === 2) return entries.length >= 2 ? entries[entries.length - 2] : "";
+  return entries.at(-1) ?? req.socket.remoteAddress ?? "";
+}
+function isRunAppHost(publicHost) {
+  return /^[^:]+\.run\.app(?::[0-9]{1,5})?$/.test(publicHost);
+}
+function checkProxyHops(raw, publicHost) {
+  const v = raw?.trim();
+  if (!v) {
+    if (isRunAppHost(publicHost)) return 1;
+    throw new Error(
+      `CONSOLE_PROXY_HOPS must be set when the public host (${publicHost}) is not a run.app address: 2 behind the load balancer`
+    );
   }
-  return req.socket.remoteAddress ?? "";
+  if (v === "1") return 1;
+  if (v === "2") return 2;
+  throw new Error("CONSOLE_PROXY_HOPS must be 1 (Cloud Run) or 2 (behind the load balancer)");
 }
 function expandIpv6(a) {
   let addr = a;
@@ -24055,8 +24241,8 @@ function addressKey(address) {
   }
   return "unknown";
 }
-function clientIpHash(salt, req) {
-  return createHash2("sha256").update(salt + addressKey(clientAddress(req)), "utf8").digest("hex");
+function clientIpHash(salt, req, hops = 1) {
+  return createHash2("sha256").update(salt + addressKey(clientAddress(req, hops)), "utf8").digest("hex");
 }
 function checkIpHashSalt(raw) {
   const v = raw?.trim();
@@ -24125,7 +24311,7 @@ var PLACEHOLDER = `<!doctype html>
 <p>The console has not been built yet: <code>dist/console/</code> is missing. Build it from
 <code>console/</code> (it builds into <code>plugin/dist/console/</code>), then reload this page.</p>
 <p>The API is running: <code>/api/me</code>, <code>/api/directory</code>, <code>/api/activity</code>,
-<code>/api/requests/{id}</code>, <code>/api/roster</code>, <code>/api/inbox/summary</code> and <code>/api/join</code>, with the key from this page's
+<code>/api/requests/{id}</code>, <code>/api/roster</code>, <code>/api/inbox/summary</code>, <code>/api/boundaries</code> and <code>/api/join</code>, with the key from this page's
 address in an <code>X-Console-Key</code> header.</p>
 </body>
 </html>
@@ -24287,6 +24473,7 @@ function createConsoleServer(opts) {
   }
   function changeRoute(path) {
     if (path === "/api/roster") return { methods: ["POST"], kind: "roster", id: null };
+    if (path === "/api/boundaries") return { methods: ["PUT"], kind: "boundaries", id: null };
     let m = /^\/api\/roster\/([^/]+)$/.exec(path);
     if (m) return { methods: ["PATCH", "DELETE"], kind: "roster_one", id: m[1] };
     if (path === "/api/teams") return { methods: ["POST"], kind: "teams", id: null };
@@ -24300,7 +24487,7 @@ function createConsoleServer(opts) {
   }
   async function change(req, res, url, ctx, route2) {
     const method = req.method ?? "";
-    const reads = route2.kind === "teams" || route2.kind === "roster" ? ["GET"] : [];
+    const reads = route2.kind === "teams" || route2.kind === "roster" || route2.kind === "boundaries" ? ["GET"] : [];
     if (!route2.methods.includes(method)) {
       req.resume();
       return sendJson(res, 405, { error: "method_not_allowed" }, { Allow: [...reads, ...route2.methods].join(", ") });
@@ -24314,8 +24501,8 @@ function createConsoleServer(opts) {
       req.resume();
       return sendJson(res, 415, { error: "unsupported_media_type", detail: "Content-Type must be application/json" });
     }
-    const rosterKind = route2.kind === "roster" || route2.kind === "roster_one";
-    const extra = [...url.searchParams.keys()].filter((k) => !(rosterKind && k === "team"));
+    const teamScoped = route2.kind === "roster" || route2.kind === "roster_one" || route2.kind === "boundaries";
+    const extra = [...url.searchParams.keys()].filter((k) => !(teamScoped && k === "team"));
     if (extra.length > 0) {
       req.resume();
       return sendJson(res, 400, { error: "bad_request", detail: "no query parameters here" });
@@ -24326,11 +24513,12 @@ function createConsoleServer(opts) {
       req.resume();
       return sendJson(res, 404, { error: "not_found" });
     }
+    const limit = route2.kind === "boundaries" ? BOUNDARIES_BODY_LIMIT : ROSTER_BODY_LIMIT;
     let text;
     try {
-      text = await readBody(req, ROSTER_BODY_LIMIT);
+      text = await readBody(req, limit);
     } catch {
-      return sendJson(res, 413, { error: "too_large", detail: `at most ${ROSTER_BODY_LIMIT} bytes` });
+      return sendJson(res, 413, { error: "too_large", detail: `at most ${limit} bytes` });
     }
     let raw = void 0;
     if (text.trim() !== "") {
@@ -24368,9 +24556,18 @@ function createConsoleServer(opts) {
           what = `roster ${method === "POST" ? "add" : method === "PATCH" ? "update" : "remove"}${id ? ` ${id}` : ""} (team ${resolved})`;
           break;
         }
+        case "boundaries": {
+          const body = checkSetBoundaries(raw);
+          const resolved = await resolveTeam(req, res, url, who);
+          if (resolved === null) return;
+          team = resolved;
+          call = () => opts.backend.setBoundaries(body, { ...who, team: resolved });
+          what = `boundaries set from version ${body.version} (team ${resolved})`;
+          break;
+        }
         case "teams": {
           const body = checkCreateTeam(raw);
-          const ipHash = hosted2 ? { clientIpHash: clientIpHash(hosted2.ipHashSalt, req) } : {};
+          const ipHash = hosted2 ? { clientIpHash: clientIpHash(hosted2.ipHashSalt, req, hosted2.proxyHops ?? 1) } : {};
           status = 201;
           call = () => opts.backend.createTeam(body, { ...who, ...ipHash });
           what = "team create";
@@ -24404,11 +24601,12 @@ function createConsoleServer(opts) {
     log2(what);
     try {
       const out = await call();
-      if (route2.kind !== "roster" && route2.kind !== "roster_one") forgetTeams(viewer);
+      if (!teamScoped) forgetTeams(viewer);
       return sendJson(res, status, out);
     } catch (err) {
-      if (route2.kind !== "roster" && route2.kind !== "roster_one") forgetTeams(viewer);
-      if (team !== void 0 && route2.kind === "roster" && err instanceof RelayError && err.status === 404) return failure(res, err, viewer, team);
+      if (!teamScoped) forgetTeams(viewer);
+      const aboutTeam = route2.kind === "roster" || route2.kind === "boundaries";
+      if (team !== void 0 && aboutTeam && err instanceof RelayError && err.status === 404) return failure(res, err, viewer, team);
       return failure(res, err, viewer);
     }
   }
@@ -24486,7 +24684,7 @@ function createConsoleServer(opts) {
       }
     }
     const own = query.filter((k) => k !== "team");
-    const known = path === "/api/join" || path === "/api/me" || path === "/api/directory" || path === "/api/roster" || path === "/api/inbox/summary";
+    const known = path === "/api/join" || path === "/api/me" || path === "/api/directory" || path === "/api/roster" || path === "/api/inbox/summary" || path === "/api/boundaries";
     const requestMatch = /^\/api\/requests\/([^/]+)$/.exec(path);
     if (!known && path !== "/api/activity" && !requestMatch) return sendJson(res, 404, { error: "not_found" });
     if (requestMatch && (!REQUEST_ID_RE.test(requestMatch[1]) || own.length > 0)) return sendJson(res, 404, { error: "not_found" });
@@ -24534,6 +24732,7 @@ function createConsoleServer(opts) {
     } else if (path === "/api/directory") call = () => opts.backend.directory(on);
     else if (path === "/api/inbox/summary") call = () => opts.backend.inboxSummary(on);
     else if (path === "/api/roster") call = () => opts.backend.roster(on);
+    else if (path === "/api/boundaries") call = () => opts.backend.boundaries(on);
     else if (path === "/api/activity") call = () => opts.backend.activity(q, on);
     else {
       const rid = requestMatch[1];
@@ -24542,7 +24741,7 @@ function createConsoleServer(opts) {
     try {
       return sendJson(res, 200, await call());
     } catch (err) {
-      return failure(res, err, viewer, requestMatch ? void 0 : team);
+      return failure(res, err, viewer, requestMatch || path === "/api/boundaries" ? void 0 : team);
     }
   }
   function staticFile(req, res, url) {
@@ -24796,7 +24995,8 @@ RELAY_URL, RELAY_TEAM, RELAY_AUTH (credential|google|token), RELAY_GCLOUD_ACCOUN
 JOIN_MARKETPLACE (optional; GitHub owner/repo or https URL) and JOIN_REPO_URL (optional, https):
 what the join panel tells new members to add as a plugin marketplace.
 CONSOLE_MODE=hosted is for the container only (PORT, CONSOLE_PUBLIC_HOST, IAP_AUDIENCE,
-CONSOLE_IP_HASH_SALT, RELAY_URL, RELAY_TEAM, RELAY_AUTH=metadata, JOIN_MARKETPLACE, JOIN_REPO_URL).`;
+CONSOLE_IP_HASH_SALT, CONSOLE_PROXY_HOPS, RELAY_URL, RELAY_TEAM, RELAY_AUTH=metadata, JOIN_MARKETPLACE,
+JOIN_REPO_URL).`;
 function fail(message2, code = 1) {
   process.stderr.write(`console: ${message2}
 `);
@@ -24837,12 +25037,14 @@ async function hosted() {
   let team;
   let join6;
   let ipHashSalt;
+  let proxyHops;
   try {
     const repoUrl = checkJoinRepoUrl(env.JOIN_REPO_URL);
     const marketplace = checkJoinMarketplace(env.JOIN_MARKETPLACE);
     publicHost = checkPublicHost(configValue(env.CONSOLE_PUBLIC_HOST));
     audience = checkIapAudience(configValue(env.IAP_AUDIENCE));
     ipHashSalt = checkIpHashSalt(env.CONSOLE_IP_HASH_SALT);
+    proxyHops = checkProxyHops(env.CONSOLE_PROXY_HOPS, publicHost);
     if (authModeFromEnv(env) !== "metadata") throw new Error("CONSOLE_MODE=hosted needs RELAY_AUTH=metadata");
     const client = relayClientFromEnv(env);
     backend = relayBackend(client);
@@ -24854,14 +25056,16 @@ async function hosted() {
   const keys = new IapKeySet({ log });
   const verify = iapVerifier({ audience, keys, log });
   const staticDir = fileURLToPath3(new URL("./console/", import.meta.url));
-  const app = createConsoleServer({ backend, hosted: { publicHost, verify, ipHashSalt }, staticDir, join: join6, log });
+  const app = createConsoleServer({ backend, hosted: { publicHost, verify, ipHashSalt, proxyHops }, staticDir, join: join6, log });
   let bound;
   try {
     bound = await app.listen(port);
   } catch (err) {
     fail(`cannot listen on 0.0.0.0:${port} (${err.code ?? describeError(err)})`);
   }
-  log(`hosted: serving the viewer's teams (default ${team}) for ${publicHost} on 0.0.0.0:${bound}, behind IAP`);
+  log(
+    `hosted: serving the viewer's teams (default ${team}) for ${publicHost} on 0.0.0.0:${bound}, behind IAP${proxyHops === 2 ? " on the load balancer" : ""}`
+  );
   const stop = () => {
     void app.close().finally(() => process.exit(0));
     setTimeout(() => process.exit(0), 2e3).unref();
