@@ -21,15 +21,10 @@ export const FIXTURE_NOW = '2026-09-23T10:15:00.000Z'
 
 export const fixtureMe: Me = { team: 'demo', member: 'alice', teammates: ['bob', 'carol'] }
 
-/** GET /api/join as `bin/console --demo` answers it. */
+/** GET /api/join: the fields the console reads (the server sends more). */
 export const fixtureJoin: Join = {
   relay_url: 'https://relay.example.com',
   team: 'demo',
-  repo_url: null,
-  marketplace_source: 'example/team-relay',
-  marketplace: 'team-relay-dev',
-  plugin: 'team-relay',
-  default_relay: false,
 }
 
 /** GET /api/boundaries for `demo` (M10 §1): set by alice, an owner. Synthetic. */

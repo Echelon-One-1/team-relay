@@ -1,20 +1,33 @@
-// M11 §6: the Join checklist, worked out from what the viewer's Mac last reported
-// (GET /api/members-status), the version they accepted (GET /api/acceptance) and the team's
-// boundaries (GET /api/boundaries); the setup command and the owner's invite message.
+// M11 §6 and M11-SPEC "Simpler joining": the viewer's two steps (set up your Mac, accept what
+// the team shares), worked out from what the viewer's Mac last reported (GET
+// /api/members-status), the version they accepted (GET /api/acceptance) and the team's
+// boundaries (GET /api/boundaries). "Ask the team" is not a step: the Setup page always offers
+// it below them. Also the setup line and
+// the owner's invite message. Everything here is read by people who have never used Terminal:
+// plain sentences, never the names of tools.
 
 import type { Acceptance, Join, MemberStatusEntry, MembersStatus, TeamBoundaries } from '@/api/types'
 
-export type SetupStepId = 'setup' | 'claude' | 'answering' | 'folders' | 'drive' | 'boundaries' | 'self_test'
+export type MacCheckId = 'setup' | 'claude' | 'answering' | 'folders' | 'drive' | 'self_test'
+
+/** One thing "Set up your Mac" needs; `todo` is one plain sentence of what to do. */
+export interface MacCheck {
+  id: MacCheckId
+  done: boolean
+  todo: string
+}
+
+export type SetupStepId = 'mac' | 'accept'
 
 export interface SetupStep {
   id: SetupStepId
   title: string
   done: boolean
-  /** What to do, in one sentence, while it is not done. */
-  todo: string
+  /** "Set up your Mac": what it is made of. Empty for the other one. */
+  checks: MacCheck[]
 }
 
-export const SETUP_STEPS = 7
+export const SETUP_STEPS = 2
 
 /**
  * `self_test.reason` while the Mac's first self-test is still running: not a failure. The same
@@ -38,69 +51,80 @@ export function boundariesSet(bounds: TeamBoundaries | null | undefined): bounds
   return !!bounds && bounds.version > 0 && bounds.boundaries !== null
 }
 
-const NOT_KNOWN = "Not known yet: the team's boundaries have not loaded."
+export const SETUP_LINE_TODO = 'Paste the setup line into Terminal on your Mac, press Enter and answer its questions.'
+const NOT_KNOWN = "We couldn't check this yet, because the team's settings haven't loaded. This page tries again in a moment."
+export const CHECKING = 'Your Mac is checking that everything works. This takes about a minute.'
 
 /**
- * The seven steps of M11 §6, in order. `bounds` null or undefined: not read (loading, or the
- * read failed), so "Folders chosen" and "Google Drive connected" are not known and never tick.
- * Read: a team with no GitHub orgs (or no boundaries set) ticks "Folders chosen", one with no
- * drives "Google Drive connected".
+ * What "Set up your Mac" is made of: the Mac has reported in, Claude Code is there and signed
+ * in, the Mac answers now, folders and Google Drive (when the team's boundaries ask for them)
+ * and the self-test. `bounds` null or undefined: not read (loading, or the read failed), so
+ * folders and Drive are not known and never done. Read: a team with no GitHub orgs (or no
+ * boundaries set) needs no folders, one with no drives no Drive. Before the Mac has reported
+ * anything, the only check is running the setup line.
  */
-export function setupSteps(entry: MemberStatusEntry | null, bounds: TeamBoundaries | null | undefined, accepted: number, current: number): SetupStep[] {
+export function macChecks(entry: MemberStatusEntry | null, bounds: TeamBoundaries | null | undefined): MacCheck[] {
   const s = entry?.status ?? null
+  if (!s) return [{ id: 'setup', done: false, todo: SETUP_LINE_TODO }]
   const b = boundariesSet(bounds) ? bounds.boundaries : null
   const read = !!bounds
   const noOrgs = read && (!b || b.github_orgs.length === 0)
   const noDrives = read && (!b || b.drives.length === 0)
-  const claudeOk = !!s && s.claude.found && s.claude.signed_in
-  let claudeTodo = 'Runs once the setup command has started on your Mac.'
-  if (s && !s.claude.found) claudeTodo = 'Install Claude Code, then run the setup command again.'
-  else if (s && !s.claude.signed_in) claudeTodo = 'Run claude auth login in Terminal, or the setup command again, to sign Claude Code in.'
-  const set = b !== null && current > 0
   return [
-    { id: 'setup', title: 'Run the setup command', done: s !== null, todo: 'Copy the command above and run it in Terminal on your Mac.' },
-    { id: 'claude', title: 'Claude Code found and signed in', done: claudeOk, todo: claudeTodo },
+    { id: 'setup', done: true, todo: SETUP_LINE_TODO },
+    {
+      id: 'claude',
+      done: s.claude.found && s.claude.signed_in,
+      todo: s.claude.found
+        ? "Claude Code isn't signed in on your Mac. Run the setup line again and sign in when it asks."
+        : "Claude Code isn't on your Mac yet. Run the setup line again and say yes when it offers to install it.",
+    },
     {
       id: 'answering',
-      title: 'Answering in the background',
       done: entry?.answering === true,
-      todo: s
-        ? 'Your Mac has not checked in for a few minutes; keep it awake and online, or run the setup command again.'
-        : 'Starts on its own when the setup command finishes.',
+      todo: "Your Mac isn't answering right now. Make sure it's switched on; if this stays, run the setup line again.",
     },
     {
       id: 'folders',
-      title: 'Folders chosen',
-      done: read && (noOrgs || (!!s && s.folders.repo_roots > 0)),
+      done: read && (noOrgs || s.folders.repo_roots > 0),
       todo: read
-        ? `Run the setup command again and give the folders that hold your clones of ${b ? listWords(b.github_orgs) : "the team's GitHub orgs"}.`
+        ? `Your Mac doesn't know where your ${b ? listWords(b.github_orgs) : 'team'} project folders are yet. Run the setup line again and pick them.`
         : NOT_KNOWN,
     },
     {
       id: 'drive',
-      title: 'Google Drive connected',
-      done: read && (noDrives || (!!s && s.drive.connected)),
-      todo: read ? 'Run the setup command again and connect Google Drive when it asks.' : NOT_KNOWN,
+      done: read && (noDrives || s.drive.connected),
+      todo: read ? "Google Drive isn't connected yet. Run the setup line again and sign in to Google when it asks." : NOT_KNOWN,
     },
-    {
-      id: 'boundaries',
-      title: 'Boundaries accepted',
-      done: set && accepted === current,
-      todo: set ? 'Read the boundaries below and accept them.' : "An owner has not set the team's boundaries yet; nothing is answered until they do.",
-    },
-    {
-      id: 'self_test',
-      title: 'Self-test passed',
-      done: !!s && s.self_test.ok,
-      todo: s ? selfTestTodo(s.self_test.reason) : 'Runs on its own once the setup is done.',
-    },
+    { id: 'self_test', done: s.self_test.ok, todo: selfTestTodo(s.self_test.reason) },
   ]
 }
 
+/** The two steps, in order. */
+export function setupSteps(entry: MemberStatusEntry | null, bounds: TeamBoundaries | null | undefined, accepted: number, current: number): SetupStep[] {
+  const checks = macChecks(entry, bounds)
+  const set = boundariesSet(bounds) && current > 0
+  return [
+    { id: 'mac', title: 'Set up your Mac', done: checks.every((c) => c.done), checks },
+    { id: 'accept', title: 'Accept what the team shares', done: set && accepted === current, checks: [] },
+  ]
+}
+
+/**
+ * Whether the viewer has joined, for the team page's join card: their Mac has reported in at
+ * least once and they have accepted what the team shares at least once (when the team shares
+ * anything yet). Later trouble (the Mac switched off, a check failing, something new to accept)
+ * does not bring the card back: the Setup tab's count and the accept banner show it.
+ */
+export function hasJoined(entry: MemberStatusEntry | null, bounds: TeamBoundaries | null | undefined, accepted: number): boolean {
+  return !!entry?.status && (!boundariesSet(bounds) || accepted > 0)
+}
+
 function selfTestTodo(reason: string | null): string {
-  if (reason === SELF_TEST_PENDING) return 'Running the self-test now; this takes about a minute.'
+  if (reason === SELF_TEST_PENDING) return CHECKING
   const r = plainLine(reason)
-  return r ? `The self-test failed (${r}); fix that, then run the setup command again.` : 'The self-test failed; run the setup command again.'
+  const base = "Your Mac's last check didn't pass. Run the setup line again."
+  return r ? `${base} If it still doesn't pass, show this to a team owner: ${r}.` : base
 }
 
 /** A reason the Mac reported, as one short plain line, or null. */
@@ -115,7 +139,7 @@ function listWords(items: string[]): string {
   return `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`
 }
 
-/** How many of the seven steps a member has done (the Members panel's "n of 7 set up"). */
+/** How many of the two steps a member has done (the Members panel's "set up" or "n of 2 set up"). */
 export function setupCount(entry: MemberStatusEntry, bounds: TeamBoundaries | null | undefined, current: number): number {
   return setupSteps(entry, bounds, entry.accepted_version, current).filter((s) => s.done).length
 }
@@ -184,15 +208,24 @@ function oneLine(name: string): string {
   return name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim()
 }
 
-/** M11 §6: what an owner sends someone they invited. Plain text. */
+/** The three things a new member does after opening the team page (the join card says the same). */
+export const OPEN_TERMINAL = 'Open Terminal: press Cmd+Space, type Terminal, press Enter.'
+export const PASTE_LINE = 'Paste this line and press Enter, then answer its questions:'
+export const COME_BACK = 'Come back to this page and click Accept.'
+
+/** M11 §6, "Simpler joining": what an owner sends someone they invited. Plain text, no markdown. */
 export function inviteMessage(teamName: string, origin: string): string {
   return [
     `You're invited to the team ${oneLine(teamName)} on Team relay.`,
     '',
-    `Console: ${origin}/`,
-    `Setup command (run it in Terminal on your Mac): ${setupCommand(origin)}`,
+    `${origin}/`,
     '',
-    'Open the link, accept the invitation, then follow the checklist.',
+    'Open the link and accept the invitation. Then, on your Mac:',
+    '',
+    `1. ${OPEN_TERMINAL}`,
+    `2. ${PASTE_LINE}`,
+    setupCommand(origin),
+    `3. ${COME_BACK.replace('this page', 'the page')}`,
   ].join('\n')
 }
 

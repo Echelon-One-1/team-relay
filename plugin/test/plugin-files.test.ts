@@ -14,11 +14,27 @@ describe('plugin packaging', () => {
     expect(m.owner.name).toBeTruthy();
   });
 
-  it('hooks.json runs the SessionStart hook in exec form from the bundle', () => {
+  it('hooks.json runs the SessionStart hook in exec form from the bundle, through bin/run-node', () => {
     const h = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8'));
     const hook = h.hooks.SessionStart[0].hooks[0];
-    expect(hook).toMatchObject({ type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/dist/session-start.js'] });
+    expect(hook).toMatchObject({
+      type: 'command',
+      command: '/bin/sh',
+      args: ['${CLAUDE_PLUGIN_ROOT}/bin/run-node', '${CLAUDE_PLUGIN_ROOT}/dist/session-start.js'],
+    });
     expect(Object.keys(h.hooks)).toEqual(['SessionStart']);
+  });
+
+  it('no plugin file starts `node` from PATH: every start goes through bin/run-node', () => {
+    for (const f of ['.mcp.json', join('hooks', 'hooks.json')]) {
+      expect(readFileSync(join(PLUGIN_ROOT, f), 'utf8'), f).not.toMatch(/"command":\s*"node"/);
+    }
+    for (const f of readdirSync(join(PLUGIN_ROOT, 'commands'))) {
+      const text = readFileSync(join(PLUGIN_ROOT, 'commands', f), 'utf8');
+      for (const run of text.match(/!`[^`]*`/g) ?? []) {
+        expect(run, f).toMatch(/^!`\/bin\/sh "\$\{CLAUDE_PLUGIN_ROOT\}\/bin\/run-node" /);
+      }
+    }
   });
 
   it('no committed plugin file declares the permission-relay capability', () => {
@@ -68,7 +84,7 @@ describe('commands (M5-SPEC §6, §9)', () => {
     expect(fm).not.toMatch(/argument-hint/);
     expect(text).not.toContain('$ARGUMENTS');
     const injected = [...text.matchAll(/!`([^`]*)`/g)].map((m) => m[1]);
-    expect(injected).toEqual(['node "${CLAUDE_PLUGIN_ROOT}/dist/logout.js"']);
+    expect(injected).toEqual(['/bin/sh "${CLAUDE_PLUGIN_ROOT}/bin/run-node" "${CLAUDE_PLUGIN_ROOT}/dist/logout.js"']);
     expect(existsSync(join(DIST, 'logout.js'))).toBe(true);
   });
 });

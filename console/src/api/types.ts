@@ -71,7 +71,7 @@ export interface Me {
   name?: string
   member: string
   teammates: string[]
-  /** The viewer's email, when the server gives it (the join panel's commands use it). */
+  /** The viewer's email, when the server gives it (the console does not show it now). */
   email?: string
   /** The viewer's role on the roster (M6), from relays that say. */
   role?: RosterRole
@@ -79,22 +79,12 @@ export interface Me {
 
 /**
  * GET /api/join: answered by the console server itself, never the relay (plugin/src/
- * console-app.ts). What a new member needs to install the plugin; nothing secret.
+ * console-app.ts). The console reads the relay's address from it (the local console's setup
+ * line); the server's other fields are not used.
  */
 export interface Join {
   relay_url: string
   team: string
-  /** The team-relay repository, or null. */
-  repo_url: string | null
-  /**
-   * What `/plugin marketplace add` takes (M5 §1): a GitHub owner/repo or a git URL, or null
-   * (ask the team owner). Absent from older console servers.
-   */
-  marketplace_source?: string | null
-  marketplace: string
-  plugin: string
-  /** True when the team's relay is the plugin's default (no RELAY_URL needed; /team-relay:login takes no relay URL). */
-  default_relay?: boolean
 }
 
 export type RosterRole = 'owner' | 'member'

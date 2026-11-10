@@ -21,7 +21,7 @@ import { Avatar, Panel } from './primitives'
 // invitation until its person accepts (at sign-in, or in the console); the owner sees it as
 // Invited, and can withdraw it (which retires nothing). The panel folds away to its header
 // (with the counts still showing), and stays as the viewer left it in this browser.
-// M11 §6: each member's setup progress ("5 of 7 set up") and whether their Mac answers now, from
+// M11 §6: each member's setup progress ("set up", or "1 of 2 set up") and whether their Mac answers now, from
 // members-status; after inviting someone, an owner copies the invite message to send them.
 
 export const MEMBERS_STORAGE_KEY = 'team-relay-console.members'
@@ -78,7 +78,7 @@ function InviteCopy() {
     if (join.isPending) return null
     return (
       <p className="text-[12px] text-subtle" data-no-invite>
-        Send them the team&apos;s console address; its Setup page has the setup command.
+        Send them the team&apos;s page address; its Setup page has the setup line.
       </p>
     )
   }
@@ -99,9 +99,7 @@ function Progress({ p }: { p: MemberProgress }) {
         aria-hidden
         className={cn('size-1.5 shrink-0 rounded-full', p.answering ? 'bg-ok' : 'border border-faint')}
       />
-      <span className="tnum">
-        {p.done} of {SETUP_STEPS} set up
-      </span>
+      <span className="tnum">{p.done === SETUP_STEPS ? 'set up' : `${p.done} of ${SETUP_STEPS} set up`}</span>
       {p.answering ? <span className="text-ok">answering now</span> : <span className="sr-only">, not answering now</span>}
     </span>
   )

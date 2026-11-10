@@ -116,9 +116,10 @@ and malformed); unset → `/setup` is 404. The load balancer routes `/setup` to 
 
 The script (bash 3.2, `set -euo pipefail`, macOS only, never `sudo`, re-runnable):
 
-1. Finds `node` (>= 22, the plugin's own minimum) and `claude` (PATH, then `~/.local/bin/claude`, `~/.claude/local/claude`).
-   No `node`: says how to install it (nodejs.org) and stops. No `claude`: offers to install Claude
-   Code with its official installer (asks first) and stops on no.
+1. Finds `node` (>= 22.12, the plugin's own minimum) and `claude` (PATH, then `~/.local/bin/claude`, `~/.claude/local/claude`).
+   Since 10 Nov 2026 it always installs (or finds) a pinned official Node.js privately and runs
+   with it, whatever node is on PATH (see "Simpler joining" §3). No `claude`: offers to install Claude Code with its
+   official installer (asks first) and stops on no.
 2. `claude auth status`; not signed in → `claude auth login`.
 3. `claude plugin marketplace add __MARKETPLACE__` (skipped when present), then
    `claude plugin install --scope user team-relay@<marketplace name>`, or `claude plugin update
@@ -129,11 +130,12 @@ The script (bash 3.2, `set -euo pipefail`, macOS only, never `sudo`, re-runnable
    install check, the launcher, the daemon's update check): the first user-scope entry with an
    absolute `installPath` under exactly the key it installed, `team-relay@<marketplace name>`;
    never another scope or another marketplace's copy. In this order: `login`, `folders`, `drive`
-   (never fatal), `daemon install`, `status`.
+   (never fatal), `daemon install`, `status --after-setup`.
    - `login`: the browser sign-in of M5 against `__RELAY_URL__` (team chosen in the browser);
      skipped when a valid sign-in for this relay exists.
-   - `folders`: shows the team's GitHub orgs and asks for the folders that hold those clones
-     (one per line, empty line ends; `~` allowed; each must exist, not be `/` or `$HOME`); shows
+   - `folders`: shows the team's GitHub orgs and opens the Mac's folder chooser for the
+     folders that hold those clones (changed 10 Nov 2026, see "Simpler joining" §4; typed, one
+     per line, only when no chooser can open; each must exist, not be `/` or `$HOME`); shows
      how many clones it found in each. Extra folders only when the team allows them. Re-running
      shows the current list and lets the member keep or replace it. When a chosen folder is under
      `~/Documents`, `~/Desktop`, `~/Downloads` or `~/Library/Mobile Documents`, one sentence says
@@ -154,12 +156,18 @@ The script (bash 3.2, `set -euo pipefail`, macOS only, never `sudo`, re-runnable
      loaded), a wait (up to 20 s) until `launchctl print gui/<uid>/<label>` no longer finds it,
      and `launchctl bootstrap gui/<uid>`, tried up to 3 more times 2 s apart when it fails. Files
      mode 600, folders 700.
-   - `status`: prints the checklist of §6 from the relay's view. "Folders chosen" and "Google
-     Drive connected" need nothing only when the boundaries were read and hold no orgs (or no
-     drives); boundaries that could not be read leave both not known, never ticked (the console
-     too). While the self-test has not run yet it says "Running the self-test now; this takes
-     about a minute." and looks again every 5 s, for up to 90 s, before printing the checklist.
-5. Ends with the console URL and "open it to accept the boundaries".
+   - `status`: prints the checklist of §6 from the relay's view (two steps since 10 Nov 2026,
+     "Simpler joining" §2). "Folders chosen" and "Google Drive connected" need nothing only when
+     the boundaries were read and hold no orgs (or no drives); boundaries that could not be read
+     leave both not known, never ticked (the console too). While the self-test has not run yet
+     it says so once and looks again every 5 s, for up to 90 s in all, before printing the
+     checklist. `--after-setup` (the script's last step) also waits, in the same loop, while the
+     Mac has not reported in yet, and ends with the closing line (see 5).
+5. Ends with "Done. Go back to the team page in your browser", plus " and click Accept" only
+   when the team shares something this member has not accepted (printed by `status
+   --after-setup`), then the console URL. When `status` fails, the script says "(Could not
+   check with the team just now.)" and "Done. Go back to the team page in your browser.", then
+   the URL (10 Nov 2026).
 
 `setup-cli.js daemon uninstall` removes the agent; `setup-cli.js` with no command prints help.
 
@@ -171,8 +179,11 @@ command and the console links are that host; a relay deployed at its run.app URL
 
 - Owners: after adding a member (M6), the console shows **Copy invite message**: the console URL,
   the team name and the setup command, in plain text.
-- The invitee accepts the invitation (M9) and lands on **Join**: a checklist with live ticks from
-  `GET members/status` and `me/acceptance` (polled every 5 s while the page is open):
+- The invitee accepts the invitation (M9) and lands on **Join** (the Setup page). Since 10 Nov
+  2026 it shows two plain steps with "Ask the team" always below them, and the invite message
+  and the team page's join card are plain too: see "Simpler joining" §1-§2. The seven checks below are still what step 1 ("Set up
+  your Mac") is made of. Live ticks from `GET members/status` and `me/acceptance` (polled every
+  5 s while the page is open):
   1. Run the setup command (copy button) - ticked when a status has arrived.
   2. Claude Code found and signed in - `claude.found && claude.signed_in`.
   3. Answering in the background - `answering`.
@@ -183,7 +194,8 @@ command and the console links are that host; a relay deployed at its run.app URL
      self-test now; this takes about a minute." (not a failure).
   Each unticked step says in one sentence what to do. All ticked: "You're set up. Ask the team"
   links to Ask.
-- **Members** shows each member's progress (n of 7) and whether they are answering now.
+- **Members** shows each member's progress ("set up", or "n of 2 set up", since 10 Nov 2026)
+  and whether they are answering now.
 
 ## 7. Repository checks and deploy fixes
 
@@ -206,8 +218,138 @@ command and the console links are that host; a relay deployed at its run.app URL
   questions only; the viewer is the IAP identity, never a value from the browser. Writes keep the
   console's existing rules (same origin, JSON, body cap).
 - The setup script is public and holds no secret. It runs as the user, never as root. Its only
-  network calls are to the relay, GitHub (marketplace) and, when the member agrees, Claude Code's
-  installer.
+  network calls are to the relay, GitHub (marketplace), nodejs.org (one pinned, hash-checked
+  build, when the Mac does not have it yet; 10 Nov 2026) and, when the member agrees,
+  Claude Code's installer.
 - The daemon has the member's sign-in and Drive token (as the channel server did); the child it
   runs keeps M10's limits. The LaunchAgent and launcher are the member's own files, mode 600.
 - Status holds counts and booleans only: no paths, folder names, questions or answers.
+
+## Simpler joining (maintainer, 10 Nov 2026)
+
+Most members use the Claude Code desktop app and have never used Terminal. Joining must not show
+them words like plugin, marketplace, channel, CLI, Node, daemon, LaunchAgent, repo root or
+boundaries version: plain, short sentences that say what to do. The maintainer approved four
+decisions; where they differ from §5 and §6, these win.
+
+### 1. One simple join card (console)
+
+- The developer "Join the team" panel (marketplace, install, channel and `ANSWERER_READ_DIRS`
+  commands) is removed from the Team page, with what only it used (`console/src/lib/join.ts`).
+  `GET /api/join` stays: the local console reads the relay's address from it for the setup line
+  (the console now reads only `relay_url` and `team`; the server's other fields are unchanged).
+- In its place, a viewer who has not joined yet sees one small card, **Join in 2 minutes**:
+  1. Open Terminal: press Cmd+Space, type Terminal, press Enter.
+  2. Paste this line and press Enter, then answer its questions: the setup line, with a big
+     Copy button.
+  3. Come back to this page and click Accept (a button, "Go to Accept", that opens the Setup
+     page, where the list and the Accept button are).
+  A link "See your progress" opens Setup. The card shows once progress has loaded and the
+  viewer has not joined; joined means their Mac has reported in at least once and they have
+  accepted at least once (or the team shares nothing yet). Later trouble (the Mac switched off,
+  a check failing) or something new to accept does not bring the card back: the Setup tab's
+  count and the accept banner show those. While the card shows, the accept banner does not. A
+  relay without setup progress (404) shows no card.
+- The owner's **Copy invite message** is plain text, no markdown:
+
+  ```
+  You're invited to the team <name> on Team relay.
+
+  <console URL>/
+
+  Open the link and accept the invitation. Then, on your Mac:
+
+  1. Open Terminal: press Cmd+Space, type Terminal, press Enter.
+  2. Paste this line and press Enter, then answer its questions:
+  curl -fsSL <console URL>/setup | bash
+  3. Come back to the page and click Accept.
+  ```
+
+### 2. Two plain steps on Setup, then Ask the team (console and `setup-cli status`)
+
+The seven steps of §6 become two:
+
+1. **Set up your Mac**: done when every old check is (Run the setup command, Claude Code found
+   and signed in, answering in the background, folders chosen, Google Drive connected,
+   self-test passed), with the same rules: boundaries that could not be read never count as
+   done for folders and Drive, and the self-test's not-run-yet reason shows as running ("Your
+   Mac is checking that everything works. This takes about a minute."), not failed. The step
+   holds the setup line with its copy box. The old checks show only while one is not done, each
+   as one sentence of what to do (for example "Your Mac isn't answering right now. Make sure
+   it's switched on; if this stays, run the setup line again."), never their technical names.
+   Before the Mac has reported anything, none are listed (the step's own text says what to do).
+   A failed self-test says to run the setup line again and, if it still fails, to show a team
+   owner the Mac's reason.
+2. **Accept what the team shares** (old step 6): the topic, the GitHub orgs, the shared drives
+   and whether own folders are allowed, as a readable list; items added since the viewer last
+   accepted are marked "new"; an Accept button; a 409 says what the team shares changed and
+   shows the latest.
+
+**Ask the team** is not a step: below the two, always, "Ask your teammates a question at any
+time." with an "Ask the team" button to the Ask page; both steps done, it becomes "You're all
+set" with a big "Ask the team" button. (A step for it would have ticked off again: `my-requests`
+lists only questions that have not expired.) Nothing reads whether anyone has asked. The
+Members panel shows "set up" for a member with both steps done, else "n of 2 set up". The page
+tabs are Ask, Team, Setup; the landing page is still the team's. `setup-cli status` prints the
+same two steps (the Mac's open checks indented under step 1), then "Ask the team: <console
+URL>/ask".
+
+### 3. Setup installs Node.js itself (`relay/relay/static/setup.sh`)
+
+- The script always runs with its own copy of a pinned Node.js, whatever node Terminal has: the
+  Claude Code app may not see Terminal's PATH, and the plugin's launcher (below) falls back to
+  this copy. When there is no working copy of the pinned build, it downloads the official build
+  `https://nodejs.org/dist/v22.23.4/node-v22.23.4-darwin-<arch>.tar.gz` (`uname -m`: `arm64` ->
+  `darwin-arm64`, `x86_64` -> `darwin-x64`; anything else stops), and checks its SHA-256
+  against the values pinned in the script (from nodejs.org's `SHASUMS256.txt`): arm64
+  `c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428`, x64
+  `efcc2b0db6f94bf53eddb038fe2b370277a042bd29e4f19b8f8e23598795b819`. Any other hash: it
+  stops and installs nothing.
+- It unpacks into a temporary folder inside `~/.local/share/team-relay` (mode 700), checks
+  `bin/node` is there, and renames it to `~/.local/share/team-relay/node-v22.23.4-darwin-<arch>`
+  (the tarball's own name, so a new pin is a new folder and is downloaded), so a half-unpacked
+  copy is never used. A copy that is there but does not run is replaced the same way. No sudo.
+  That node runs everything after: `setup-cli` and, through its own path, the LaunchAgent. Once
+  `daemon install` has succeeded with it, the other `node-v*` folders in
+  `~/.local/share/team-relay` (older pins) are removed, and nothing else there. Every step of the download (folder, mode,
+  download, hash, unpack, move) stops with one plain sentence when it fails, never a bare exit.
+- Nothing is linked onto PATH (no `~/.local/bin/node`). The plugin no longer depends on `node`
+  from Claude Code's PATH: `.mcp.json`, `hooks/hooks.json` (both generated by
+  `plugin/scripts/generate.ts`) and the `!` lines of `/team-relay:logout` and `/team-relay:drive`
+  run `/bin/sh ${CLAUDE_PLUGIN_ROOT}/bin/run-node <script> <args>`. `plugin/bin/run-node` (POSIX
+  sh) uses the first `node` on PATH when it is 22.12 or newer (absolute PATH entries only: an
+  empty or relative entry such as `.` is skipped, so no node from the current folder runs;
+  the version must read `vMAJOR.MINOR.PATCH`, numbers of at most 9 digits), else the newest
+  `~/.local/share/team-relay/node-v<version>-*/bin/node` that runs and is new enough, else prints
+  "Team relay needs its helper: paste the setup line from your team page into Terminal again."
+  on stderr and exits 1; then `exec "$node" "$@"`.
+- The pinned values are plain assignments that only an edit of the script changes; no
+  environment variable can replace them. The tests (`scripts/tests/setup-script.test.sh`) serve
+  their own tarballs and run a copy of the script with the two hash lines edited by `sed`; the
+  hash-mismatch case runs the script with its real values.
+- Every message is plain ("Getting a helper the setup needs (about 50 MB)..."), and the script
+  ends as §5 item 5 says. The Claude Code install is unchanged (it asks first).
+
+### 4. Pick folders in Finder (`plugin/src/setup-cli.ts folders`)
+
+- Instead of typing paths, `folders` opens the Mac's own folder chooser: `osascript` run with
+  `execFile` (no shell), `choose folder with prompt ... with multiple selections allowed`, the
+  prompt naming the team's GitHub orgs and passed as an argument of the script's run handler
+  (never part of the script text). The script first calls `activate`, so the window comes to the
+  front, and turns each folder into a POSIX path followed by a NUL (a folder name may hold a new
+  line, never a NUL; the one new line osascript adds at the end is dropped). `execFile` has a
+  10-minute timeout: a chooser left open that long closes and the member types the folders
+  instead. It then says what it found in each folder in plain words ("Found 7 project folders in
+  DEV.").
+- Cancel keeps the current list (or none). Folders that cannot be used are said and left out;
+  when none can, the list stays as it was. No osascript, or it fails for another reason (no
+  screen): the member types the paths as before. The same checks as before (exists, not `/` or
+  the home folder). On a re-run the current list is shown with "Keep these folders?"; no opens
+  the chooser again. A Cancel after that explicit no asks "Stop using project folders? [y/N]"
+  (for own folders, "Stop using folders of your own? [y/N]"): y saves none, anything else keeps
+  the current list.
+- Own folders, when the team allows them, the same way with a second chooser.
+- The chooser is injected (`SetupDeps.chooseFolders`), so tests never run osascript.
+- The other lines of `setup-cli` are plain and short too (sign-in, Drive, the background
+  answerer: "Your Mac now answers your team in the background whenever it is on. Claude Code
+  does not need to be open.").

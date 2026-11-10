@@ -108,7 +108,7 @@ export function useMe() {
   })
 }
 
-/** The join panel's values (the console server's own configuration): read once. */
+/** GET /api/join (the console server's own configuration): the relay's address for the local console's setup line. Read once. */
 export function useJoin() {
   const team = useTeam()
   return useQuery<Join, ApiError>({

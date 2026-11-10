@@ -212,12 +212,11 @@ describe('Members panel: member (M6 §4)', () => {
 })
 
 describe('in the console', () => {
-  it('an owner gets the Members panel with the add form and the invite hint', async () => {
+  it('an owner gets the Members panel with the add form', async () => {
     window.localStorage.clear()
     server([{ member: 'alice', emails: ['alice@example.com'], role: 'owner' }, ...OWNER_VIEW.filter((m) => m.member !== 'alice')])
     renderWithClient(<App />)
     await screen.findByLabelText('Google email')
-    expect(document.querySelector('[data-invite-hint]')).not.toBeNull()
     // Below the team map and the agents, above the live activity.
     const map = document.getElementById('team-map-title')!.closest('section')!
     const members = document.getElementById('members-title')!.closest('section')!
@@ -338,17 +337,37 @@ describe('a refused sign-in (M5 §6, M6 §4)', () => {
 
 describe('owner from /me (M6 §2)', () => {
   it('uses the role /me gives while the roster has not loaded', async () => {
-    setTransport(async (path) => {
-      const url = new URL(path, 'http://console.invalid/')
-      if (url.pathname === '/api/me') return json({ ...fixtureMe, role: 'owner' })
-      if (url.pathname === '/api/join') return json(fixtureJoin)
-      if (url.pathname === '/api/directory') return json(fixtureDirectory)
-      if (url.pathname === '/api/activity') return json(fixtureActivity)
-      if (url.pathname === '/api/roster') return new Promise<Response>(() => {})
-      return json({ error: 'not_found' }, 404)
+    const teams = () => ({
+      teams: [{ team: 'demo', name: 'Demo', member: 'alice', role: 'owner' }],
+      invitations: [],
+      admin: false,
+      teams_created: null,
+      max_teams_created: null,
+      suggested_member: null,
+      can_manage_teams: true,
+      default_team: 'demo',
     })
-    renderWithClient(<App />)
-    await waitFor(() => expect(document.querySelector('[data-invite-hint]')).not.toBeNull())
+    for (const role of ['owner', 'member'] as const) {
+      setTransport(async (path) => {
+        const url = new URL(path, 'http://console.invalid/')
+        if (url.pathname === '/api/teams') return json(teams())
+        if (url.pathname === '/api/me') return json({ ...fixtureMe, role })
+        if (url.pathname === '/api/join') return json(fixtureJoin)
+        if (url.pathname === '/api/directory') return json(fixtureDirectory)
+        if (url.pathname === '/api/activity') return json(fixtureActivity)
+        if (url.pathname === '/api/roster') return new Promise<Response>(() => {})
+        return json({ error: 'not_found' }, 404)
+      })
+      const r = renderWithClient(<App />)
+      await waitFor(() => expect(document.querySelector('[data-agent="bob"]')).not.toBeNull())
+      // The team's settings offer Delete team only to an owner, by /me's role until the roster is read.
+      if (role === 'owner') await waitFor(() => expect(document.querySelector('[data-delete-team]')).not.toBeNull())
+      else {
+        await act(async () => {})
+        expect(document.querySelector('[data-delete-team]')).toBeNull()
+      }
+      r.unmount()
+    }
   })
 })
 

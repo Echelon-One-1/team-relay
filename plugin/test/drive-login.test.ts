@@ -460,7 +460,7 @@ describe('commands/drive.md', () => {
     expect(fm).toMatch(/^disable-model-invocation: true$/m);
     expect(fm).not.toMatch(/allowed-tools/);
     const injected = [...text.matchAll(/!`([^`]*)`/g)].map((m) => m[1]);
-    expect(injected).toEqual(['node "${CLAUDE_PLUGIN_ROOT}/dist/drive-cli.js" $ARGUMENTS']);
+    expect(injected).toEqual(['/bin/sh "${CLAUDE_PLUGIN_ROOT}/bin/run-node" "${CLAUDE_PLUGIN_ROOT}/dist/drive-cli.js" $ARGUMENTS']);
     expect(ENTRIES).toContain('drive-cli');
   });
 });

@@ -126,9 +126,9 @@ export function askRefusal(err: ChangeError): string {
 /** A refused acceptance, in words for the Join page. */
 export function acceptRefusal(err: ChangeError): string {
   if (err.notOnTeam || err.signedOut) return err.message
-  if (err.relayStatus === 409 && err.relayError === 'not_set') return "The team's boundaries are not set any more. Ask an owner."
-  if (err.relayStatus === 409) return 'The boundaries changed while you were reading. Read them again below, then accept.'
-  if (err.relayStatus === 429) return 'Too many tries just now. Wait a minute, then accept again.'
-  if (err.relayStatus === 403 || err.relayStatus === 404) return 'This relay cannot take acceptances from the console yet.'
-  return err.relayStatus !== null ? 'The relay refused that. Try again.' : err.message
+  if (err.relayStatus === 409 && err.relayError === 'not_set') return 'The team shares nothing at the moment, so there is nothing to accept. Ask a team owner.'
+  if (err.relayStatus === 409) return 'What the team shares changed while you were reading. Read it again below, then click Accept.'
+  if (err.relayStatus === 429) return 'Too many tries just now. Wait a minute, then click Accept again.'
+  if (err.relayStatus === 403 || err.relayStatus === 404) return "Accepting from this page doesn't work for this team yet. Ask a team owner."
+  return err.relayStatus !== null ? "That didn't work. Try again." : err.message
 }

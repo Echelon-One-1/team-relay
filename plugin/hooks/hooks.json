@@ -6,8 +6,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/dist/session-start.js"],
+            "command": "/bin/sh",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/bin/run-node",
+              "${CLAUDE_PLUGIN_ROOT}/dist/session-start.js"
+            ],
             "timeout": 10
           }
         ]

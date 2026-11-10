@@ -36,7 +36,7 @@ afterEach(() => {
   resetTransport()
   resetFeedHealth()
   setConsoleKey(null)
-  // What a test left in storage (the join panel's open state) never leaks into the next.
+  // What a test left in storage (a panel's open state) never leaks into the next.
   window.localStorage.clear()
   window.sessionStorage.clear()
 })
