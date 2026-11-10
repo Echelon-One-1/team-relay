@@ -19,6 +19,7 @@ from .store import (
     AdminAuditEntry,
     AuditEntry,
     BeyondHead,
+    BoundariesFn,
     CreateOutcome,
     CredentialRecord,
     Envelope,
@@ -40,6 +41,7 @@ from .store import (
     RosterOutcome,
     RosterState,
     StreamPage,
+    TeamBoundaries,
     TeamCreateFn,
     TeamDeleteFn,
     TeamGone,
@@ -81,6 +83,8 @@ class MemoryStore:
         self._logins: dict[str, LoginDoc] = {}
         self._codes: dict[str, LoginCode] = {}
         self._login_counters: dict[str, int] = {}
+        # teams/{team}/settings/boundaries (M10-SPEC §1).
+        self._boundaries: dict[str, TeamBoundaries] = {}
 
     async def aclose(self) -> None:
         return None
@@ -528,6 +532,8 @@ class MemoryStore:
         docs += [("idempotency", k) for k in sorted(self._idempotency) if k[0] == team]
         docs += [("counter", k) for k in sorted(self._counters) if k[0] == team]
         docs += [("retired", m) for m in sorted(self._retired.get(team, {}))]
+        if team in self._boundaries:
+            docs.append(("boundaries", team))
         docs += [("audit", i) for i in range(sum(1 for e in self._audit if e.team == team))]
         return docs
 
@@ -557,6 +563,8 @@ class MemoryStore:
             del self._counters[key]
         elif kind == "retired":
             del self._retired[team][key]
+        elif kind == "boundaries":
+            del self._boundaries[key]
         elif kind == "audit":
             index = next(i for i, e in enumerate(self._audit) if e.team == team)
             del self._audit[index]
@@ -575,6 +583,29 @@ class MemoryStore:
             self._retired.pop(team, None)
             record.purge_complete = True
             return True
+
+    # Boundaries (M10-SPEC §1) ---------------------------------------------------------
+    async def get_boundaries(self, team: str) -> TeamBoundaries | None:
+        async with self._lock:
+            return copy.deepcopy(self._boundaries.get(team))
+
+    async def set_boundaries[T](
+        self, team: str, member: str, fn: BoundariesFn[T], quotas: Sequence[Quota] = ()
+    ) -> T:
+        async with self._lock:
+            record = self._teams.get(team)
+            if record is not None and record.status == TEAM_DELETED:
+                raise TeamGone(team)
+            change = fn(
+                copy.deepcopy(self._boundaries.get(team)),
+                copy.deepcopy(self._roster.get(team, {}).get(member)),
+            )
+            if change.boundaries is None:
+                return change.result
+            self._take(team, quotas)
+            self._boundaries[team] = copy.deepcopy(change.boundaries)
+            self._audit.extend(copy.deepcopy(change.audit))
+            return change.result
 
     async def get_account(self, email_sha256: str) -> AccountRecord | None:
         async with self._lock:

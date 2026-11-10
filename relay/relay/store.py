@@ -40,6 +40,9 @@ that need a transaction live in exactly one primitive each:
   one transaction (M9-SPEC §1, §4).
 - :meth:`Store.purge_team`: remove a deleted team's documents in bounded batches, each a
   transaction that first checks the team is still deleted; resumable.
+- :meth:`Store.set_boundaries`: read the team, its boundaries and the actor's roster entry, run
+  a pure function, count the quotas, and write the boundaries and the audit, in one
+  transaction (M10-SPEC §1). The version check and the owner rule live in that function.
 
 Teams (M9-SPEC §1) are ``teams/{team}`` records. A team the API created is ``seed=False``; the
 team file's teams are seed teams, and a record written before M9 (``roster_version`` only)
@@ -394,6 +397,49 @@ class TeamGone(Exception):
     """The team is deleted: a roster change or a credential for it writes nothing."""
 
 
+# Boundaries (M10-SPEC §1) -------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DriveBoundary:
+    """A shared Google Drive members answer from: the Workspace domain whose Drive for desktop
+    mount counts, and the shared drive's name as it appears under "Shared drives"."""
+
+    domain: str
+    shared_drive: str
+
+
+@dataclass
+class TeamBoundaries:
+    """``teams/{team}/settings/boundaries``: what a team's members answer about and from. The
+    owners set it; ``version`` counts the changes (1 for the first). Never expires; purged
+    with the team."""
+
+    version: int
+    topic: str
+    github_orgs: list[str]
+    drives: list[DriveBoundary]
+    member_folders: bool
+    updated_at: datetime
+    updated_by: str
+    # M10-SPEC §7.1: the version in which each item was last added: kept while the item stays,
+    # the new version when it is added or added back after a removal. Orgs by lower-case name,
+    # drives by domain and name; member folders while allowed (None while not).
+    org_since: dict[str, int]
+    drive_since: dict[DriveBoundary, int]
+    member_folders_since: int | None
+
+
+@dataclass
+class BoundariesChange[T]:
+    """What a :meth:`Store.set_boundaries` function asks the store to write: the team's new
+    boundaries (whole) and the audit, or nothing (``boundaries`` None)."""
+
+    result: T
+    boundaries: TeamBoundaries | None = None
+    audit: list[AuditEntry] = field(default_factory=list)
+
+
 def roster_memberships(entries: Mapping[str, RosterEntry]) -> dict[str, str]:
     """email -> member over a roster's entries, invited ones included: the account index
     says where to look (for a membership or an invitation), the roster decides which."""
@@ -685,6 +731,8 @@ type TeamCreateFn[T] = Callable[
     [TeamRecord | None, AccountRecord | None, AccountRecord | None], TeamCreation[T]
 ]
 type TeamDeleteFn[T] = Callable[[TeamRecord | None], TeamDeletion[T]]
+# The stored boundaries (None when never set) and the actor's roster entry (None when absent).
+type BoundariesFn[T] = Callable[[TeamBoundaries | None, RosterEntry | None], BoundariesChange[T]]
 
 
 class Store(Protocol):
@@ -896,6 +944,21 @@ class Store(Protocol):
         the account index), in transactions of at most PURGE_BATCH that each first check the
         team is still deleted. True when nothing is left (the record is then marked
         ``purge_complete``); False when the budget ran out or the team is not deleted."""
+        ...
+
+    # Boundaries (M10-SPEC §1) -------------------------------------------------------
+    async def get_boundaries(self, team: str) -> TeamBoundaries | None:
+        """The team's boundaries, None when never set."""
+        ...
+
+    async def set_boundaries[T](
+        self, team: str, member: str, fn: BoundariesFn[T], quotas: Sequence[Quota] = ()
+    ) -> T:
+        """Read the team (a deleted one raises :class:`TeamGone`, nothing written), its
+        boundaries and ``member``'s roster entry; run ``fn`` (pure; raising writes nothing).
+        When it returns boundaries: every quota (the team's counters) must be under its limit
+        (else :class:`QuotaExceeded`, nothing written) and is counted, and the boundaries are
+        written whole with the audit; one transaction."""
         ...
 
     async def get_account(self, email_sha256: str) -> AccountRecord | None: ...

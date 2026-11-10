@@ -14,7 +14,7 @@ import { mapMembers, TeamMap } from '@/components/console/team-map'
 import { CreateTeamDialog, NoTeamPage, TeamSettings } from '@/components/console/teams'
 import { consoleKey, isHosted } from '@/api/key'
 import { teamsKey, useActivity, useConnection, useDirectory, useMe, useRoster, useTeams } from '@/hooks/queries'
-import { NavContext, TeamContext, useNav, type ConsoleView, type Nav } from '@/hooks/team'
+import { NavContext, TeamContext, useNav, type ConsoleFocus, type ConsoleView, type Nav } from '@/hooks/team'
 import { useNow } from '@/hooks/use-now'
 import { sortedRequests } from '@/lib/activity'
 import { isOwner } from '@/lib/roster'
@@ -46,7 +46,8 @@ export function Console() {
   const owner = roster.data ? isOwner(roster.data, member) : me.data?.role === 'owner'
   // An older relay without a roster (404): no Members panel at all.
   const rosterMissing = roster.error?.kind === 'not_found'
-  // M9 §7.7: an owner's settings for a team the viewer holds (the relay refuses a file team).
+  // M9 §7.7, M10 §1: the settings of a team the viewer holds: its boundaries for everyone (owners
+  // edit them), and Delete team for owners (the relay refuses a file team).
   const entry = nav.teams?.teams.find((t) => t.team === nav.team) ?? null
 
   // M6 §4 (hosted): a signed-in account the relay does not know sees this, and no data. With
@@ -87,7 +88,13 @@ export function Console() {
           <Members roster={roster.data} loading={roster.isPending} failed={roster.isError} me={member} owner={owner} />
         )}
         <Activity requests={requests} me={member} now={now} loading={activity.isPending} onOpen={setOpenId} />
-        {entry && entry.role === 'owner' && owner ? <TeamSettings entry={entry} /> : null}
+        {entry ? (
+          <TeamSettings
+            entry={entry}
+            owner={entry.role === 'owner' && owner}
+            roleKnown={roster.data !== undefined || me.data !== undefined || roster.isError}
+          />
+        ) : null}
       </main>
       <RequestSheet req={selected} me={member} now={now} onClose={() => setOpenId(null)} />
     </div>
@@ -132,20 +139,26 @@ function Teams() {
   const [chosen, setChosen] = useState<string | null>(null)
   const [view, setView] = useView()
   const [creating, setCreating] = useState(false)
+  // What to bring into view on which team's page, until that page has done so.
+  const [focusOn, setFocusOn] = useState<{ team: string; part: ConsoleFocus } | null>(null)
 
   const data = teams.data
   const team = data ? pickTeam(data, chosen) : null
   const selectTeam = useCallback(
-    (t: string) => {
+    (t: string, focus?: ConsoleFocus) => {
       setChosen(t)
       rememberTeam(t)
       setView('team')
+      setFocusOn(focus ? { team: t, part: focus } : null)
     },
     [setView],
   )
+  const clearFocus = useCallback(() => setFocusOn(null), [])
+  // Only once that team is the one shown (a new team appears after the teams are read again).
+  const focus = focusOn !== null && focusOn.team === team ? focusOn.part : null
   const nav = useMemo<Nav>(
-    () => ({ teams: data ?? null, team, selectTeam, view, setView, openCreate: () => setCreating(true) }),
-    [data, team, selectTeam, view, setView],
+    () => ({ teams: data ?? null, team, selectTeam, view, setView, openCreate: () => setCreating(true), focus, clearFocus }),
+    [data, team, selectTeam, view, setView, focus, clearFocus],
   )
 
   if (teams.isPending) return <Loading />

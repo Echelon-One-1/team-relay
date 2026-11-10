@@ -59,6 +59,12 @@ MAX_TEAM_NAME_LENGTH = 60
 # Unicode categories a display name may not hold: controls, format characters (the bidi
 # overrides among them), surrogates, private use, unassigned, and line/paragraph separators.
 _NAME_FORBIDDEN = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
+# A lower-case DNS name (M10-SPEC §7.5): labels of a-z0-9- not starting or ending with "-", at
+# least two, at most 253 characters, the last not all digits (not an IPv4 address), no
+# trailing dot. Team boundaries' drive domains and RELAY_ALLOWED_DOMAINS both use it.
+MAX_DOMAIN_LENGTH = 253
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+DOMAIN_RE = re.compile(rf"(?:{_LABEL}\.)+{_LABEL}")
 
 AuthMode = Literal["google", "static"]
 Role = Literal["owner", "member"]
@@ -85,6 +91,38 @@ def normalise_email(raw: Any) -> str | None:
     if not raw.isascii() or EMAIL_RE.fullmatch(raw) is None:
         return None
     return raw.lower()
+
+
+def valid_domain(domain: Any) -> bool:
+    """Whether ``domain`` is a lower-case DNS name as :data:`DOMAIN_RE` says."""
+    if not isinstance(domain, str) or len(domain) > MAX_DOMAIN_LENGTH:
+        return False
+    if DOMAIN_RE.fullmatch(domain) is None:
+        return False
+    return not domain.rsplit(".", 1)[1].isdigit()
+
+
+def email_domain(email: str) -> str:
+    """The part of a (normalised) email after its ``@``."""
+    return email.rsplit("@", 1)[1]
+
+
+def parse_allowed_domains(raw: str | None) -> frozenset[str]:
+    """``RELAY_ALLOWED_DOMAINS`` (M10-SPEC §7.2): comma-separated lower-case domains.
+    Unset or blank: empty (any domain, as before). Whitespace around an entry is dropped; an
+    empty entry or one that is not a lower-case domain name is a startup error."""
+    if raw is None or not raw.strip():
+        return frozenset()
+    entries = [entry.strip() for entry in raw.split(",")]
+    for index, entry in enumerate(entries):
+        if not entry:
+            raise ConfigError("RELAY_ALLOWED_DOMAINS has an empty entry")
+        if not valid_domain(entry):
+            raise ConfigError(
+                f"RELAY_ALLOWED_DOMAINS entry {index + 1} is not a lower-case domain name "
+                "(e.g. example.com)"
+            )
+    return frozenset(entries)
 
 
 def fold_team_name(name: str) -> str:
@@ -272,6 +310,21 @@ class TeamConfig:
     delegates: Mapping[str, Delegate] = field(default_factory=dict)
     # M9-SPEC §4: the admins' lower-cased emails.
     admins: frozenset[str] = frozenset()
+    # M10-SPEC §7.2: RELAY_ALLOWED_DOMAINS; empty: every domain (the behaviour before it).
+    allowed_domains: frozenset[str] = frozenset()
+
+    def email_allowed(self, email: str) -> bool:
+        """Whether a person's email may be one on this relay (M10-SPEC §7.2): its domain is
+        exactly one of ``allowed_domains``, or none are set. A subdomain is not its parent."""
+        return not self.allowed_domains or email_domain(email) in self.allowed_domains
+
+    def google_identity_allowed(self, email: str, hd: str | None) -> bool:
+        """A Google identity's ``email`` (verified by the caller) and ``hd`` claim (M10-SPEC
+        §7.2): with domains set, the email's domain is one of them and ``hd`` is that same
+        domain (a consumer account has no ``hd``)."""
+        if not self.allowed_domains:
+            return True
+        return self.email_allowed(email) and hd == email_domain(email)
 
     def team_ids(self) -> tuple[str, ...]:
         return tuple(self.teams)
@@ -318,7 +371,14 @@ def _delegate_scopes(index: int, raw: str | list[str], team: str) -> frozenset[s
     return frozenset(values)
 
 
-def parse_team_config(data: Any) -> TeamConfig:
+def parse_team_config(data: Any, allowed_domains: frozenset[str] = frozenset()) -> TeamConfig:
+    """The team file. With ``allowed_domains`` (RELAY_ALLOWED_DOMAINS, M10-SPEC §7.2) every
+    seed member's and admin's Google principal must be in one of them: a startup error names
+    the member (or the admin's position), never the email. Delegates are exempt: they are
+    the operator's own service accounts (``*.iam.gserviceaccount.com``), not people, and
+    every email a delegate names is checked on each request."""
+    if not all(valid_domain(d) for d in allowed_domains):
+        raise ConfigError("allowed domains must be lower-case domain names")
     try:
         parsed = _ConfigFile.model_validate(data)
     except ValidationError as exc:
@@ -357,6 +417,13 @@ def parse_team_config(data: Any) -> TeamConfig:
                 else:
                     member_tokens.append(principal)
                     tokens.setdefault(principal, {})[team.id] = member.id
+            if allowed_domains and any(
+                email_domain(email) not in allowed_domains for email in emails
+            ):
+                raise ConfigError(
+                    f"member {member.id!r} of team {team.id!r} has a google principal outside "
+                    "RELAY_ALLOWED_DOMAINS"
+                )
             if len(emails) > MAX_EMAILS_PER_MEMBER:
                 raise ConfigError(
                     f"member {member.id!r} has more than {MAX_EMAILS_PER_MEMBER} google principals"
@@ -413,6 +480,8 @@ def parse_team_config(data: Any) -> TeamConfig:
             raise ConfigError(f"admins.{index}: an admin is listed twice")
         if ("google:" + email) in delegates:
             raise ConfigError(f"admins.{index}: a delegate principal cannot be an admin")
+        if allowed_domains and email_domain(email) not in allowed_domains:
+            raise ConfigError(f"admins.{index}: outside RELAY_ALLOWED_DOMAINS")
         admins.add(email)
 
     return TeamConfig(
@@ -422,10 +491,13 @@ def parse_team_config(data: Any) -> TeamConfig:
         audit_retention_days=parsed.audit_retention_days,
         delegates=delegates,
         admins=frozenset(admins),
+        allowed_domains=frozenset(allowed_domains),
     )
 
 
-def load_team_config(path: str | os.PathLike[str]) -> TeamConfig:
+def load_team_config(
+    path: str | os.PathLike[str], allowed_domains: frozenset[str] = frozenset()
+) -> TeamConfig:
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
@@ -434,7 +506,7 @@ def load_team_config(path: str | os.PathLike[str]) -> TeamConfig:
         data = yaml.safe_load(text)
     except yaml.YAMLError:
         raise ConfigError("team config is not valid YAML") from None
-    return parse_team_config(data)
+    return parse_team_config(data, allowed_domains)
 
 
 def default_schema_path() -> Path:
@@ -532,6 +604,58 @@ def load_oauth_client(path: str | os.PathLike[str]) -> OAuthClient:
     return OAuthClient(client_id=client_id, client_secret=secret)  # type: ignore[arg-type]
 
 
+def load_drive_client(path: str | os.PathLike[str]) -> OAuthClient | None:
+    """The Desktop OAuth client for Drive (M10-SPEC §2a), from the optional mounted secret
+    ``RELAY_DRIVE_CLIENT_FILE``: Google's downloaded JSON (``{"installed": {client_id,
+    client_secret, ...}}``) or a flat ``{client_id, client_secret}``. No file there: None
+    (Drive is not configured). A web client (``"web"``) is refused: its secret is
+    confidential and this one is handed to every member. Error messages never quote the
+    file."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ConfigError(f"cannot read the Drive client file: {exc.strerror}") from None
+    except UnicodeDecodeError:
+        raise ConfigError("the Drive client file is not UTF-8") from None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        raise ConfigError("the Drive client file is not valid JSON") from None
+    if not isinstance(data, dict):
+        raise ConfigError("the Drive client file must be a JSON object")
+    if "web" in data:
+        raise ConfigError(
+            "the Drive client file holds a web client; it must be a Desktop (installed) client"
+        )
+    if "installed" in data:
+        data = data["installed"]
+        if not isinstance(data, dict):
+            raise ConfigError("the Drive client file's 'installed' must be a JSON object")
+    client_id, secret = data.get("client_id"), data.get("client_secret")
+    for name, value in (("client_id", client_id), ("client_secret", secret)):
+        if not isinstance(value, str) or _CLIENT_FIELD.fullmatch(value) is None:
+            raise ConfigError(f"the Drive client file needs a string {name} (printable, no spaces)")
+    return OAuthClient(client_id=client_id, client_secret=secret)  # type: ignore[arg-type]
+
+
+# M10-SPEC §5: how many right-most X-Forwarded-For entries Google's infrastructure appends in
+# front of the relay: 1 directly on Cloud Run (its front end), 2 behind the external
+# Application Load Balancer (the client's address, then the forwarding rule's).
+FORWARDED_FOR_HOPS = (1, 2, 3)
+
+
+def parse_forwarded_for_hops(raw: str) -> int:
+    if raw not in {str(h) for h in FORWARDED_FOR_HOPS}:
+        raise ConfigError("RELAY_FORWARDED_FOR_HOPS must be 1, 2 or 3")
+    return int(raw)
+
+
+def _is_run_app(public_url: str) -> bool:
+    return (urlsplit(public_url).hostname or "").endswith(".run.app")
+
+
 @dataclass(frozen=True)
 class Settings:
     team_config: TeamConfig
@@ -544,8 +668,24 @@ class Settings:
     # without them the login pages answer 404 (required on Cloud Run).
     public_url: str | None = None
     oauth_client: OAuthClient | None = None
+    # M10-SPEC §2a: the Desktop OAuth client for Drive members are handed; None: not set up.
+    drive_client: OAuthClient | None = None
+    # M10-SPEC §5: Google's X-Forwarded-For entries in front of the relay (see
+    # FORWARDED_FOR_HOPS); the per-IP limits count the left-most of them.
+    forwarded_for_hops: int = 1
 
     def __post_init__(self) -> None:
+        if self.forwarded_for_hops not in FORWARDED_FOR_HOPS:
+            raise ConfigError("RELAY_FORWARDED_FOR_HOPS must be 1, 2 or 3")
+        if (
+            self.drive_client is not None
+            and self.oauth_client is not None
+            and self.drive_client.client_id == self.oauth_client.client_id
+        ):
+            # The login's web client secret is confidential; the Drive one goes to members.
+            raise ConfigError(
+                "RELAY_DRIVE_CLIENT_FILE must name a Desktop client, not the login's own client"
+            )
         if self.auth_mode not in ("google", "static"):
             raise ConfigError("RELAY_AUTH_MODE must be 'google' or 'static'")
         if not isinstance(self.audiences, tuple) or not all(
@@ -578,11 +718,24 @@ class Settings:
             raise ConfigError(
                 "RELAY_PUBLIC_URL and RELAY_OAUTH_CLIENT_FILE are required on Cloud Run"
             )
+        public_url = parse_public_url(public_raw, env) if public_raw else None
+        hops_raw = env.get("RELAY_FORWARDED_FOR_HOPS")
+        if hops_raw is None and env.get("K_SERVICE") and public_url and not _is_run_app(public_url):
+            # Behind a load balancer the right-most entry is the balancer's own address: every
+            # client would share one budget. The deployment says which it is.
+            raise ConfigError(
+                "RELAY_FORWARDED_FOR_HOPS is required on Cloud Run when RELAY_PUBLIC_URL is not "
+                "a run.app address (2 behind the external Application Load Balancer)"
+            )
+        drive_path = env.get("RELAY_DRIVE_CLIENT_FILE") or None
+        allowed_domains = parse_allowed_domains(env.get("RELAY_ALLOWED_DOMAINS"))
         return cls(
-            team_config=load_team_config(config_path),
+            team_config=load_team_config(config_path, allowed_domains),
             manifest_schema=load_schema(schema_path),
             auth_mode=mode,  # type: ignore[arg-type]
             audiences=parse_audiences(env.get("RELAY_AUDIENCE")),
-            public_url=parse_public_url(public_raw, env) if public_raw else None,
+            public_url=public_url,
             oauth_client=load_oauth_client(client_path) if client_path else None,
+            drive_client=load_drive_client(drive_path) if drive_path else None,
+            forwarded_for_hops=parse_forwarded_for_hops(hops_raw) if hops_raw is not None else 1,
         )

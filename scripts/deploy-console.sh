@@ -9,9 +9,25 @@
 #        OAUTH_CLIENT_ID=<id> OAUTH_CLIENT_SECRET_FILE=<file holding only the secret> \
 #          bash scripts/deploy-console.sh
 #
-# OAUTH_CLIENT_FILE is the Web OAuth client JSON Kiril creates in the Cloud Console (the members
+# OAUTH_CLIENT_FILE is the Web OAuth client JSON the operator creates in the Cloud Console (the members
 # are outside the project's organisation, so IAP's Google-managed client cannot admit them).
 # It is read here and handed to IAP for this one service; its secret is never printed.
+#
+# With PUBLIC_HOST set (M10-SPEC §5), the console sits behind the load balancer
+# scripts/deploy-lb.sh made, which must exist first:
+# - ingress internal-and-cloud-load-balancing: the run.app URL answers nothing from outside;
+# - IAP moves from the Cloud Run service (--no-iap) to the console's backend service, where
+#   deploy-lb.sh enables it with the custom OAuth client and IAP_ACCESS; IAP_AUDIENCE becomes
+#   /projects/<number>/global/backendServices/<id of team-relay-console-backend>, so an
+#   assertion IAP signed for anything else is refused;
+# - the invoker is still only IAP's service agent: IAP on a backend service calls a Cloud Run
+#   backend with that agent's identity, so the service keeps --no-allow-unauthenticated and the
+#   load balancer reaches it only by way of IAP;
+# - the console calls the relay at https://PUBLIC_HOST (the relay's run.app URL refuses calls
+#   from outside, the console's own included), and counts the viewer's address as the
+#   balancer writes it (CONSOLE_PROXY_HOPS=2; required: on a host that is not run.app the console
+#   refuses to start without it, M10-SPEC §7.7).
+# Without PUBLIC_HOST, the run.app URLs and Cloud Run's own IAP, as before.
 set -euo pipefail
 
 # Deployment settings come from config/deploy.local.env (git-ignored; copy
@@ -23,7 +39,7 @@ if [[ -f config/deploy.local.env ]]; then
   source config/deploy.local.env
 fi
 PROJECT="${PROJECT:?set PROJECT in config/deploy.local.env or the environment}"
-REGION="${REGION:-europe-west3}"
+REGION="${REGION:-australia-southeast1}"
 SERVICE="team-relay-console"
 RELAY_SERVICE="team-relay"
 TEAM="${TEAM:?set TEAM (the team id the console shows) in config/deploy.local.env}"
@@ -40,10 +56,35 @@ fi
 SHA="$(git rev-parse --short HEAD)"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/team-relay-images/${SERVICE}:${SHA}"
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
-URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
-RELAY_URL="https://${RELAY_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 IAP_AGENT="service-${PROJECT_NUMBER}@gcp-sa-iap.iam.gserviceaccount.com"
-IAP_AUDIENCE="${IAP_AUDIENCE:-/projects/${PROJECT_NUMBER}/locations/${REGION}/services/${SERVICE}}"
+CONSOLE_BACKEND="team-relay-console-backend"
+if [[ -n "${PUBLIC_HOST:-}" ]]; then
+  if [[ ! "$PUBLIC_HOST" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]]; then
+    echo "error: PUBLIC_HOST must be a lower-case host name, without a scheme, port or path" >&2
+    exit 1
+  fi
+  BACKEND_ID="$(gcloud compute backend-services describe "$CONSOLE_BACKEND" --global \
+    --project="$PROJECT" --format='value(id)' 2>/dev/null || true)"
+  BACKEND_IAP="$(gcloud compute backend-services describe "$CONSOLE_BACKEND" --global \
+    --project="$PROJECT" --format='value(iap.enabled)' 2>/dev/null || true)"
+  if [[ -z "$BACKEND_ID" || "$BACKEND_IAP" != "True" ]]; then
+    echo "error: no IAP-protected backend ${CONSOLE_BACKEND} yet; run scripts/deploy-lb.sh first" >&2
+    exit 1
+  fi
+  URL="https://${PUBLIC_HOST}"
+  RELAY_URL="https://${PUBLIC_HOST}"
+  IAP_AUDIENCE="/projects/${PROJECT_NUMBER}/global/backendServices/${BACKEND_ID}"
+  INGRESS="internal-and-cloud-load-balancing"
+  IAP_FLAG="--no-iap"
+  PROXY_HOPS=2
+else
+  URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+  RELAY_URL="https://${RELAY_SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
+  IAP_AUDIENCE="${IAP_AUDIENCE:-/projects/${PROJECT_NUMBER}/locations/${REGION}/services/${SERVICE}}"
+  INGRESS="all"
+  IAP_FLAG="--iap"
+  PROXY_HOPS=1
+fi
 
 echo "Building ${IMAGE}"
 gcloud builds submit \
@@ -59,7 +100,7 @@ gcloud builds submit \
 DIGEST="$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT" \
   --format='value(image_summary.digest)')"
 
-CONSOLE_ENV="^;^CONSOLE_MODE=hosted;CONSOLE_PUBLIC_HOST=${URL#https://};IAP_AUDIENCE=${IAP_AUDIENCE};RELAY_URL=${RELAY_URL};RELAY_TEAM=${TEAM};RELAY_AUTH=metadata"
+CONSOLE_ENV="^;^CONSOLE_MODE=hosted;CONSOLE_PUBLIC_HOST=${URL#https://};IAP_AUDIENCE=${IAP_AUDIENCE};CONSOLE_PROXY_HOPS=${PROXY_HOPS};RELAY_URL=${RELAY_URL};RELAY_TEAM=${TEAM};RELAY_AUTH=metadata"
 if [[ -n "${JOIN_REPO_URL:-}" ]]; then
   CONSOLE_ENV="${CONSOLE_ENV};JOIN_REPO_URL=${JOIN_REPO_URL}"
 fi
@@ -72,23 +113,42 @@ if [[ -z "$SALT_VERSION" ]]; then
   exit 1
 fi
 
-echo "Deploying ${SERVICE}"
+echo "Deploying ${SERVICE} (ingress ${INGRESS}, ${IAP_FLAG})"
 gcloud beta run deploy "$SERVICE" \
   --project="$PROJECT" \
   --region="$REGION" \
   --image="${IMAGE%:*}@${DIGEST}" \
   --service-account="$CONSOLE_EMAIL" \
   --no-allow-unauthenticated \
-  --iap \
+  --ingress="$INGRESS" \
+  "$IAP_FLAG" \
   --min-instances=0 --max-instances=2 --cpu=1 --memory=256Mi --timeout=60 \
   --update-env-vars="$CONSOLE_ENV" \
   --set-secrets="CONSOLE_IP_HASH_SALT=${SALT_SECRET}:${SALT_VERSION}" \
   --quiet
 
-# IAP invokes the service as its service agent; nothing else may.
+# IAP invokes the service as its service agent (Cloud Run's IAP, or IAP on the load balancer's
+# backend); nothing else may, and anyone-may-invoke is never left on it.
 gcloud run services add-iam-policy-binding "$SERVICE" --project="$PROJECT" --region="$REGION" \
   --member="serviceAccount:${IAP_AGENT}" --role=roles/run.invoker --quiet >/dev/null
 echo "   run.invoker for the IAP service agent: set"
+INVOKERS="$(gcloud run services get-iam-policy "$SERVICE" --project="$PROJECT" --region="$REGION" \
+  --flatten='bindings[].members' --format='csv[no-heading](bindings.role,bindings.members)' \
+  | sed -n 's/^roles\/run.invoker,//p')"
+for member in allUsers allAuthenticatedUsers; do
+  if grep -qx "$member" <<<"$INVOKERS"; then
+    gcloud run services remove-iam-policy-binding "$SERVICE" --project="$PROJECT" --region="$REGION" \
+      --member="$member" --role=roles/run.invoker --quiet >/dev/null
+    echo "   run.invoker for ${member}: removed"
+  fi
+done
+
+if [[ -n "${PUBLIC_HOST:-}" ]]; then
+  # IAP's access list and OAuth client live on the backend service (scripts/deploy-lb.sh).
+  echo
+  echo "Deployed ${SERVICE}: ${URL} (through the load balancer; IAP audience ${IAP_AUDIENCE})"
+  exit 0
+fi
 
 # Who may pass IAP: any signed-in Google account (M6-SPEC §5). The relay's roster decides
 # membership; a non-member sees only the "not on this team" page, and no data.
@@ -118,28 +178,8 @@ if [[ -n "${OAUTH_CLIENT_FILE:-}" || -n "${OAUTH_CLIENT_SECRET_FILE:-}" ]]; then
   SETTINGS_DIR="$(mktemp -d)"
   chmod 700 "$SETTINGS_DIR"
   trap 'rm -rf "$SETTINGS_DIR"' EXIT
-  python3 - "${OAUTH_CLIENT_FILE:-}" "$SETTINGS_DIR/iap_settings.yaml" \
-      "${OAUTH_CLIENT_ID:-}" "${OAUTH_CLIENT_SECRET_FILE:-}" <<'PYEOF'
-import json, os, re, sys
-client_file, out_path, client_id, secret_file = sys.argv[1:5]
-if client_file:
-    with open(client_file, encoding="utf-8") as handle:
-        web = json.load(handle).get("web") or {}
-    client_id, secret = web.get("client_id"), web.get("client_secret")
-else:
-    with open(secret_file, encoding="utf-8") as handle:
-        secret = handle.read().strip()
-if not client_id or not re.fullmatch(r"[0-9]+-[0-9a-z]+\.apps\.googleusercontent\.com", client_id):
-    sys.exit("error: no valid Web OAuth client id")
-if not secret or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", secret):
-    sys.exit("error: the secret is missing or not shaped like an OAuth client secret")
-fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as out:
-    out.write("access_settings:\n  oauth_settings:\n")
-    out.write(f"    client_id: {json.dumps(client_id)}\n")
-    out.write(f"    client_secret: {json.dumps(secret)}\n")
-print(client_id)
-PYEOF
+  python3 scripts/lib/iap_oauth_settings.py "${OAUTH_CLIENT_FILE:-}" "$SETTINGS_DIR/iap_settings.yaml" \
+    "${OAUTH_CLIENT_ID:-}" "${OAUTH_CLIENT_SECRET_FILE:-}" >/dev/null
   gcloud beta iap settings set "$SETTINGS_DIR/iap_settings.yaml" --project="$PROJECT" \
     --resource-type=cloud-run --region="$REGION" --service="$SERVICE" --quiet >/dev/null
   rm -rf "$SETTINGS_DIR"

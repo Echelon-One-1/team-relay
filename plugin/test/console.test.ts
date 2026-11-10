@@ -878,10 +878,21 @@ describe('--open (M2-SPEC §7.7): the key never appears in a process argument', 
     });
     let out = '';
     child.stdout.on('data', (c: Buffer) => (out += c.toString('utf8')));
-    const exited = new Promise<number | null>((r) => child.on('close', r));
+    let closed = false;
+    const exited = new Promise<number | null>((r) =>
+      child.on('close', (code) => {
+        closed = true;
+        r(code);
+      }),
+    );
     try {
-      const deadline = Date.now() + 10_000;
-      while (!existsSync(join(record, 'done')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+      // Both have to have happened: the URL line reached this test's end of the pipe (it may
+      // come after the opener ran) and the opener finished. No deadline here: the test's own
+      // timeout bounds the wait; a server that exited instead ends it at once.
+      while (!(existsSync(join(record, 'done')) && out.includes('\n'))) {
+        if (closed) throw new Error(`the console server exited early: ${out}`);
+        await new Promise((r) => setTimeout(r, 25));
+      }
       const url = out.trim();
       const key = url.split('#k=')[1]!;
       expect(key).toMatch(/^[A-Za-z0-9_-]{43}$/);

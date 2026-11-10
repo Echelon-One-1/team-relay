@@ -17,8 +17,11 @@ import type {
   ProgressEntry,
   RequestDetail,
   AdminTeam,
+  Boundaries,
+  BoundariesSince,
   Roster,
   RosterMember,
+  TeamBoundaries,
   Teams,
 } from '@/api/types'
 import {
@@ -29,10 +32,13 @@ import {
   fixtureJoin,
   fixtureMe,
   fixtureAdminTeams,
+  fixtureBoundaries,
+  fixtureOpsBoundaries,
   fixtureRequests,
   fixtureRoster,
   fixtureTeams,
 } from './fixtures'
+import { boundariesValid, versionOk } from '@/lib/boundaries'
 
 export const CYCLE_MS = 100_000
 /** The relay keeps an equal-updated_at group whole on a page, up to this many (M2 §7.10). */
@@ -535,6 +541,8 @@ export class MockRelay {
       ],
     ],
   ])
+  /** M10 §1: each team's boundaries; a team not here has never had them set. */
+  private bounds = new Map<string, TeamBoundaries>([['demo', structuredClone(fixtureBoundaries)]])
   private readonly shift: number
   private readonly now: () => number
 
@@ -739,6 +747,40 @@ export class MockRelay {
     return json({ error: 'method_not_allowed' }, 405)
   }
 
+  // --- M10: boundaries ----------------------------------------------------------------------
+
+  /** GET and PUT /api/boundaries for `team`, by the relay's rules (owners write, at the current version). */
+  private boundariesCall(team: string, method: string, body: unknown): Response {
+    const current: TeamBoundaries = this.bounds.get(team) ?? { team, version: 0, boundaries: null, since: null, updated_at: null, updated_by: null }
+    if (method === 'GET') return json(current)
+    if (method !== 'PUT') return json({ error: 'method_not_allowed' }, 405)
+    const mine = this.account.teams.find((t) => t.team === team)!
+    const owner = team === 'demo' ? this.viewerRole() === 'owner' : mine.role === 'owner'
+    if (!owner) return this.refuse(403, 'forbidden', 'Only team owners can set the boundaries.')
+    const b = (typeof body === 'object' && body !== null ? body : {}) as { version?: unknown; boundaries?: TeamBoundaries['boundaries'] }
+    if (!versionOk(b.version) || !boundariesValid(b.boundaries)) {
+      return json({ error: 'invalid_body', detail: 'These boundaries break the rule the relay checks (M10 §7.5).' }, 400)
+    }
+    if (b.version !== current.version) return this.refuse(409, 'version_conflict', 'The boundaries changed since you read them.')
+    const next: TeamBoundaries = {
+      team,
+      version: current.version + 1,
+      boundaries: structuredClone(b.boundaries),
+      since: nextSince(current, current.version + 1, b.boundaries),
+      updated_at: new Date(this.now()).toISOString(),
+      updated_by: team === 'demo' ? this.viewer : mine.member,
+    }
+    this.bounds.set(team, next)
+    return json(next)
+  }
+
+  /** Another owner saves while the viewer edits (tests and the dev view). */
+  setBoundariesAs(team: string, member: string, boundaries: NonNullable<TeamBoundaries['boundaries']>): void {
+    const current = this.bounds.get(team)
+    const version = (current?.version ?? 0) + 1
+    this.bounds.set(team, { team, version, boundaries, since: nextSince(current ?? null, version, boundaries), updated_at: new Date(this.now()).toISOString(), updated_by: member })
+  }
+
   // --- M9: teams ---------------------------------------------------------------------------
 
   private refuse(status: number, code: string, detail: string): Response {
@@ -847,6 +889,7 @@ export class MockRelay {
       this.account.invitations = this.account.invitations.filter((i) => i !== inv)
       if (b.accept !== true) return json({ team: inv.team, member: inv.member, status: 'declined' })
       this.account.teams = [...this.account.teams, { team: inv.team, name: inv.name, member: inv.member, role: inv.role }]
+      if (inv.team === 'ops') this.bounds.set('ops', structuredClone(fixtureOpsBoundaries))
       this.quiet.set(inv.team, [
         { member: inv.invited_by_member ?? 'olga', emails: ['olga@example.com'], role: 'owner', added_by: 'olga', added_at: '2026-09-12T15:45:00Z' },
         { member: inv.member, emails: ['alice@example.com'], role: inv.role, added_by: 'olga', added_at: iso(now) },
@@ -894,6 +937,12 @@ export class MockRelay {
     // M9 §5: a call about one team names it; a team the viewer is not on gets no data.
     const team = new Headers(init?.headers).get('X-Relay-Team') ?? 'demo'
     if (!this.account.teams.some((t) => t.team === team)) return json({ error: 'not_on_team', team }, 403)
+    if (p === '/api/boundaries') {
+      if (!this.reachable) return json({ error: 'relay_unreachable' }, 502)
+      let body: unknown = undefined
+      if (typeof init?.body === 'string' && init.body !== '') body = JSON.parse(init.body)
+      return this.boundariesCall(team, method, body)
+    }
     if (team !== 'demo') return this.quietTeam(team, method, p, init)
     // Answered by the console server itself, so it does not depend on the relay being reachable.
     if (p === '/api/join') return json(fixtureJoin)
@@ -919,5 +968,27 @@ export class MockRelay {
       return d ? json(d) : json({ error: 'not_found' }, 404)
     }
     return json({ error: 'not_found' }, 404)
+  }
+}
+
+/**
+ * M10 §7.1, as the relay keeps it: an item the previous version holds keeps its `since`
+ * (orgs without case, drives on domain and name); one added, or added back after a removal,
+ * gets `version`; member folders likewise while allowed.
+ */
+function nextSince(prev: TeamBoundaries | null, version: number, next: Boundaries): BoundariesSince {
+  const p = prev?.boundaries ? (prev.since ?? null) : null
+  const org = (o: string) => {
+    const key = o.toLowerCase()
+    return p && Object.prototype.hasOwnProperty.call(p.github_orgs, key) ? (p.github_orgs[key] ?? version) : version
+  }
+  return {
+    github_orgs: Object.fromEntries(next.github_orgs.map((o) => [o.toLowerCase(), org(o)])),
+    drives: next.drives.map((d) => ({
+      domain: d.domain,
+      shared_drive: d.shared_drive,
+      since: p?.drives.find((x) => x.domain === d.domain && x.shared_drive === d.shared_drive)?.since ?? version,
+    })),
+    member_folders: next.member_folders ? (p?.member_folders ?? version) : null,
   }
 }

@@ -85,3 +85,15 @@ export function textOf(result: unknown): string {
   const r = result as { content?: Array<{ type: string; text?: string }> };
   return (r.content ?? []).map((c) => c.text ?? '').join('');
 }
+
+/**
+ * Wait until `fn` holds, however long that takes: no deadline of its own (the test's timeout
+ * bounds it). For conditions that must come, such as a log line or a reply.
+ */
+export async function until<T>(fn: () => T | undefined | false | null): Promise<T> {
+  for (;;) {
+    const v = fn();
+    if (v) return v;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}

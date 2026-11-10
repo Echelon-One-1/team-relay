@@ -429,6 +429,11 @@ def _parse_email(raw: Any, name: str, config: TeamConfig) -> str:
     if config.is_delegate_email(email):
         # M3-SPEC §2: a delegate principal is never a member principal.
         raise ApiError(422, "invalid_body", f"{name}: belongs to a delegate, not a person")
+    if not config.email_allowed(email):
+        # M10-SPEC §7.2: only the relay's own domains (RELAY_ALLOWED_DOMAINS) join a team.
+        raise ApiError(
+            403, "domain_not_allowed", f"{name}: this relay accepts its own domains' emails only"
+        )
     return email
 
 

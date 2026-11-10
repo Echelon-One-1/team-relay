@@ -1,0 +1,77 @@
+{
+  "comment": "M10-SPEC §7.5: one rule for team boundaries. The relay is the authority; the console server, the console UI and the plugin (what the relay hands the host, what a member accepted) accept exactly the same inputs. Every implementation's tests load this file and expand every placeholder (a string value equal to a key of placeholders) as its text says.",
+  "valid": [
+    {
+      "topic": "Example Org: our clients, products and engineering.",
+      "github_orgs": ["example-org"],
+      "drives": [{ "domain": "example.com", "shared_drive": "Example Team Drive" }],
+      "member_folders": true
+    },
+    {
+      "topic": "Two lines\nwith a\ttab",
+      "github_orgs": ["a", "A1-b", "old-org-"],
+      "drives": [],
+      "member_folders": false
+    },
+    {
+      "topic": "x",
+      "github_orgs": [],
+      "drives": [{ "domain": "sub.example.co.uk", "shared_drive": "Drive (shared) – 2026" }],
+      "member_folders": false
+    },
+    {
+      "topic": "  Example Org: valid once trimmed.\n ",
+      "github_orgs": ["example-org"],
+      "drives": [
+        { "domain": "DOMAIN_253", "shared_drive": "DRIVE_100" },
+        { "domain": "LABEL_63_DOMAIN", "shared_drive": "D" }
+      ],
+      "member_folders": false
+    }
+  ],
+  "invalid": [
+    { "why": "empty topic", "boundaries": { "topic": "", "github_orgs": [], "drives": [], "member_folders": false } },
+    { "why": "blank topic", "boundaries": { "topic": "   ", "github_orgs": [], "drives": [], "member_folders": false } },
+    { "why": "topic over 500", "boundaries": { "topic": "TOPIC_501", "github_orgs": [], "drives": [], "member_folders": false } },
+    { "why": "topic control char", "boundaries": { "topic": "a\u0000b", "github_orgs": [], "drives": [], "member_folders": false } },
+    { "why": "topic bidi override", "boundaries": { "topic": "a‮b", "github_orgs": [], "drives": [], "member_folders": false } },
+    { "why": "topic leading carriage return", "boundaries": { "topic": "\rabc", "github_orgs": [], "drives": [], "member_folders": false } },
+    { "why": "topic carriage return", "boundaries": { "topic": "a\rb", "github_orgs": [], "drives": [], "member_folders": false } },
+    { "why": "org leading hyphen", "boundaries": { "topic": "t", "github_orgs": ["-acme"], "drives": [], "member_folders": false } },
+    { "why": "org too long", "boundaries": { "topic": "t", "github_orgs": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"], "drives": [], "member_folders": false } },
+    { "why": "org bad char", "boundaries": { "topic": "t", "github_orgs": ["acme_inc"], "drives": [], "member_folders": false } },
+    { "why": "eleven orgs", "boundaries": { "topic": "t", "github_orgs": ["a1","a2","a3","a4","a5","a6","a7","a8","a9","a10","a11"], "drives": [], "member_folders": false } },
+    { "why": "upper-case domain", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "Example.com", "shared_drive": "D" }], "member_folders": false } },
+    { "why": "one-label domain", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "localhost", "shared_drive": "D" }], "member_folders": false } },
+    { "why": "IP domain", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "10.0.0.1", "shared_drive": "D" }], "member_folders": false } },
+    { "why": "trailing-dot domain", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com.", "shared_drive": "D" }], "member_folders": false } },
+    { "why": "drive slash", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com", "shared_drive": "a/b" }], "member_folders": false } },
+    { "why": "drive dot", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com", "shared_drive": "." }], "member_folders": false } },
+    { "why": "drive dotdot", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com", "shared_drive": ".." }], "member_folders": false } },
+    { "why": "drive leading space", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com", "shared_drive": " D" }], "member_folders": false } },
+    { "why": "drive newline", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com", "shared_drive": "a\nb" }], "member_folders": false } },
+    { "why": "drive empty", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com", "shared_drive": "" }], "member_folders": false } },
+    { "why": "domain over 253", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "DOMAIN_254", "shared_drive": "D" }], "member_folders": false } },
+    { "why": "domain label over 63", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "LABEL_64_DOMAIN", "shared_drive": "D" }], "member_folders": false } },
+    { "why": "drive over 100", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com", "shared_drive": "DRIVE_101" }], "member_folders": false } },
+    { "why": "drive zero-width space", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com", "shared_drive": "a\u200bb" }], "member_folders": false } },
+    { "why": "topic line separator", "boundaries": { "topic": "a\u2028b", "github_orgs": [], "drives": [], "member_folders": false } },
+    { "why": "topic private use", "boundaries": { "topic": "a\ue000b", "github_orgs": [], "drives": [], "member_folders": false } },
+    { "why": "eleven orgs with duplicates", "boundaries": { "topic": "t", "github_orgs": ["example-org","example-org","Example-Org","EXAMPLE-ORG","a1","a1","a2","a2","a3","a3","a4"], "drives": [], "member_folders": false } },
+    { "why": "eleven drives with duplicates", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com", "shared_drive": "D" },{ "domain": "example.com", "shared_drive": "D" },{ "domain": "example.com", "shared_drive": "D" },{ "domain": "example.com", "shared_drive": "D" },{ "domain": "example.com", "shared_drive": "D" },{ "domain": "example.com", "shared_drive": "D" },{ "domain": "example.com", "shared_drive": "D" },{ "domain": "example.com", "shared_drive": "D" },{ "domain": "example.com", "shared_drive": "D" },{ "domain": "example.com", "shared_drive": "D" },{ "domain": "example.com", "shared_drive": "E" }], "member_folders": false } },
+    { "why": "extra field", "boundaries": { "topic": "t", "github_orgs": [], "drives": [], "member_folders": false, "extra": 1 } },
+    { "why": "extra drive field", "boundaries": { "topic": "t", "github_orgs": [], "drives": [{ "domain": "example.com", "shared_drive": "D", "x": 1 }], "member_folders": false } },
+    { "why": "member_folders not bool", "boundaries": { "topic": "t", "github_orgs": [], "drives": [], "member_folders": "yes" } },
+    { "why": "missing field", "boundaries": { "topic": "t", "github_orgs": [], "drives": [] } }
+  ],
+  "versions": { "valid": [0, 1, 2147483647], "invalid": [-1, 2147483648, true, 1.5, "1", null] },
+  "placeholders": {
+    "TOPIC_501": "the letter a repeated 501 times",
+    "DOMAIN_253": "a 253-character domain: 63 a, a dot, 63 b, a dot, 63 c, a dot, 57 d, then .com",
+    "DOMAIN_254": "a 254-character domain: 63 a, a dot, 63 b, a dot, 63 c, a dot, 58 d, then .com",
+    "LABEL_63_DOMAIN": "a label of 63 a, then .example.com",
+    "LABEL_64_DOMAIN": "a label of 64 a, then .example.com",
+    "DRIVE_100": "the letter d repeated 100 times",
+    "DRIVE_101": "the letter d repeated 101 times"
+  }
+}

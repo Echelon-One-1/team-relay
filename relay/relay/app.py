@@ -48,6 +48,12 @@ bound to its team) or a static token. A delegate's creation carries
 admin actions are recorded (M9-SPEC §7.5).
 
 The login pages (M5-SPEC §2) are unauthenticated and live under ``/v1/login``.
+
+RELAY_ALLOWED_DOMAINS (M10-SPEC §7.2), when set: a Google ID token's email must be in one of
+the domains and its ``hd`` claim that same domain (the verifier has already required
+``email_verified``); a delegate's on-behalf-of email must be in one of them; a device
+credential works only while the email it was minted through is. Refused: ``403
+domain_not_allowed``. A delegate's own principal (the console's service account) is exempt.
 """
 
 from __future__ import annotations
@@ -107,6 +113,8 @@ DELEGATE_ROUTES = frozenset(
         # M7-SPEC §1: what waits for the member's answering session. A peek, not a stream
         # read: it moves no cursor and writes no presence.
         "/v1/teams/{team}/inbox/summary",
+        # M10-SPEC §1: the console shows the team's boundaries (read-only to non-owners).
+        "/v1/teams/{team}/boundaries",
     }
 )
 # M6-SPEC §3: with scope manage-roster, a delegate may also make these, by (method, route).
@@ -115,6 +123,8 @@ ROSTER_MUTATIONS = frozenset(
         ("POST", "/v1/teams/{team}/roster"),
         ("PATCH", "/v1/teams/{team}/roster/{member}"),
         ("DELETE", "/v1/teams/{team}/roster/{member}"),
+        # M10-SPEC §1: an owner sets the team's boundaries from the console.
+        ("PUT", "/v1/teams/{team}/boundaries"),
     }
 )
 # M9-SPEC §7.7: with scope manage-teams, a delegate may delete a team for its owner.
@@ -188,6 +198,8 @@ def _audited_action(request: Request) -> str | None:
         return None
     if path.endswith("/manifest"):
         return "manifest.publish"
+    if path.endswith("/boundaries"):
+        return "boundaries_set"
     for suffix in ("ack", "reply", "progress"):
         if path.endswith("/" + suffix):
             return f"request.{suffix}"
@@ -306,6 +318,23 @@ def create_app(
     class NoSuchTeam(Unauthenticated):
         """A ``team: "*"`` delegate named a team that is not a team (now)."""
 
+    class DomainNotAllowed(Unauthenticated):
+        """M10-SPEC §7.2: an identity outside RELAY_ALLOWED_DOMAINS."""
+
+    def domain_refusal() -> ApiError:
+        return ApiError(
+            403,
+            "domain_not_allowed",
+            "This relay accepts Google accounts of its own organisation's domains only.",
+        )
+
+    def check_google(verified: Verified) -> None:
+        """A Google ID token's identity, not a delegate's (M10-SPEC §7.2)."""
+        if verified.principal.startswith("google:") and not config.google_identity_allowed(
+            verified.principal.removeprefix("google:"), verified.hd
+        ):
+            raise DomainNotAllowed("domain_not_allowed")
+
     def on_behalf_email(request: Request) -> str:
         """Exactly one ``X-Relay-On-Behalf-Of`` naming one email, else 401. Never logged."""
         values = request.headers.getlist(ON_BEHALF_HEADER)
@@ -318,6 +347,8 @@ def create_app(
         email = normalise_email(values[0])
         if not email:
             raise Unauthenticated("unknown_on_behalf")
+        if not config.email_allowed(email):  # M10-SPEC §7.2
+            raise DomainNotAllowed("domain_not_allowed")
         return email
 
     async def on_behalf_of(delegate: Delegate, email: str, team: str) -> Identity:
@@ -452,6 +483,16 @@ def create_app(
             email_hash(e) for e in entry.emails
         }:
             raise Unauthenticated("email_removed")
+        # M10-SPEC §7.2: minted through an email outside the allowed domains (before they were
+        # set): refused. A credential that records no email needs every email of its entry in.
+        if config.allowed_domains:
+            minted = [
+                e
+                for e in entry.emails
+                if record.email_sha256 is None or email_hash(e) == record.email_sha256
+            ]
+            if not minted or not all(config.email_allowed(e) for e in minted):
+                raise DomainNotAllowed("domain_not_allowed")
         return Identity(team=record.team, member=record.member), record.key
 
     async def authenticate(request: Request, team: str) -> Caller:
@@ -475,6 +516,7 @@ def create_app(
                     await count_unknown_principal(principal, team, request)  # §7.9
                     identity = await on_behalf_of(delegate, email, team)
                 else:
+                    check_google(verified)  # M10-SPEC §7.2
                     principal = verified.principal
                     await count_unknown_principal(principal, team, request)  # §7.9
                     identity = await resolve(verified, team)
@@ -496,6 +538,8 @@ def create_app(
                 ) from None
             if isinstance(exc, NoSuchTeam):
                 raise not_found() from None
+            if isinstance(exc, DomainNotAllowed):
+                raise domain_refusal() from None
             raise ApiError(401, "unauthenticated") from None
 
         if delegate is None:
@@ -591,6 +635,7 @@ def create_app(
             if delegate is not None:
                 account = Account(email=on_behalf_email(request), delegate=delegate)
             elif verified.principal.startswith("google:"):
+                check_google(verified)  # M10-SPEC §7.2
                 if ON_BEHALF_HEADER in request.headers:
                     raise ApiError(
                         400, "bad_request", "X-Relay-On-Behalf-Of is only accepted from a delegate."
@@ -610,6 +655,8 @@ def create_app(
                 path=request.url.path,
                 **({"delegate": delegate.principal} if delegate is not None else {}),
             )
+            if isinstance(exc, DomainNotAllowed):
+                raise domain_refusal() from None
             raise ApiError(401, "unauthenticated") from None
         # Every account route reads several documents: one budget per account and minute.
         now = service.now()
@@ -725,7 +772,7 @@ def create_app(
         # A delegate's socket address is the console's own: the reported one counts instead.
         ip_hash = None
         if account.delegate is None:
-            ip_hash = sha256_hex(client_ip(request, on_cloud_run))[:32]
+            ip_hash = sha256_hex(client_ip(request, on_cloud_run, settings.forwarded_for_hops))[:32]
         created = await teams.create(
             email=account.email,
             sub=account.sub,
@@ -832,6 +879,34 @@ def create_app(
     @app.delete("/v1/teams/{team}/roster/{member}")
     async def roster_remove(member: str, caller: Caller = CallerDep) -> Any:
         return await service.roster_remove(caller, member)
+
+    # M10-SPEC §1: the team's boundaries -----------------------------------------------------
+    @app.get("/v1/teams/{team}/boundaries")
+    async def boundaries_get(caller: Caller = CallerDep) -> dict[str, Any]:
+        return await service.boundaries_get(caller)
+
+    @app.put("/v1/teams/{team}/boundaries")
+    async def boundaries_put(request: Request, caller: Caller = CallerDep) -> dict[str, Any]:
+        raw = await _read_guarded(
+            service, caller, "boundaries_set", lambda: read_json_body(request)
+        )
+        return await service.boundaries_set(caller, raw)
+
+    # M10-SPEC §2a: the Desktop OAuth client members connect Drive with. Any active member
+    # (a device credential or a Google identity); not a delegate (not in DELEGATE_ROUTES).
+    # Never cached, never logged.
+    @app.get("/v1/teams/{team}/drive-client")
+    async def drive_client(caller: Caller = CallerDep) -> JSONResponse:
+        no_store = {"Cache-Control": "no-store"}
+        drive = settings.drive_client
+        if drive is None:
+            err = ApiError(404, "drive_not_configured", "Google Drive is not set up on this relay.")
+            return JSONResponse(err.body(), status_code=404, headers=no_store)
+        log_event("drive_client_served", team=caller.team, member=caller.member)
+        return JSONResponse(
+            {"client_id": drive.client_id, "client_secret": drive.client_secret},
+            headers=no_store,
+        )
 
     # M5-SPEC §3: device credentials -------------------------------------------------------
     @app.get("/v1/teams/{team}/credentials")
@@ -992,6 +1067,8 @@ def create_app_from_env() -> FastAPI:
         auth_mode=settings.auth_mode,
         teams=sorted(settings.team_config.teams),
         login=settings.login_enabled,
+        drive_client=settings.drive_client is not None,
+        forwarded_for_hops=settings.forwarded_for_hops,
     )
     return create_app(settings, store)
 

@@ -355,8 +355,8 @@ describe('owner from /me (M6 §2)', () => {
 describe('the member id field', () => {
   it('suggests an id that the relay accepts for awkward addresses', async () => {
     const { suggestMemberId } = await import('@/lib/roster')
-    for (const email of ['Kiril.Ivanov@example.com', '2fast@example.com', 'a@example.com', 'x-y+tag@example.com']) {
-      expect(suggestMemberId(email, ['kiril'])).toMatch(/^[a-z][a-z0-9_]{1,31}$/)
+    for (const email of ['Alice.Smith@example.com', '2fast@example.com', 'a@example.com', 'x-y+tag@example.com']) {
+      expect(suggestMemberId(email, ['alice'])).toMatch(/^[a-z][a-z0-9_]{1,31}$/)
     }
   })
 })

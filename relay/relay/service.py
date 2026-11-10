@@ -20,6 +20,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
+from .boundaries import boundaries_json, carried_since, parse_set_body
 from .clock import Clock, format_time, truncate_ms, utc_now
 from .config import TeamConfig
 from .credentials import PUBLIC_ID_RE, Credentials, public_id
@@ -43,6 +44,7 @@ from .store import (
     STREAMS,
     AuditEntry,
     BeyondHead,
+    BoundariesChange,
     Envelope,
     IdempotencyRecord,
     Mutation,
@@ -51,8 +53,10 @@ from .store import (
     QuotaExceeded,
     RecipientState,
     RequestDoc,
+    RosterEntry,
     Store,
     StreamPage,
+    TeamBoundaries,
     TeamGone,
     ToolEvent,
 )
@@ -1411,6 +1415,109 @@ class RelayService:
             return {"removed": entry.member}
 
         return await self._guarded(caller, "roster.remove", None, work)
+
+    # M10 §1: the team's boundaries -------------------------------------------------------
+    async def boundaries_get(self, caller: Caller) -> dict[str, Any]:
+        """Any member (or a delegate reading for one): the team's boundaries, or version 0
+        and nulls when never set. One against the member's per-minute budget for them, in
+        the store; over it ``429 rate_limited`` (a read: stdout only, never the audit)."""
+        limit = self.config.limits.reads_per_minute
+        quota = self._quota(caller.member, "boundary_reads", limit, self.now())
+        if not await self.store.count_quota(caller.team, quota):
+            log_event(
+                "read_refused",
+                severity="WARNING",
+                team=caller.team,
+                member=caller.member,
+                endpoint="boundaries",
+                **({"delegate": caller.delegate} if caller.delegate else {}),
+            )
+            raise ApiError(
+                429, "rate_limited", f"At most {limit} reads of the boundaries a minute."
+            )
+        return boundaries_json(
+            caller.team, await self.store.get_boundaries(caller.team), self.config.allowed_domains
+        )
+
+    async def boundaries_set(self, caller: Caller, raw: Any) -> dict[str, Any]:
+        """An owner replaces the team's boundaries (M10-SPEC §1). The owner rule is checked
+        before the body (a non-owner gets 403 whatever they send) and again, with the
+        version, in the writing transaction; the audit holds the new version, never the
+        text. Counted against the owner's hourly budget for owner writes."""
+
+        def not_owner() -> ApiError:
+            return ApiError(403, "forbidden", "Only an owner can change the team's boundaries.")
+
+        async def work() -> dict[str, Any]:
+            snapshot = await self.roster.snapshot(caller.team, fresh=True)
+            if snapshot.role(caller.member) != OWNER:
+                raise not_owner()
+            version, body = parse_set_body(raw, self.config.allowed_domains)
+            now = self.now()
+            detail = f"version {version + 1}" + ("; via delegate" if caller.delegate else "")
+            audit = self._audit(
+                caller.team, caller.member, "boundaries_set", "set", now, detail=detail
+            )
+
+            def fn(
+                current: TeamBoundaries | None, actor: RosterEntry | None
+            ) -> BoundariesChange[TeamBoundaries]:
+                if actor is None or not actor.active or actor.role != OWNER:
+                    raise not_owner()
+                stored = current.version if current is not None else 0
+                if version != stored:
+                    raise ApiError(
+                        409,
+                        "version_conflict",
+                        f"The boundaries changed since you read them (now version {stored}); "
+                        "reload and try again.",
+                    )
+                # §7.1: when each item was last added, from the version this replaces (read in
+                # the same transaction).
+                since = carried_since(current, version + 1, body)
+                new = TeamBoundaries(
+                    version=version + 1,
+                    topic=body.topic,
+                    github_orgs=body.github_orgs,
+                    drives=body.drives,
+                    member_folders=body.member_folders,
+                    updated_at=now,
+                    updated_by=caller.member,
+                    org_since=since.orgs,
+                    drive_since=since.drives,
+                    member_folders_since=since.member_folders,
+                )
+                return BoundariesChange(result=new, boundaries=new, audit=[audit])
+
+            start = (
+                int(now.timestamp()) // ROSTER_QUOTA_WINDOW_SECONDS * ROSTER_QUOTA_WINDOW_SECONDS
+            )
+            quota = Quota(
+                key=f"{caller.member}.boundaries.{start}",
+                limit=self.config.limits.roster_mutations_per_hour,
+                expire_at=datetime.fromtimestamp(start + 2 * ROSTER_QUOTA_WINDOW_SECONDS, UTC),
+            )
+            try:
+                stored = await self.store.set_boundaries(caller.team, caller.member, fn, [quota])
+            except TeamGone:
+                raise not_found() from None  # M9-SPEC §1: deleted meanwhile
+            except QuotaExceeded as exc:
+                raise ApiError(
+                    429,
+                    "rate_limited",
+                    f"At most {exc.quota.limit} changes to the boundaries an hour; "
+                    "try again later.",
+                ) from None
+            log_event(
+                "boundaries_set",
+                team=caller.team,
+                member=caller.member,
+                version=stored.version,
+                via_delegate=bool(caller.delegate),
+            )
+            return boundaries_json(caller.team, stored, self.config.allowed_domains)
+
+        return await self._guarded(caller, "boundaries_set", None, work)
 
     # M5 §3: device credentials ---------------------------------------------------------
     async def credentials_list(self, caller: Caller) -> dict[str, Any]:

@@ -10,15 +10,22 @@ export function useTeam(): string | null {
 
 export type ConsoleView = 'team' | 'admin'
 
+/** A part of the team's page to bring into view once it is shown (M10 §1: after creating a team). */
+export type ConsoleFocus = 'boundaries'
+
 /** What the header and the pages need to move between teams and views (M9 §5). */
 export interface Nav {
   /** The viewer's teams, or null for a console server that serves one team only. */
   teams: import('@/api/types').Teams | null
   team: string | null
-  selectTeam: (team: string) => void
+  /** Show `team`; with `focus`, bring that part of its page into view once it is there. */
+  selectTeam: (team: string, focus?: ConsoleFocus) => void
   view: ConsoleView
   setView: (view: ConsoleView) => void
   openCreate: () => void
+  /** What to bring into view, until the page has done so (clearFocus). */
+  focus: ConsoleFocus | null
+  clearFocus: () => void
 }
 
 export const NavContext = createContext<Nav>({
@@ -28,6 +35,8 @@ export const NavContext = createContext<Nav>({
   view: 'team',
   setView: () => {},
   openCreate: () => {},
+  focus: null,
+  clearFocus: () => {},
 })
 
 export function useNav(): Nav {

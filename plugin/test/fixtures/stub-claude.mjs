@@ -8,7 +8,9 @@
 // What to do comes from the prompt: a question whose text holds `STUB:{"steps":[...]}` runs
 // those steps; a capability call runs the capability (after asking permission) and replies
 // with its result. Steps:
-//   {"permission": {"tool_name": "Read", "input": {...}}}   ask, as Claude Code would
+//   {"permission": {"tool_name": "Read", "input": {...}}}   ask, as Claude Code would; an allowed Read then
+//                                                            reads the file at updatedInput.file_path (as
+//                                                            Claude Code does) and records its path and text
 //   {"capability": "name"}                                   ask for mcp__capabilities__<name> with
 //                                                            the call's params, run it if allowed
 //   {"read": {"tool_name": "Read", "input": {...}, "response": {...}, "fail": false, "skip_post": false}}
@@ -17,17 +19,22 @@
 //                                                            hooks, then (unless a hook blocked it)
 //                                                            its PostToolUse or PostToolUseFailure
 //                                                            hooks, as Claude Code would
+//   {"host": {"tool": "list_files", "args": {...}}}           call one of the host server's own tools
+//                                                            (M10 boundary mode: list_files,
+//                                                            search_files, read_google_file)
 //   {"request_approval": "reason"}
 //   {"reply": {"text": "...", "needs_approval": true, ...}}  "{{decision}}" in text is replaced by
 //                                                            the last permission's behavior
 //   {"sleep": ms}   {"exit": code}
+//   {"wait_for_file": path}   wait (polling) until the test creates that file: a run held open
+//                             until the test releases it
 // Every run is recorded (argv, cwd, stdin, the environment's keys, settings, mcp config with the
 // token replaced, and each tool call's result) in $TMPDIR/stub-claude/<request_id>.json.
 
 import { spawn } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -60,12 +67,18 @@ const record = {
   },
   settings,
   mcp: JSON.parse(JSON.stringify(mcp).replace(/"TEAM_RELAY_HOST_TOKEN":"[^"]*"/, '"TEAM_RELAY_HOST_TOKEN":"<token>"')),
+  rubric: flag('--append-system-prompt'),
   hostTokenLength: (mcp.mcpServers?.host?.env?.TEAM_RELAY_HOST_TOKEN ?? '').length,
   calls: [],
 };
 const dir = join(tmpdir(), 'stub-claude');
 mkdirSync(dir, { recursive: true });
-const save = () => writeFileSync(join(dir, `${requestId}.json`), JSON.stringify(record, null, 2));
+// Written whole and renamed into place, so a reader never sees half a record.
+const save = () => {
+  const tmp = join(dir, `.${requestId}.${process.pid}.tmp`);
+  writeFileSync(tmp, JSON.stringify(record, null, 2));
+  renameSync(tmp, join(dir, `${requestId}.json`));
+};
 save();
 
 async function connect(name) {
@@ -78,6 +91,8 @@ async function connect(name) {
 }
 const host = await connect('host');
 const capabilities = await connect('capabilities');
+record.hostTools = host ? (await host.listTools()).tools.map((t) => t.name) : [];
+save();
 const text = (res) => (res.content ?? []).map((c) => c.text ?? '').join('');
 
 async function call(client, name, args) {
@@ -129,6 +144,18 @@ async function permission(toolName, input) {
   const r = await call(host, 'permission', { tool_name: toolName, input, tool_use_id: 'toolu_stub' });
   const parsed = JSON.parse(r.text);
   decision = parsed.behavior;
+  if (toolName === 'Read' && parsed.behavior === 'allow') {
+    // Claude Code runs the tool with the input the prompt tool returned.
+    const path = parsed.updatedInput?.file_path;
+    let content = null;
+    try {
+      content = readFileSync(path, 'utf8').slice(0, 10000);
+    } catch (err) {
+      content = `<unreadable: ${err.code ?? 'error'}>`;
+    }
+    r.read = { path, content };
+    save();
+  }
   return parsed;
 }
 
@@ -159,12 +186,17 @@ for (const step of steps) {
       ...(capResult ? { data: capResult } : {}),
     });
   }
+  if (step.host) await call(host, step.host.tool, step.host.args ?? {});
   if (step.request_approval) await call(host, 'request_approval', { reason: step.request_approval });
   if (step.reply) {
     const args = { ...step.reply, text: step.reply.text.replace('{{decision}}', decision) };
     await call(host, 'reply', args);
   }
   if (step.sleep) await new Promise((r) => setTimeout(r, step.sleep));
+  if (step.wait_for_file) {
+    const until = Date.now() + 60_000;
+    while (!existsSync(step.wait_for_file) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+  }
   if (step.exit !== undefined) {
     process.stdout.write(JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, result: 'stub exit' }));
     process.exit(step.exit);

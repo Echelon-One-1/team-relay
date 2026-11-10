@@ -458,6 +458,8 @@ describe('dist/tool-event.js', () => {
       env: {
         PATH: process.env.PATH ?? '',
         HOME: process.env.HOME ?? '/tmp',
+        // The private XDG_CONFIG_HOME from test/helpers/isolate.ts: never this computer's answering lock.
+        XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME!,
         TMPDIR: mkdtempSync(join(tmpdir(), 'team-relay-ans-tmp-')),
         ANSWERER_HOME: home,
         RELAY_URL: relay.url,

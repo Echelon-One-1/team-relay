@@ -79,7 +79,7 @@ export function suggestMemberId(email: string, taken: Iterable<string> = []): st
 export function addProblem(roster: Roster | undefined, member: string, email: string): string | null {
   const e = email.trim().toLowerCase()
   if (!EMAIL_RE.test(e)) return 'Enter a Google email address.'
-  if (!MEMBER_ID_RE.test(member)) return 'Pick a member id like kiril_2: it starts with a lower-case letter, then lower-case letters, digits or _, 2 to 32 characters.'
+  if (!MEMBER_ID_RE.test(member)) return 'Pick a member id like alice_2: it starts with a lower-case letter, then lower-case letters, digits or _, 2 to 32 characters.'
   const members = entries(roster)
   if (members.some((m) => m.member === member)) return `${member} is already a member id on this team.`
   if (members.some((m) => visibleEmails(m).includes(e))) return 'That email already belongs to a member of the team.'

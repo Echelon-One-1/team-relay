@@ -4,6 +4,8 @@
 #
 # Usage: bash scripts/gcp-bootstrap.sh
 #        TEAM_CONFIG=config/team.local.yaml bash scripts/gcp-bootstrap.sh
+#        OAUTH_CLIENT_FILE=<web client JSON> DRIVE_CLIENT_FILE=<desktop client JSON> \
+#          bash scripts/gcp-bootstrap.sh
 #
 # Every resource is namespaced team-relay*. Nothing here reads, writes or grants anything on
 # other resources that may share the project, and nothing here shares a service account,
@@ -21,7 +23,7 @@ if [[ -f config/deploy.local.env ]]; then
   source config/deploy.local.env
 fi
 PROJECT="${PROJECT:?set PROJECT in config/deploy.local.env or the environment}"
-REGION="${REGION:-europe-west3}"
+REGION="${REGION:-australia-southeast1}"
 DATABASE="team-relay"
 REPO="team-relay-images"
 RUNTIME_SA="team-relay-runtime"
@@ -64,8 +66,10 @@ has_binding() {  # stdin: csv role,member rows; $1 role; $2 member
 # ---------------------------------------------------------------- 1. services
 echo "1. services"
 ENABLED="$(gcloud services list --enabled --project="$PROJECT" --format='value(config.name)')"
+# compute: the load balancer of scripts/deploy-lb.sh (M10-SPEC §5).
 for api in run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
-    secretmanager.googleapis.com firestore.googleapis.com iam.googleapis.com iap.googleapis.com; do
+    secretmanager.googleapis.com firestore.googleapis.com iam.googleapis.com iap.googleapis.com \
+    compute.googleapis.com; do
   if grep -qx "$api" <<<"$ENABLED"; then
     echo "   ${api}: exists"
   else
@@ -339,5 +343,61 @@ else
   echo "   accessor on ${SALT_SECRET}: created"
 fi
 
+# ------------------------------------------------------- 10. Drive OAuth client (M10)
+# The Desktop OAuth client members connect Google Drive with (M10-SPEC §2a: loopback + PKCE,
+# scope drive.readonly). Given DRIVE_CLIENT_FILE (the client's downloaded JSON), its id and
+# installed-app secret are stored as the secret team-relay-drive-client, readable by the relay's
+# runtime only, which serves them to active members; the value is never printed. Optional:
+# without it the relay answers drive-client with 404 drive_not_configured.
+DRIVE_SECRET="team-relay-drive-client"
+echo "10. Drive OAuth client"
+if [[ -n "${DRIVE_CLIENT_FILE:-}" ]]; then
+  WANTED_DRIVE="$(python3 - "$DRIVE_CLIENT_FILE" <<'PYEOF'
+import json, re, sys
+installed = json.load(open(sys.argv[1], encoding="utf-8")).get("installed") or {}
+client_id, secret = installed.get("client_id"), installed.get("client_secret")
+if not client_id or not re.fullmatch(r"[0-9]+-[0-9a-z]+\.apps\.googleusercontent\.com", client_id):
+    sys.exit("error: not a Desktop app OAuth client JSON (no installed.client_id)")
+if not secret or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", secret):
+    sys.exit("error: the Desktop client JSON has no usable client_secret")
+print(json.dumps({"client_id": client_id, "client_secret": secret}, sort_keys=True, separators=(",", ":")))
+PYEOF
+)"
+  if gcloud secrets describe "$DRIVE_SECRET" --project="$PROJECT" >/dev/null 2>&1; then
+    CURRENT_DRIVE="$(gcloud secrets versions access latest --secret="$DRIVE_SECRET" \
+      --project="$PROJECT" 2>/dev/null || true)"
+    if [[ "$CURRENT_DRIVE" == "$WANTED_DRIVE" ]]; then
+      echo "   secret ${DRIVE_SECRET}: exists (current)"
+    else
+      printf '%s' "$WANTED_DRIVE" | gcloud secrets versions add "$DRIVE_SECRET" \
+        --project="$PROJECT" --data-file=- --quiet >/dev/null
+      echo "   secret ${DRIVE_SECRET}: updated (redeploy the relay)"
+    fi
+  else
+    printf '%s' "$WANTED_DRIVE" | gcloud secrets create "$DRIVE_SECRET" --project="$PROJECT" \
+      --replication-policy=user-managed --locations="$REGION" --data-file=- --quiet >/dev/null
+    echo "   secret ${DRIVE_SECRET}: created"
+  fi
+  unset WANTED_DRIVE CURRENT_DRIVE
+fi
+if gcloud secrets describe "$DRIVE_SECRET" --project="$PROJECT" >/dev/null 2>&1; then
+  if gcloud secrets get-iam-policy "$DRIVE_SECRET" --project="$PROJECT" --flatten='bindings[].members' \
+      --format='csv[no-heading](bindings.role,bindings.members)' \
+      | has_binding roles/secretmanager.secretAccessor "serviceAccount:${RUNTIME_EMAIL}"; then
+    echo "   accessor on ${DRIVE_SECRET}: exists"
+  else
+    gcloud secrets add-iam-policy-binding "$DRIVE_SECRET" --project="$PROJECT" \
+      --member="serviceAccount:${RUNTIME_EMAIL}" --role=roles/secretmanager.secretAccessor \
+      --quiet >/dev/null
+    echo "   accessor on ${DRIVE_SECRET}: created"
+  fi
+else
+  echo "   secret ${DRIVE_SECRET}: skipped (set DRIVE_CLIENT_FILE=<Desktop client JSON> to create it)"
+fi
+
 echo
-echo "Bootstrap complete. Deploy with: bash scripts/deploy.sh, then bash scripts/deploy-console.sh"
+if [[ -n "${PUBLIC_HOST:-}" ]]; then
+  echo "Bootstrap complete. Next: bash scripts/deploy-lb.sh, then bash scripts/deploy.sh and bash scripts/deploy-console.sh"
+else
+  echo "Bootstrap complete. Deploy with: bash scripts/deploy.sh, then bash scripts/deploy-console.sh"
+fi

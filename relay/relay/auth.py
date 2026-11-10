@@ -61,10 +61,13 @@ class Unauthenticated(Exception):
 @dataclass(frozen=True)
 class Verified:
     """What a verified token says: the principal, and for a Google ID token the account's
-    ``sub`` (M6-SPEC §7.2), which the relay checks against the roster's binding."""
+    ``sub`` (M6-SPEC §7.2), which the relay checks against the roster's binding, and its
+    ``hd`` claim (the Google Workspace domain; None for a consumer account or a service
+    account), which RELAY_ALLOWED_DOMAINS checks (M10-SPEC §7.2)."""
 
     principal: str
     sub: str | None = None
+    hd: str | None = None
 
 
 class Verifier(Protocol):
@@ -248,7 +251,10 @@ class GoogleVerifier:
         exp = claims.get("exp")
         if isinstance(exp, bool) or not isinstance(exp, int):
             raise Unauthenticated("bad_exp")
-        return Verified("google:" + email.lower(), sub), exp
+        hd = claims.get("hd")
+        if hd is not None and not isinstance(hd, str):
+            raise Unauthenticated("bad_hd")
+        return Verified("google:" + email.lower(), sub, hd), exp
 
     async def principal(self, token: str) -> str:
         return (await self.verify(token)).principal

@@ -3,6 +3,7 @@ import type {
   ActivityPage,
   AdminTeamsPage,
   ApprovalsSummary,
+  Boundaries,
   Directory,
   InboxSummary,
   Join,
@@ -10,16 +11,17 @@ import type {
   RequestDetail,
   Roster,
   RosterRole,
+  TeamBoundaries,
   Teams,
 } from './types'
 
 // Every call goes to the console server's proxy: locally (M2 §4.4) with the key in
 // X-Console-Key; hosted behind IAP (M3 §4) without a key, with the IAP session cookie. A call
 // about one team names it in X-Relay-Team (M9 §5), and the console server checks the viewer is
-// on it. The only writes are an owner's roster changes (M6 §3) and the account's own (M9:
-// create a team, answer an invitation, delete a team, an admin's delete): a same-origin JSON
-// POST, PATCH or DELETE, which the browser marks Sec-Fetch-Site: same-origin. Nothing can be
-// sent, acked or replied.
+// on it. The only writes are an owner's roster changes (M6 §3), an owner's boundaries (M10 §1)
+// and the account's own (M9: create a team, answer an invitation, delete a team, an admin's
+// delete): a same-origin JSON POST, PUT, PATCH or DELETE, which the browser marks
+// Sec-Fetch-Site: same-origin. Nothing can be sent, acked or replied.
 
 export type Transport = (path: string, init: RequestInit) => Promise<Response>
 
@@ -309,7 +311,7 @@ async function changeError(res: Response): Promise<ChangeError> {
 }
 
 /** A change: JSON, same origin, no redirects followed. Resolves with the relay's answer. */
-export async function sendChange<T>(method: 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown, team?: string | null): Promise<T> {
+export async function sendChange<T>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown, team?: string | null): Promise<T> {
   const key = consoleKey()
   if (key === null && !isHosted()) throw new ChangeError('No console key.', { signedOut: true })
   const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' }
@@ -352,6 +354,11 @@ export const api = {
   roster: (team?: string | null) => getJson<Roster>('api/roster', team),
   inboxSummary: (team?: string | null) => getJson<InboxSummary>('api/inbox/summary', team),
   approvalsSummary: () => getJson<ApprovalsSummary>('api/approvals/summary'),
+  /** M10 §1: the team's boundaries (any member). */
+  boundaries: (team?: string | null) => getJson<TeamBoundaries>('api/boundaries', team),
+  /** M10 §1: an owner replaces them, from the version they were read at (stale: 409). */
+  setBoundaries: (version: number, boundaries: Boundaries, team?: string | null) =>
+    sendChange<TeamBoundaries>('PUT', 'api/boundaries', { version, boundaries }, team),
   addMember: (member: string, email: string, team?: string | null) => sendChange<unknown>('POST', 'api/roster', { member, email }, team),
   setRole: (member: string, role: RosterRole, team?: string | null) => sendChange<unknown>('PATCH', `api/roster/${seg(member)}`, { role }, team),
   removeMember: (member: string, team?: string | null) => sendChange<unknown>('DELETE', `api/roster/${seg(member)}`, undefined, team),

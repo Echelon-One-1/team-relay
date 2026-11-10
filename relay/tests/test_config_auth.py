@@ -191,6 +191,8 @@ def test_google_mode_is_allowed_on_cloud_run(tmp_path: Path):
         "RELAY_PUBLIC_URL": "https://relay.example",
         "RELAY_OAUTH_CLIENT_FILE": str(client),
         "K_SERVICE": "relay",
+        # M10-SPEC §5: a public URL that is not a run.app one says how many hops Google adds.
+        "RELAY_FORWARDED_FOR_HOPS": "1",
     }
     assert Settings.from_env(env).auth_mode == "google"
 
