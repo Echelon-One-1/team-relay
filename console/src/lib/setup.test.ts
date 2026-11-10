@@ -12,6 +12,7 @@ import {
   publicOrigin,
   readAcceptance,
   readMembersStatus,
+  SELF_TEST_PENDING,
   setupCommand,
   setupCount,
   setupSteps,
@@ -87,6 +88,11 @@ describe('setupSteps (M11 §6)', () => {
     const failed = setupSteps(entry(status({ ok: false, reason: 'Claude Code is not signed in.' })), BOUNDS, 3, 3)
     expect(done(failed).self_test).toBe(false)
     expect(failed[6]!.todo).toBe('The self-test failed (Claude Code is not signed in); fix that, then run the setup command again.')
+    // Not run yet (the daemon's first status) is not a failure.
+    const pending = setupSteps(entry(status({ ok: false, reason: SELF_TEST_PENDING })), BOUNDS, 3, 3)
+    expect(SELF_TEST_PENDING).toBe('the self-test has not run yet')
+    expect(done(pending).self_test).toBe(false)
+    expect(pending[6]!.todo).toBe('Running the self-test now; this takes about a minute.')
   })
 
   it('boundaries not read (still loading, or failed): folders and Drive are not known, never ticked', () => {

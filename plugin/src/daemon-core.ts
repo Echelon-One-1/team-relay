@@ -31,7 +31,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { AnswerHost, type HostOptions } from './answer-host.js';
 import { NOWHERE_RELAY, disposeDryRun, executeDryRun, prepareDryRun } from './answer-dry-run.js';
-import type { MemberStatusBody } from './boundaries-types.js';
+import { SELF_TEST_PENDING, type MemberStatusBody } from './boundaries-types.js';
 import { validBoundaries } from './boundary-set.js';
 import { countClones } from './clones.js';
 import { credentialFingerprint, credentialsPath } from './credentials.js';
@@ -40,6 +40,8 @@ import { expandPath, memberFoldersPath, readTeamSettings } from './member-folder
 import { backoffDelay, RelayError, type RelayClient } from './relay-client.js';
 import { connectOnce, hostConnection, type ConnectAttempt } from './relay-connect.js';
 import { describeError } from './tool-util.js';
+
+export { SELF_TEST_PENDING };
 
 export const DAEMON_LOG_MAX_BYTES = 5 * 1024 * 1024;
 const LOG_LINE_LIMIT = 1000;
@@ -52,7 +54,7 @@ export type Intervals = {
   selfTestMs: number;
   /** Plugin path check (1 min). */
   pluginCheckMs: number;
-  /** Claude sign-in, Drive connection and clone count (10 min). */
+  /** Claude sign-in and clone count (10 min); the Drive connection is checked for every status. */
   factsMs: number;
   /** How often the sign-in and the session are looked at. */
   tickMs: number;
@@ -175,6 +177,9 @@ export async function selfTest(o: {
   run?: Run;
   signal?: AbortSignal;
   limitMs?: number;
+  /** The dry run's two halves (tests: fakes). */
+  prepare?: typeof prepareDryRun;
+  execute?: typeof executeDryRun;
 }): Promise<SelfTestResult> {
   const at = new Date((o.now ?? Date.now)()).toISOString();
   const bin = claudeBinFrom(o.env);
@@ -182,7 +187,7 @@ export async function selfTest(o: {
   if (!(await claudeSignedIn(bin, o.env, o.run))) return { ok: false, at, reason: 'Claude Code is not signed in (claude auth status failed)' };
   let prepared;
   try {
-    prepared = prepareDryRun({
+    prepared = (o.prepare ?? prepareDryRun)({
       env: o.env,
       question: SELF_TEST_QUESTION,
       cwd: o.env.HOME?.trim() || homedir(),
@@ -197,7 +202,7 @@ export async function selfTest(o: {
     return { ok: false, at, reason: 'the answerer could not be prepared', detail: describeError(err) };
   }
   try {
-    const { result } = await executeDryRun(prepared, { offline: true, limitMs: o.limitMs ?? 120_000, ...(o.signal ? { signal: o.signal } : {}) });
+    const { result } = await (o.execute ?? executeDryRun)(prepared, { offline: true, limitMs: o.limitMs ?? 120_000, ...(o.signal ? { signal: o.signal } : {}) });
     if (result.result && result.result.type === 'result') return { ok: true, at, reason: null };
     if (result.timedOut) return { ok: false, at, reason: 'the answerer did not finish starting in time' };
     if (result.code === null && result.signal === null) return { ok: false, at, reason: 'the answerer could not be started' };
@@ -297,7 +302,7 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
   }, iv.pluginCheckMs);
 
   // -- M11-SPEC §3: the self-test, at start and every 6 h.
-  let test: SelfTestResult = { ok: false, at: startedAt, reason: 'the self-test has not run yet' };
+  let test: SelfTestResult = { ok: false, at: startedAt, reason: SELF_TEST_PENDING };
   let testing: Promise<void> | null = null;
   const doSelfTest = (): Promise<void> => {
     testing ??= (async () => {
@@ -357,7 +362,6 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
     factsAt = now();
     factsKey = key;
     signedIn = bin ? await facts.claudeSignedIn(bin).catch(() => false) : false;
-    driveConnected = await facts.driveConnected().catch(() => false);
     clones = await facts.clones(folders.repo_roots, orgs).catch(() => 0);
     // Only the folder's own name is ever logged, never the path to it.
     const named = (what: string, raw: string) => {
@@ -385,6 +389,9 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
     const f = folders(team);
     // Recounted every 10 minutes, or at once when the repo roots or the team's orgs changed.
     await refreshFacts(client, f);
+    // Cheap (one keychain look-up), so checked every time: a Drive connected after the daemon
+    // started shows in the next status.
+    driveConnected = await facts.driveConnected().catch(() => false);
     const body: MemberStatusBody = {
       daemon: { version: o.version.slice(0, 32), started_at: startedAt },
       claude: { found: claudeBinFrom(env) !== null, signed_in: signedIn },

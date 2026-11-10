@@ -16,6 +16,12 @@ export interface SetupStep {
 
 export const SETUP_STEPS = 7
 
+/**
+ * `self_test.reason` while the Mac's first self-test is still running: not a failure. The same
+ * literal as the plugin's SELF_TEST_PENDING (plugin/src/boundaries-types.ts).
+ */
+export const SELF_TEST_PENDING = 'the self-test has not run yet'
+
 /** The version the viewer accepted: their own acceptance when it has loaded, else members-status's. */
 export function acceptedVersion(entry: MemberStatusEntry | null, acceptance: Acceptance | null | undefined): number {
   if (acceptance && Number.isInteger(acceptance.version)) return acceptance.version
@@ -92,6 +98,7 @@ export function setupSteps(entry: MemberStatusEntry | null, bounds: TeamBoundari
 }
 
 function selfTestTodo(reason: string | null): string {
+  if (reason === SELF_TEST_PENDING) return 'Running the self-test now; this takes about a minute.'
   const r = plainLine(reason)
   return r ? `The self-test failed (${r}); fix that, then run the setup command again.` : 'The self-test failed; run the setup command again.'
 }

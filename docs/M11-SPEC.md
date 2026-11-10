@@ -84,8 +84,11 @@ when the member leaves the roster.
   `answer-dry-run --run --offline`: the API at a closed local port, `CLAUDE_CODE_MAX_RETRIES=0`
   and `API_TIMEOUT_MS=5000`, so the refused request fails in about a second instead of
   minutes of retries), with no relay traffic and no question content. The first one runs beside
-  connecting; until it ends the status says `{ok: false, reason: "the self-test has not run yet"}`.
-  `reason` is a fixed sentence (error text, which can hold paths, stays in the local log).
+  connecting; until it ends the status says `{ok: false, reason: "the self-test has not run yet"}`
+  (`SELF_TEST_PENDING`), which the checklists show as running, not failed. `reason` is a fixed
+  sentence (error text, which can hold paths, stays in the local log).
+- Claude's sign-in and the clone count are recounted every 10 min (or when the folders or the
+  boundaries change); `drive.connected` is checked for every status (one keychain look-up).
 
 ## 4. Asking from the console (relay + console)
 
@@ -118,12 +121,15 @@ The script (bash 3.2, `set -euo pipefail`, macOS only, never `sudo`, re-runnable
    Code with its official installer (asks first) and stops on no.
 2. `claude auth status`; not signed in → `claude auth login`.
 3. `claude plugin marketplace add __MARKETPLACE__` (skipped when present), then
-   `claude plugin install team-relay@<marketplace name>`, or `claude plugin update` when installed.
+   `claude plugin install --scope user team-relay@<marketplace name>`, or `claude plugin update
+   --scope user` when it is installed for this user (the rule of step 4; an install for a project
+   only does not count).
 4. Finds the install path in `~/.claude/plugins/installed_plugins.json` and from there runs
    `node <path>/dist/setup-cli.js` for the rest. One rule finds the plugin everywhere (here, the
    install check, the launcher, the daemon's update check): the first user-scope entry with an
    absolute `installPath` under exactly the key it installed, `team-relay@<marketplace name>`;
-   never another scope or another marketplace's copy. In this order:
+   never another scope or another marketplace's copy. In this order: `login`, `folders`, `drive`
+   (never fatal), `daemon install`, `status`.
    - `login`: the browser sign-in of M5 against `__RELAY_URL__` (team chosen in the browser);
      skipped when a valid sign-in for this relay exists.
    - `folders`: shows the team's GitHub orgs and asks for the folders that hold those clones
@@ -132,6 +138,11 @@ The script (bash 3.2, `set -euo pipefail`, macOS only, never `sudo`, re-runnable
      shows the current list and lets the member keep or replace it. When a chosen folder is under
      `~/Documents`, `~/Desktop`, `~/Downloads` or `~/Library/Mobile Documents`, one sentence says
      macOS may ask to allow "node" the first time the background answerer reads it: click Allow.
+   - `drive`: when the team has drives, connects Google Drive (M10's Drive sign-in) unless
+     connected, and says macOS may ask to allow "node" for Google Drive. Before `daemon install`
+     (so the daemon's first status already says connected), but a failed or cancelled Drive
+     sign-in does not stop the setup: it says to run the same setup command again to connect
+     Drive, and goes on.
    - `daemon install --claude <path> --plugin team-relay@<marketplace name>`: first checks that
      the launcher would find `dist/daemon.js` under that key (else it stops, saying so, and
      writes nothing). Writes `~/Library/LaunchAgents/<label>.plist` (label
@@ -143,14 +154,11 @@ The script (bash 3.2, `set -euo pipefail`, macOS only, never `sudo`, re-runnable
      loaded), a wait (up to 20 s) until `launchctl print gui/<uid>/<label>` no longer finds it,
      and `launchctl bootstrap gui/<uid>`, tried up to 3 more times 2 s apart when it fails. Files
      mode 600, folders 700.
-   - `drive`: when the team has drives, connects Google Drive (M10's Drive sign-in) unless
-     connected, and says macOS may ask to allow "node" for Google Drive. Last of the steps that
-     change things: a failed or cancelled Drive sign-in does not stop the setup; it says to run
-     the same setup command again to connect Drive, and goes on.
    - `status`: prints the checklist of §6 from the relay's view. "Folders chosen" and "Google
      Drive connected" need nothing only when the boundaries were read and hold no orgs (or no
      drives); boundaries that could not be read leave both not known, never ticked (the console
-     too).
+     too). While the self-test has not run yet it says "Running the self-test now; this takes
+     about a minute." and looks again every 5 s, for up to 90 s, before printing the checklist.
 5. Ends with the console URL and "open it to accept the boundaries".
 
 `setup-cli.js daemon uninstall` removes the agent; `setup-cli.js` with no command prints help.
@@ -171,7 +179,8 @@ command and the console links are that host; a relay deployed at its run.app URL
   4. Folders chosen - `folders.repo_roots > 0` (or the team has no orgs).
   5. Google Drive connected - `drive.connected` (or the team has no drives).
   6. Boundaries accepted - accepted version equals the current one (Accept button inline).
-  7. Self-test passed - `self_test.ok`.
+  7. Self-test passed - `self_test.ok`; while `reason` is the not-run-yet sentence, "Running the
+     self-test now; this takes about a minute." (not a failure).
   Each unticked step says in one sentence what to do. All ticked: "You're set up. Ask the team"
   links to Ask.
 - **Members** shows each member's progress (n of 7) and whether they are answering now.

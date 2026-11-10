@@ -7,6 +7,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { credentialsPath, writeCredential } from '../src/credentials.js';
+import { SELF_TEST_PENDING } from '../src/daemon-core.js';
 import type { Exec } from '../src/daemon-launch.js';
 import type { Keychain } from '../src/google-drive.js';
 import type { LoginOptions } from '../src/login.js';
@@ -313,6 +314,9 @@ describe('status: the Join checklist (M11-SPEC §6)', () => {
     expect(unknown.map((s) => s.done)).toEqual([true, true, true, false, false, true, true]);
     expect(unknown[3]!.todo).toBe("Not known: your team's boundaries could not be read from the relay just now; run status again in a minute.");
     expect(unknown[4]!.todo).toBe(unknown[3]!.todo);
+    // Not run yet is not a failure.
+    const pending = checklist({ status: { ...full, self_test: { ok: false, reason: SELF_TEST_PENDING } }, answering: true, acceptedVersion: 1, boundariesVersion: 1, orgs: 0, drives: 0, console: 'x' });
+    expect(pending[6]).toMatchObject({ done: false, todo: 'Running the self-test now; this takes about a minute.' });
     const failed = checklist({ status: { ...full, self_test: { ok: false, reason: 'Claude Code is not signed in' } }, answering: true, acceptedVersion: 1, boundariesVersion: 1, orgs: 0, drives: 0, console: 'x' });
     expect(failed[6]).toMatchObject({ done: false, todo: 'The self-test failed: Claude Code is not signed in.' });
   });
@@ -338,6 +342,34 @@ describe('status: the Join checklist (M11-SPEC §6)', () => {
     await runSetup(['status'], deps(t2));
     expect(t2.out[0]).toBe('Setup for bob on team demo: 7 of 7 done.');
     expect(t2.out.at(-1)).toBe(`You're set up. Ask the team in the console: ${relay.url}`);
+  });
+
+  it('while the self-test has not run yet it waits for it (every 5 s, up to 90 s), then prints the checklist', async () => {
+    relay.setBoundaries({ topic: 'T', github_orgs: [], drives: [], member_folders: false });
+    relay.acceptances.set('bob', 1);
+    const pendingStatus = () => ({ daemon: { version: '1', started_at: '2026-11-10T10:00:00.000Z' }, ...full, self_test: { ok: false, at: '2026-11-10T10:00:00.000Z', reason: SELF_TEST_PENDING }, seen_at: new Date().toISOString() });
+    relay.memberStatus.set('bob', pendingStatus());
+    const waits: number[] = [];
+    // The self-test ends during the second wait.
+    const sleep = async (ms: number) => {
+      waits.push(ms);
+      if (waits.length === 2) relay.memberStatus.set('bob', { ...pendingStatus(), self_test: full.self_test });
+    };
+    const t = term();
+    expect(await runSetup(['status'], deps(t, { sleep }))).toBe(0);
+    expect(waits).toEqual([5000, 5000]);
+    expect(t.out[0]).toBe('Running the self-test now; this takes about a minute.');
+    expect(t.out).toContain('Setup for bob on team demo: 7 of 7 done.');
+    expect(t.out).toContain('  [x] Self-test passed');
+
+    // Still not run after 90 s: it prints the checklist as it is, saying it is running, not failed.
+    relay.memberStatus.set('bob', pendingStatus());
+    const waits2: number[] = [];
+    const t2 = term();
+    expect(await runSetup(['status'], deps(t2, { sleep: async (ms) => void waits2.push(ms) }))).toBe(0);
+    expect(waits2.reduce((a, b) => a + b, 0)).toBe(90_000);
+    expect(t2.out.at(-1)).toBe('  [ ] Self-test passed - Running the self-test now; this takes about a minute.');
+    expect(t2.text()).not.toContain('failed');
   });
 
   it('when the boundaries cannot be read, folders and Drive are shown as not known, never ticked', async () => {

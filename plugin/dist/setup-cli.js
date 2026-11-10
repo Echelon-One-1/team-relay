@@ -15665,6 +15665,9 @@ function configDir(env) {
   return join(base, "team-relay");
 }
 
+// src/boundaries-types.ts
+var SELF_TEST_PENDING = "the self-test has not run yet";
+
 // src/boundary-set.ts
 import { execFile as execFile2 } from "node:child_process";
 import { promises as fsp } from "node:fs";
@@ -17729,10 +17732,14 @@ async function daemon(argv, d) {
     return 1;
   }
 }
+var SELF_TEST_RUNNING = "Running the self-test now; this takes about a minute.";
+var PENDING_POLL_MS = 5e3;
+var PENDING_WAIT_MS = 9e4;
 var NOT_KNOWN = "Not known: your team's boundaries could not be read from the relay just now; run status again in a minute.";
 function checklist(p) {
   const s = p.status;
   const reason = typeof s?.self_test?.reason === "string" && s.self_test.reason ? s.self_test.reason : null;
+  const pending = s?.self_test?.ok !== true && reason === SELF_TEST_PENDING;
   return [
     { done: s !== null, title: "Run the setup command", todo: "Run the setup command from the console on this Mac." },
     {
@@ -17759,7 +17766,7 @@ function checklist(p) {
     {
       done: s?.self_test?.ok === true,
       title: "Self-test passed",
-      todo: reason ? `The self-test failed: ${reason}.` : "Wait a minute for the background answerer to run its self-test."
+      todo: pending ? SELF_TEST_RUNNING : reason ? `The self-test failed: ${reason}.` : "Wait a minute for the background answerer to run its self-test."
     }
   ];
 }
@@ -17777,8 +17784,22 @@ async function status(d) {
     io.print(`The relay did not give your status (${describeError(err)}); try again later.`);
     return 1;
   }
+  const mine = (list) => list.members.find((m) => m.member === c.member);
+  const pending = (e) => e?.status?.self_test.ok === false && e.status.self_test.reason === SELF_TEST_PENDING;
+  if (pending(mine(ms))) {
+    io.print(SELF_TEST_RUNNING);
+    const sleep = d.sleep ?? ((t) => new Promise((r) => setTimeout(r, t)));
+    for (let waited = 0; waited < PENDING_WAIT_MS && pending(mine(ms)); ) {
+      await sleep(PENDING_POLL_MS);
+      waited += PENDING_POLL_MS;
+      try {
+        ms = await c.client.membersStatus({ attempts: 2, timeoutMs: 15e3 });
+      } catch {
+      }
+    }
+  }
   const tb = await teamBoundaries(c.client);
-  const entry = ms.members.find((m) => m.member === c.member);
+  const entry = mine(ms);
   const steps = checklist({
     status: entry?.status ?? null,
     answering: entry?.answering === true,
@@ -17867,6 +17888,7 @@ export {
   HELP,
   PRIVACY_DRIVE_NOTE,
   PRIVACY_FOLDERS_NOTE,
+  SELF_TEST_RUNNING,
   checklist,
   runSetup
 };

@@ -82,16 +82,6 @@ if (/^[A-Za-z0-9._-]{1,100}$/.test(found)) process.stdout.write(found);
 ' "$MARKETPLACE" 2>/dev/null || true
 }
 
-plugin_installed() {  # $1: plugin id
-  local listed
-  listed="$("$CLAUDE" plugin list --json </dev/null 2>/dev/null || true)"
-  printf '%s' "$listed" | "$NODE" -e '
-let list = [];
-try { list = JSON.parse(require("fs").readFileSync(0, "utf8")); } catch {}
-process.exit(Array.isArray(list) && list.some((p) => p && p.id === process.argv[1]) ? 0 : 1);
-' "$1"
-}
-
 # Where the plugin is installed: the first user-scope entry with an absolute installPath under
 # exactly $1 (team-relay@<marketplace name>) in installed_plugins.json, never another scope or
 # marketplace. The background answerer's launcher uses the same rule (plugin/src/daemon-launch.ts).
@@ -111,6 +101,12 @@ const pick = Array.isArray(list)
   : undefined;
 if (pick) process.stdout.write(pick.installPath);
 ' "$1" </dev/null 2>/dev/null || true
+}
+
+# Installed for this user: the same rule as install_path. An install for a project only does not
+# count, so the plugin is then installed for this user.
+plugin_installed() {  # $1: plugin id
+  [[ -n "$(install_path "$1")" ]]
 }
 
 main() {
@@ -207,10 +203,10 @@ process.exit(s && s.loggedIn === true ? 0 : 1);
   local plugin_id="${PLUGIN}@${name}"
   if plugin_installed "$plugin_id"; then
     say "Updating ${plugin_id}..."
-    "$CLAUDE" plugin update "$plugin_id" </dev/null || stop "Could not update the plugin ${plugin_id}."
+    "$CLAUDE" plugin update --scope user "$plugin_id" </dev/null || stop "Could not update the plugin ${plugin_id}."
   else
     say "Installing ${plugin_id}..."
-    "$CLAUDE" plugin install "$plugin_id" </dev/null || stop "Could not install the plugin ${plugin_id}."
+    "$CLAUDE" plugin install --scope user "$plugin_id" </dev/null || stop "Could not install the plugin ${plugin_id}."
   fi
 
   local plugin_dir
@@ -220,17 +216,18 @@ process.exit(s && s.loggedIn === true ? 0 : 1);
   fi
   local setup_cli="$plugin_dir/dist/setup-cli.js"
 
-  # ---------------------------------------------------------------- 4. sign-in, folders, background answering, Drive
+  # ---------------------------------------------------------------- 4. sign-in, folders, Drive, background answering
   step "4/5 Connecting you to the team"
   "$NODE" "$setup_cli" login --relay "$RELAY_URL" <"$TTY" || stop "Signing in to the team did not finish."
   "$NODE" "$setup_cli" folders <"$TTY" || stop "Choosing your folders did not finish."
-  "$NODE" "$setup_cli" daemon install --claude "$CLAUDE" --plugin "$plugin_id" <"$TTY" \
-    || stop "Starting the background answerer did not finish."
-  # Drive last: a cancelled or failed Drive sign-in leaves everything else working.
+  # Drive before the background answerer (so its first status already says connected), but a
+  # cancelled or failed Drive sign-in does not stop the setup.
   if ! "$NODE" "$setup_cli" drive <"$TTY"; then
     say ""
     say "Google Drive is not connected yet; the rest of the setup goes on. To connect Drive later, run the same setup command again."
   fi
+  "$NODE" "$setup_cli" daemon install --claude "$CLAUDE" --plugin "$plugin_id" <"$TTY" \
+    || stop "Starting the background answerer did not finish."
 
   # ---------------------------------------------------------------- 5. where things stand
   step "5/5 Checking everything"

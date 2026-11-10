@@ -17,7 +17,7 @@ import { createReadStream, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { configDir } from './answering-lock.js';
-import type { TeamBoundaries } from './boundaries-types.js';
+import { SELF_TEST_PENDING, type MemberStatusEntry, type TeamBoundaries } from './boundaries-types.js';
 import { homeDir, validBoundaries } from './boundary-set.js';
 import { clonesUnder } from './clones.js';
 import { consoleUrl } from './console-url.js';
@@ -416,6 +416,11 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
 
 export type Step = { done: boolean; title: string; todo: string };
 
+export const SELF_TEST_RUNNING = 'Running the self-test now; this takes about a minute.';
+/** While the self-test has not run yet, status looks again this often, for at most this long. */
+const PENDING_POLL_MS = 5000;
+const PENDING_WAIT_MS = 90_000;
+
 const NOT_KNOWN = "Not known: your team's boundaries could not be read from the relay just now; run status again in a minute.";
 
 /**
@@ -434,6 +439,7 @@ export function checklist(p: {
 }): Step[] {
   const s = p.status;
   const reason = typeof s?.self_test?.reason === 'string' && s.self_test.reason ? s.self_test.reason : null;
+  const pending = s?.self_test?.ok !== true && reason === SELF_TEST_PENDING;
   return [
     { done: s !== null, title: 'Run the setup command', todo: 'Run the setup command from the console on this Mac.' },
     {
@@ -460,7 +466,7 @@ export function checklist(p: {
     {
       done: s?.self_test?.ok === true,
       title: 'Self-test passed',
-      todo: reason ? `The self-test failed: ${reason}.` : 'Wait a minute for the background answerer to run its self-test.',
+      todo: pending ? SELF_TEST_RUNNING : reason ? `The self-test failed: ${reason}.` : 'Wait a minute for the background answerer to run its self-test.',
     },
   ];
 }
@@ -479,8 +485,24 @@ async function status(d: SetupDeps): Promise<number> {
     io.print(`The relay did not give your status (${describeError(err)}); try again later.`);
     return 1;
   }
+  const mine = (list: { members: MemberStatusEntry[] }) => list.members.find((m) => m.member === c.member);
+  const pending = (e: MemberStatusEntry | undefined) => e?.status?.self_test.ok === false && e.status.self_test.reason === SELF_TEST_PENDING;
+  // Just after setup the background answerer is still running its first self-test: wait for it.
+  if (pending(mine(ms))) {
+    io.print(SELF_TEST_RUNNING);
+    const sleep = d.sleep ?? ((t: number) => new Promise<void>((r) => setTimeout(r, t)));
+    for (let waited = 0; waited < PENDING_WAIT_MS && pending(mine(ms)); ) {
+      await sleep(PENDING_POLL_MS);
+      waited += PENDING_POLL_MS;
+      try {
+        ms = await c.client.membersStatus({ attempts: 2, timeoutMs: 15_000 });
+      } catch {
+        // the last answer stands; looked at again next time
+      }
+    }
+  }
   const tb = await teamBoundaries(c.client);
-  const entry = ms.members.find((m) => m.member === c.member);
+  const entry = mine(ms);
   const steps = checklist({
     status: entry?.status ?? null,
     answering: entry?.answering === true,

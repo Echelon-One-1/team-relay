@@ -59,6 +59,12 @@ export interface Acceptance {
   accepted_at: string | null;
 }
 
+/**
+ * M11-SPEC §3: `self_test.reason` while the daemon's first self-test is still running (not a
+ * failure). The console recognises the same literal (console/src/lib/setup.ts).
+ */
+export const SELF_TEST_PENDING = 'the self-test has not run yet';
+
 /** M11-SPEC §3: what a member's background answerer reports (counts and booleans only). */
 export interface MemberStatusBody {
   daemon: { version: string; started_at: string };

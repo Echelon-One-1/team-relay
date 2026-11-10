@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AnswerHost, NOT_SET_UP_REPLY, NO_CAPABILITY_REPLY, type HostOptions } from '../src/answer-host.js';
 import { NOWHERE_RELAY, disposeDryRun, executeDryRun, prepareDryRun } from '../src/answer-dry-run.js';
-import { DaemonLog, claudeBinFrom, daemonLogPath, pluginVersion, runDaemon, selfTest, type HostLike, type SelfTestResult } from '../src/daemon-core.js';
+import { DaemonLog, SELF_TEST_PENDING, claudeBinFrom, daemonLogPath, pluginVersion, runDaemon, selfTest, type HostLike, type SelfTestResult } from '../src/daemon-core.js';
 import { memberFoldersPath, writeMemberSettings } from '../src/member-folders.js';
 import { RelayClient } from '../src/relay-client.js';
 import { FakeRelay, TOKEN_OF } from './helpers/fake-relay.js';
@@ -123,11 +123,13 @@ process.exit(2);`);
 
   it('a reason sent to the relay is a fixed sentence: error text (which can hold paths) stays in detail, for the local log', async () => {
     const bin = script('claude-ok', `process.exit(0)`);
-    // A dist/ with no child entry, under a temp path: the reason never names it.
-    const r = await selfTest({ env: env(bin), dist: join(tmp, 'no-such-dist'), now, limitMs: 30_000 });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/^the (answerer|self-test) /);
-    expect(r.reason).not.toContain(tmp);
+    const leak = () => new Error(`EACCES: permission denied, mkdtemp '${tmp}/private/run-XXXXXX'`);
+    const prep = await selfTest({ env: env(bin), dist: DIST, now, prepare: () => { throw leak(); } });
+    expect(prep).toMatchObject({ ok: false, reason: 'the answerer could not be prepared' });
+    expect(prep.detail).toContain(tmp);
+    const exec = await selfTest({ env: env(bin), dist: DIST, now, execute: async () => { throw leak(); } });
+    expect(exec).toMatchObject({ ok: false, reason: 'the self-test failed' });
+    expect(exec.detail).toContain(tmp);
   });
 
   it('the plugin version comes from plugin.json beside dist/', () => {
@@ -328,7 +330,8 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
       intervals,
     });
     await waitFor(() => relay.memberStatus.get('bob'), 5_000, 'a status before the self-test ends');
-    expect(relay.memberStatus.get('bob')).toMatchObject({ self_test: { ok: false, reason: 'the self-test has not run yet' } });
+    expect(relay.memberStatus.get('bob')).toMatchObject({ self_test: { ok: false, reason: SELF_TEST_PENDING } });
+    expect(SELF_TEST_PENDING).toBe('the self-test has not run yet');
     expect(hosts[0]?.started).toBe(1);
     finish(PASSED);
     await waitFor(() => (relay.memberStatus.get('bob') as { self_test?: { ok?: boolean } }).self_test?.ok === true, 10_000, 'the self-test result in the status');
@@ -362,6 +365,51 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     expect(refused.some((l) => l.includes('repos'))).toBe(false);
     for (const l of logs) expect(l).not.toContain(tmp);
     expect(probed).toContain(join(tmp, 'Library', 'CloudStorage'));
+  });
+
+  it('a self-test error reaches the local log with its detail; the status sent to the relay carries only the fixed reason', async () => {
+    const e = env();
+    const { make } = fakeHosts();
+    const ac = new AbortController();
+    const done = runDaemon({
+      env: e,
+      log: (l) => logs.push(l),
+      dist: DIST,
+      version: '1',
+      signal: ac.signal,
+      makeHost: make,
+      selfTest: (sig) => selfTest({ env: e, dist: DIST, signal: sig, prepare: () => { throw new Error(`EACCES: permission denied, mkdtemp '${tmp}/private/run-XXXXXX'`); } }),
+      facts,
+      intervals,
+    });
+    await waitFor(() => (relay.memberStatus.get('bob') as { self_test?: { reason?: string } } | undefined)?.self_test?.reason === 'the answerer could not be prepared', 10_000, 'the failed self-test in the status');
+    ac.abort();
+    await done;
+    expect(JSON.stringify(relay.memberStatus.get('bob'))).not.toContain(tmp);
+    expect(logs.some((l) => l.startsWith('self-test failed: the answerer could not be prepared (') && l.includes(`${tmp}/private/run-XXXXXX`))).toBe(true);
+  });
+
+  it('Drive is checked again for every status (a Drive connected after start shows at once, not 10 minutes later)', async () => {
+    let connected = false;
+    const { make } = fakeHosts();
+    const ac = new AbortController();
+    const done = runDaemon({
+      env: env(),
+      log: (l) => logs.push(l),
+      dist: DIST,
+      version: '1',
+      signal: ac.signal,
+      makeHost: make,
+      selfTest: async () => PASSED,
+      facts: { ...facts, driveConnected: async () => connected },
+      intervals: { ...intervals, factsMs: 3_600_000 },
+    });
+    await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the first status');
+    expect(relay.memberStatus.get('bob')).toMatchObject({ drive: { connected: false } });
+    connected = true;
+    await waitFor(() => (relay.memberStatus.get('bob') as { drive?: { connected?: boolean } }).drive?.connected === true, 5_000, 'Drive connected in the status');
+    ac.abort();
+    await done;
   });
 
   it('the self-test runs at start, then on its interval', async () => {

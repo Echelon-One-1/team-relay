@@ -85,17 +85,14 @@ case "\$*" in
     fi ;;
   "plugin marketplace add ${REPO}") : >"$C/state/marketplace" ;;
   "plugin marketplace update team-relay-dev") ;;
-  "plugin list --json")
-    if [ -f "$C/state/installed" ]; then echo '[{"id":"team-relay@team-relay-dev"}]'; else echo '[]'; fi ;;
-  "plugin install team-relay@team-relay-dev")
-    : >"$C/state/installed"
+  "plugin install --scope user team-relay@team-relay-dev")
     if [ -f "$C/state/installed-json" ]; then
       /bin/cp "$C/state/installed-json" "$C/home/.claude/plugins/installed_plugins.json"
     else
       printf '{"version":2,"plugins":{"team-relay@team-relay-dev":[{"scope":"user","installPath":"%s"}]}}' "$C/plugin" \
         >"$C/home/.claude/plugins/installed_plugins.json"
     fi ;;
-  "plugin update team-relay@team-relay-dev") ;;
+  "plugin update --scope user team-relay@team-relay-dev") ;;
   *) echo "claude stub: unexpected call: \$*" >&2; exit 3 ;;
 esac
 EOF
@@ -204,12 +201,11 @@ claude auth login <TTY-MARK>
 claude plugin marketplace list --json <>
 claude plugin marketplace add ${REPO} <>
 claude plugin marketplace list --json <>
-claude plugin list --json <>
-claude plugin install team-relay@team-relay-dev <>
+claude plugin install --scope user team-relay@team-relay-dev <>
 setup-cli login --relay ${RELAY} <TTY-MARK>
 setup-cli folders <TTY-MARK>
-setup-cli daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
 setup-cli drive <TTY-MARK>
+setup-cli daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
 setup-cli status <TTY-MARK>"
 if [[ "$STATUS" -eq 0 && "$LOG" == "$want_first" ]]; then
   ok "first run: signs in, adds the marketplace, installs, then runs setup-cli in order"
@@ -234,12 +230,11 @@ want_again="node --version
 claude auth status --json <>
 claude plugin marketplace list --json <>
 claude plugin marketplace update team-relay-dev <>
-claude plugin list --json <>
-claude plugin update team-relay@team-relay-dev <>
+claude plugin update --scope user team-relay@team-relay-dev <>
 setup-cli login --relay ${RELAY} <TTY-MARK>
 setup-cli folders <TTY-MARK>
-setup-cli daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
 setup-cli drive <TTY-MARK>
+setup-cli daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
 setup-cli status <TTY-MARK>"
 if [[ "$STATUS" -eq 0 && "$LOG" == "$want_again" ]]; then
   ok "re-run: no new sign-in, refreshes the marketplace, updates the plugin"
@@ -273,12 +268,29 @@ check "only a project-scope install under its key: no setup-cli run" log_lacks "
 new_case drive-fails
 : >"$C/state/drive-fails"
 run_case "$FILLED"
-if [[ "$STATUS" -eq 0 && "$LOG" == *"setup-cli daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
-setup-cli drive <TTY-MARK>
+if [[ "$STATUS" -eq 0 && "$LOG" == *"setup-cli drive <TTY-MARK>
+setup-cli daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
 setup-cli status <TTY-MARK>" && "$OUT" == *"Google Drive is not connected yet"* && "$OUT" == *"run the same setup command again"* ]]; then
-  ok "a failed Drive step: the answerer is already installed, it says how to retry, and setup goes on to the status"
+  ok "a failed Drive step: it says how to retry, and setup goes on to the background answerer and the status"
 else
-  not_ok "a failed Drive step: the answerer is already installed, it says how to retry, and setup goes on to the status" "status=$STATUS
+  not_ok "a failed Drive step: it says how to retry, and setup goes on to the background answerer and the status" "status=$STATUS
+$OUT
+--- log
+$LOG"
+fi
+
+# ---------------------------------------------------------------- installed, but not for this user
+# A project-scope install only: the plugin is installed at user scope (not updated), and setup goes on.
+new_case project-only
+: >"$C/state/marketplace"
+printf '{"version":2,"plugins":{"team-relay@team-relay-dev":[{"scope":"project","installPath":"%s","projectPath":"/somewhere"}]}}' \
+  "$C/plugin" >"$C/home/.claude/plugins/installed_plugins.json"
+run_case "$FILLED"
+if [[ "$STATUS" -eq 0 && "$LOG" == *"claude plugin install --scope user team-relay@team-relay-dev <>"* \
+    && "$LOG" != *"plugin update"* && "$LOG" == *"setup-cli status <TTY-MARK>"* ]]; then
+  ok "installed for a project only: installs it for this user instead of updating, and goes on"
+else
+  not_ok "installed for a project only: installs it for this user instead of updating, and goes on" "status=$STATUS
 $OUT
 --- log
 $LOG"

@@ -377,8 +377,8 @@ holds its steps, and each can be run again:
 ```
 node dist/setup-cli.js login [--relay <url>]          # skipped when already signed in to that relay
 node dist/setup-cli.js folders                        # choose the folders that hold your clones
-node dist/setup-cli.js daemon install --claude <abs path of claude> --plugin team-relay@<marketplace>
 node dist/setup-cli.js drive                          # when the team has shared drives
+node dist/setup-cli.js daemon install --claude <abs path of claude> --plugin team-relay@<marketplace>
 node dist/setup-cli.js daemon uninstall
 node dist/setup-cli.js status                         # your setup checklist
 ```

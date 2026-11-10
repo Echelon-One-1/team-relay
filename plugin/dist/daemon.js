@@ -27134,6 +27134,9 @@ if (process.argv[1] && /answer-dry-run\.[jt]s$/.test(process.argv[1])) {
   });
 }
 
+// src/boundaries-types.ts
+var SELF_TEST_PENDING = "the self-test has not run yet";
+
 // src/clones.ts
 import { readFile, lstat } from "node:fs/promises";
 import { join as join15, normalize as normalize5 } from "node:path";
@@ -27294,7 +27297,7 @@ async function selfTest(o) {
   if (!await claudeSignedIn(bin, o.env, o.run)) return { ok: false, at, reason: "Claude Code is not signed in (claude auth status failed)" };
   let prepared;
   try {
-    prepared = prepareDryRun({
+    prepared = (o.prepare ?? prepareDryRun)({
       env: o.env,
       question: SELF_TEST_QUESTION,
       cwd: o.env.HOME?.trim() || homedir7(),
@@ -27309,7 +27312,7 @@ async function selfTest(o) {
     return { ok: false, at, reason: "the answerer could not be prepared", detail: describeError(err) };
   }
   try {
-    const { result } = await executeDryRun(prepared, { offline: true, limitMs: o.limitMs ?? 12e4, ...o.signal ? { signal: o.signal } : {} });
+    const { result } = await (o.execute ?? executeDryRun)(prepared, { offline: true, limitMs: o.limitMs ?? 12e4, ...o.signal ? { signal: o.signal } : {} });
     if (result.result && result.result.type === "result") return { ok: true, at, reason: null };
     if (result.timedOut) return { ok: false, at, reason: "the answerer did not finish starting in time" };
     if (result.code === null && result.signal === null) return { ok: false, at, reason: "the answerer could not be started" };
@@ -27370,7 +27373,7 @@ async function runDaemon(o) {
       wake();
     }
   }, iv.pluginCheckMs);
-  let test = { ok: false, at: startedAt, reason: "the self-test has not run yet" };
+  let test = { ok: false, at: startedAt, reason: SELF_TEST_PENDING };
   let testing = null;
   const doSelfTest = () => {
     testing ??= (async () => {
@@ -27426,7 +27429,6 @@ async function runDaemon(o) {
     factsAt = now();
     factsKey = key;
     signedIn = bin ? await facts.claudeSignedIn(bin).catch(() => false) : false;
-    driveConnected = await facts.driveConnected().catch(() => false);
     clones = await facts.clones(folders2.repo_roots, orgs).catch(() => 0);
     const named = (what, raw) => {
       const path = expandPath(raw, env2);
@@ -27449,6 +27451,7 @@ async function runDaemon(o) {
   const sendStatus = async (client, team) => {
     const f = folders(team);
     await refreshFacts(client, f);
+    driveConnected = await facts.driveConnected().catch(() => false);
     const body = {
       daemon: { version: o.version.slice(0, 32), started_at: startedAt },
       claude: { found: claudeBinFrom(env2) !== null, signed_in: signedIn },
