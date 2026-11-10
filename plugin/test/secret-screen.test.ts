@@ -94,7 +94,7 @@ const NEGATIVES: Array<[string, string]> = [
   ['process.env', 'const token = process.env.GITHUB_TOKEN'],
   ['connection without password', 'postgres://app@db.internal:5432/app'],
   ['url', 'See https://example.com/docs/getting-started/installation-and-configuration for details.'],
-  ['file path', '/Users/someone/projects/team-relay/plugin/src/answer-host.ts'],
+  ['file path', '/Users/someone/projects/team-relay/plugin/src/answer-host.ts'],  // e1-guard: allow (synthetic macOS home path in a test)
   ['identifier', 'The function answerQuestionAutomaticallyWithinScopeFolder is in answer-host.ts.'],
   ['words about tokens', 'Tokens are refreshed every hour; the max_tokens setting is 1000.'],
   ['sk- prose', 'Ask the sk-team channel about it.'],

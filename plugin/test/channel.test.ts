@@ -563,7 +563,7 @@ describe('channel server: answerer', () => {
   });
 
   for (const [what, value] of [
-    ['a path', JSON.stringify(['/Users/bob/src'])],
+    ['a path', JSON.stringify(['/Users/bob/src'])],  // e1-guard: allow (synthetic macOS home path in a test)
     ['a parent reference', JSON.stringify(['../x'])],
     ['a space', JSON.stringify(['My Notes'])],
     ['a name longer than 64', JSON.stringify(['a'.repeat(65)])],

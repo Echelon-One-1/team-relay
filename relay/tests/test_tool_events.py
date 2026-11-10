@@ -130,7 +130,11 @@ async def test_tool_events_never_enter_a_stream(api: Api):
         {"tool": "Read", "status": "allowed"},
         {"tool": "Read", "status": ["waiting"]},
         # A waiting event names the tool, never the path it asked for (M4-SPEC §2).
-        {"tool": "Read", "status": "waiting", "path": "/Users/bob/notes"},
+        {
+            "tool": "Read",
+            "status": "waiting",
+            "path": "/Users/bob/notes",  # e1-guard: allow (synthetic test path)
+        },
         {"tool": "Read", "status": "waiting", "file_path": "/etc/hosts"},
         {"tool": "Read", "status": "waiting", "input": {"pattern": "**/*"}},
         {"tool": "Read", "status": "ok", "duration_ms": -1},

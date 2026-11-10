@@ -36,7 +36,7 @@ function script(name: string, body: string): string {
 
 describe('the daemon log (M11-SPEC §1)', () => {
   it('lives at ~/Library/Logs/team-relay/daemon.log', () => {
-    expect(daemonLogPath({ HOME: '/Users/someone' })).toBe('/Users/someone/Library/Logs/team-relay/daemon.log');
+    expect(daemonLogPath({ HOME: '/Users/someone' })).toBe('/Users/someone/Library/Logs/team-relay/daemon.log');  // e1-guard: allow (synthetic macOS home path in a test)
   });
 
   it('is mode 600 in a mode-700 folder; a line is one line, with a time', () => {

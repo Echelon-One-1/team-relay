@@ -392,7 +392,7 @@ describe('shares (M4-SPEC §3)', () => {
 
   it('refuses a path, a bad name, a repeated name, more than 16, and anything but {name}', () => {
     for (const shares of [
-      [{ name: '/Users/bob/src' }],
+      [{ name: '/Users/bob/src' }],  // e1-guard: allow (synthetic macOS home path in a test)
       [{ name: 'a/b' }],
       [{ name: 'My Notes' }],
       [{ name: '' }],

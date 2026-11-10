@@ -217,11 +217,11 @@ describe('inspectProcess: the real process table', () => {
 
 describe('pluginRef and the note', () => {
   it('reads the marketplace and plugin from the install path, else team-relay@team-relay-dev', () => {
-    expect(pluginRef({ CLAUDE_PLUGIN_ROOT: '/Users/u/.claude/plugins/cache/team-relay-dev/team-relay/0.1.0' }, null)).toEqual({
+    expect(pluginRef({ CLAUDE_PLUGIN_ROOT: '/Users/u/.claude/plugins/cache/team-relay-dev/team-relay/0.1.0' }, null)).toEqual({  // e1-guard: allow (synthetic macOS home path in a test)
       plugin: 'team-relay',
       marketplace: 'team-relay-dev',
     });
-    expect(pluginRef({ CLAUDE_PLUGIN_ROOT: '/Users/u/.claude/plugins/cache/acme-tools/team-relay/0.2.0/' }, null)).toEqual({
+    expect(pluginRef({ CLAUDE_PLUGIN_ROOT: '/Users/u/.claude/plugins/cache/acme-tools/team-relay/0.2.0/' }, null)).toEqual({  // e1-guard: allow (synthetic macOS home path in a test)
       plugin: 'team-relay',
       marketplace: 'acme-tools',
     });
@@ -231,7 +231,7 @@ describe('pluginRef and the note', () => {
     expect(pluginRef({ CLAUDE_PLUGIN_ROOT: '/x/cache/m;rm -rf/team-relay/1' }, null).marketplace).toBe('team-relay-dev');
     expect(pluginRef({}, null)).toEqual({ plugin: 'team-relay', marketplace: 'team-relay-dev' });
     // Without CLAUDE_PLUGIN_ROOT, the bundle's own location.
-    expect(pluginRef({}, '/Users/u/.claude/plugins/cache/other-market/team-relay/0.1.0/')).toEqual({ plugin: 'team-relay', marketplace: 'other-market' });
+    expect(pluginRef({}, '/Users/u/.claude/plugins/cache/other-market/team-relay/0.1.0/')).toEqual({ plugin: 'team-relay', marketplace: 'other-market' });  // e1-guard: allow (synthetic macOS home path in a test)
   });
 
   it('says it plainly, with the command', () => {

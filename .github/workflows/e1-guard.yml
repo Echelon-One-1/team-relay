@@ -1,0 +1,70 @@
+name: Client data guard
+
+# Fails when a push or pull request carries credentials, private keys, card numbers, tax file
+# numbers or personal folder paths. What covers what: every push, to any branch, checks the files at
+# the pushed commit and the commits of that push (a branch that never gets a pull request is caught
+# too); every pull request, its files and its commits, base to head; the weekly run, the files at
+# the tip of main (a manual run, those of the branch it is started on). Adapted from polaris, which
+# took it from asset-reports (installed there by e1-client-data-guard with install.py --repo .
+# --client-project); .e1-guard/guard.py and terms.py are byte-for-byte copies of asset-reports main.
+# The job is named e1-guard (a required check on main).
+#
+# This repository is PUBLIC. It holds no client data and no client names: tests and examples use
+# example-org, example.com and alice@example.com, and deployment values live in the operator's
+# git-ignored config/deploy.local.env (docs/M10-SPEC.md section 7, item 8, public repository
+# hygiene). Client names are kept out by review and by that rule, not by this guard.
+#
+# Runs in --client-project mode with an empty term list, like polaris:
+# - The hashed term list needs the E1_GUARD_KEY secret, and this repository has none on purpose: a
+#   public repository's pull requests from forks get no secrets, and no secret is added here.
+# - An empty list needs no key, so the check runs the same for every pull request.
+# Credentials, private keys, card and tax numbers and personal folder paths still block.
+# Do not rerun install.py over this file: it would rename the job and require that key.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 21 * * 0'  # Sundays 21:00 UTC (Mondays 05:00 Perth)
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the run it supersedes (the new run checks base..head in full).
+# Push runs each get their own group: a push run checks only the commits of that push, so none may
+# be cancelled or dropped from the queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  e1-guard:
+    name: e1-guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the PDF reader (pinned by hash)
+        run: |
+          python3 -m pip install --quiet --require-hashes --only-binary=:all: -r .e1-guard/requirements.txt
+      - name: Empty term list (no term key in a public repository)
+        run: ': > "$RUNNER_TEMP/no-terms.txt"'
+      - name: Check files
+        run: python3 .e1-guard/guard.py --all --client-project --source "$RUNNER_TEMP/no-terms.txt"
+      - name: Check pushed commits
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: python3 .e1-guard/guard.py --range "$BEFORE..$AFTER" --branch "$BRANCH" --client-project --source "$RUNNER_TEMP/no-terms.txt"
+      - name: Check pull request commits
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: python3 .e1-guard/guard.py --range "$BASE..$HEAD" --client-project --source "$RUNNER_TEMP/no-terms.txt"
