@@ -143,10 +143,10 @@ describe('the read-trail hook (dist/read-trail.js)', () => {
 
 describe('Glob patterns against the deny list (M8-SPEC §7 item 7)', () => {
   it('takes the fixed prefix of an absolute, ~/ or relative pattern', () => {
-    expect(patternTarget('/Users/u/.ssh/*', '/w', '/Users/u')).toEqual({ prefix: '/Users/u/.ssh', whole: '/Users/u/.ssh/*' });
-    expect(patternTarget('~/.aws/**', '/w', '/Users/u')).toEqual({ prefix: '/Users/u/.aws', whole: '/Users/u/.aws/**' });
-    expect(patternTarget('.kube/*', '/Users/u', '/Users/u')).toEqual({ prefix: '/Users/u/.kube', whole: '/Users/u/.kube/*' });
-    expect(patternTarget('src/**/*.ts', '/w/app', '/Users/u')).toEqual({ prefix: '/w/app/src', whole: '/w/app/src/**/*.ts' });
+    expect(patternTarget('/Users/u/.ssh/*', '/w', '/Users/u')).toEqual({ prefix: '/Users/u/.ssh', whole: '/Users/u/.ssh/*' });  // e1-guard: allow (synthetic macOS home path in a test)
+    expect(patternTarget('~/.aws/**', '/w', '/Users/u')).toEqual({ prefix: '/Users/u/.aws', whole: '/Users/u/.aws/**' });  // e1-guard: allow (synthetic macOS home path in a test)
+    expect(patternTarget('.kube/*', '/Users/u', '/Users/u')).toEqual({ prefix: '/Users/u/.kube', whole: '/Users/u/.kube/*' });  // e1-guard: allow (synthetic macOS home path in a test)
+    expect(patternTarget('src/**/*.ts', '/w/app', '/Users/u')).toEqual({ prefix: '/w/app/src', whole: '/w/app/src/**/*.ts' });  // e1-guard: allow (synthetic macOS home path in a test)
     expect(patternTarget('/{a,b}/x', '/w', '/h').prefix).toBe('/');
     expect(patternTarget('../../etc/*', '/w/app', '/h')).toEqual({ prefix: '/etc', whole: '/etc/*' });
   });

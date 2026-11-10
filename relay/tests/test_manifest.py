@@ -624,11 +624,14 @@ BAD_SHARES = [
     ("a bare string item", ["docs"]),
     ("a null item", [None]),
     ("no name", [{}]),
-    ("an extra key", [{"name": "docs", "path": "/Users/bob/docs"}]),
-    ("a path key only", [{"path": "/Users/bob/docs"}]),
+    (
+        "an extra key",
+        [{"name": "docs", "path": "/Users/bob/docs"}],  # e1-guard: allow (synthetic test path)
+    ),
+    ("a path key only", [{"path": "/Users/bob/docs"}]),  # e1-guard: allow (synthetic test path)
     ("empty name", [{"name": ""}]),
     ("65 characters", [{"name": "x" * 65}]),
-    ("a full path", [{"name": "/Users/bob/docs"}]),
+    ("a full path", [{"name": "/Users/bob/docs"}]),  # e1-guard: allow (synthetic test path)
     ("a relative path", [{"name": "bob/docs"}]),
     ("a home path", [{"name": "~"}]),
     ("a backslash", [{"name": "a\\b"}]),
@@ -682,8 +685,8 @@ async def test_shares_round_trip_through_publish_and_directory(api):
 @pytest.mark.parametrize(
     "shares",
     [
-        [{"name": "/Users/bob/docs"}],
-        [{"name": "docs", "path": "/Users/bob/docs"}],
+        [{"name": "/Users/bob/docs"}],  # e1-guard: allow (synthetic test path)
+        [{"name": "docs", "path": "/Users/bob/docs"}],  # e1-guard: allow (synthetic test path)
         [{"name": "docs"}, {"name": "docs"}],
         [{"name": f"s{i}"} for i in range(17)],
     ],

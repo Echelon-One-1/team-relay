@@ -1,0 +1,4 @@
+# The guard reads PDF text with pypdf; without it a PDF is only a warning. Installed in CI with
+# --require-hashes --only-binary=:all:. No dependencies on Python 3.11 or later.
+# To upgrade: take the wheel's sha256 from https://pypi.org/pypi/pypdf/<version>/json.
+pypdf==6.21.4 --hash=sha256:33e4fb41ca352810eb4e9838aa0d82d6888a5f8bf682f43e99cce5faa666255c --hash=sha256:c8817e3f888d47a087872ded69812c1ef30cacb871d6e053e0c00bbaf0bc2163

@@ -157,7 +157,7 @@ describe('the allowed set (ACC-2, ACC-3)', () => {
   });
 
   it('one home rule for the set, the deny list and Google files: $HOME, else the account\'s own when unset or blank', () => {
-    expect(homeDir({ HOME: '/Users/alice' })).toBe('/Users/alice');
+    expect(homeDir({ HOME: '/Users/alice' })).toBe('/Users/alice');  // e1-guard: allow (synthetic macOS home path in a test)
     expect(homeDir({ HOME: '  ' })).toBe(homedir());
     expect(homeDir({})).toBe(homedir());
     expect(denyContext({ HOME: '' }).home).toBe(homedir());
@@ -371,7 +371,7 @@ describe('the host file tools never leave the set (ACC-4)', () => {
     const seen: Array<{ path: string; drive: unknown }> = [];
     const reader = async (path: string, drive: { domain: string; shared_drive: string }) => {
       seen.push({ path, drive });
-      return { ok: true as const, text: '# Roadmap\nQ1: launch\nAPI_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789', mime: 'text/markdown', truncated: false };
+      return { ok: true as const, text: '# Roadmap\nQ1: launch\nAPI_KEY=sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789', mime: 'text/markdown', truncated: false };  // e1-guard: allow (fake key: the test checks the line is withheld)
     };
     const deps = { home: f.home, cwd: '/nowhere', reader };
     const ok = await readGoogle(set, { path: join(f.driveRoot, 'Roadmap.gdoc') }, ctx, deps);

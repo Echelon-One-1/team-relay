@@ -450,7 +450,7 @@ describe('bin/answerer working directory (§11.13)', () => {
   }
 
   describe('grants never outlive a session (M4-SPEC §1)', () => {
-    const GRANT = JSON.stringify({ permissions: { allow: ['Read(//Users/bob/private/**)'] } });
+    const GRANT = JSON.stringify({ permissions: { allow: ['Read(//Users/bob/private/**)'] } });  // e1-guard: allow (synthetic macOS home path in a test)
     const plant = (dir: string) => {
       mkdirSync(join(dir, '.claude'), { recursive: true, mode: 0o700 });
       writeFileSync(join(dir, '.claude', 'settings.local.json'), GRANT);

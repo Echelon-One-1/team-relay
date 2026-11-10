@@ -737,7 +737,7 @@ INVALID = [
     _with("self_test.reason", "r" * 201),
     _with("self_test.reason", "bell\x07"),
     _with("self_test.reason", 3),
-    _with("daemon.path", "/Users/someone"),
+    _with("daemon.path", "/Users/someone"),  # e1-guard: allow (synthetic test path)
     _with("folders.names", ["code"]),
     _with("question", "What is the deploy log?"),
     _without("daemon"),

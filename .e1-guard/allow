@@ -1,0 +1,3 @@
+# Paths the guard skips (fnmatch globs, one per line). Empty on purpose: everything in this repository
+# is text the guard can read, so every file is scanned. An entry needs a reason in its PR and Kiril's
+# review; never list a folder, and never list a file that could hold client content.
