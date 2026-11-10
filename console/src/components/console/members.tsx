@@ -2,13 +2,16 @@ import { ShieldCheck } from 'lucide-react'
 import { useCallback, useId, useRef, useState, type FormEvent } from 'react'
 
 import type { ChangeError } from '@/api/client'
-import type { Roster, RosterMember } from '@/api/types'
+import type { MembersStatus, Roster, RosterMember, TeamBoundaries } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { useRosterChange } from '@/hooks/queries'
+import { useJoin, useMe, useRosterChange } from '@/hooks/queries'
+import { useNav } from '@/hooks/team'
 import { addProblem, entries, isInvited, ownerCount, sortedMembers, suggestMemberId, visibleEmails } from '@/lib/roster'
+import { currentVersion, inviteMessage, publicOrigin, SETUP_STEPS, setupCount } from '@/lib/setup'
 import { readStored, writeStored } from '@/lib/stored'
 import { cn } from '@/lib/utils'
+import { CopyTextButton } from './copy'
 import { Avatar, Panel } from './primitives'
 
 // The Members panel (M6 §4). An owner invites a member by Google email (with a member id
@@ -18,6 +21,8 @@ import { Avatar, Panel } from './primitives'
 // invitation until its person accepts (at sign-in, or in the console); the owner sees it as
 // Invited, and can withdraw it (which retires nothing). The panel folds away to its header
 // (with the counts still showing), and stays as the viewer left it in this browser.
+// M11 §6: each member's setup progress ("5 of 7 set up") and whether their Mac answers now, from
+// members-status; after inviting someone, an owner copies the invite message to send them.
 
 export const MEMBERS_STORAGE_KEY = 'team-relay-console.members'
 
@@ -62,7 +67,59 @@ function who(m: RosterMember): string {
   return emails.length > 0 ? `${m.member} (${emails.join(', ')})` : m.member
 }
 
-function MemberRow({ m, me, owner, lastOwner }: { m: RosterMember; me: string | null; owner: boolean; lastOwner: boolean }) {
+/** M11 §6: what an owner sends someone they invited: the team, the console, the setup command. */
+function InviteCopy() {
+  const nav = useNav()
+  const me = useMe()
+  const join = useJoin()
+  const name = nav.teams?.teams.find((t) => t.team === nav.team)?.name ?? me.data?.name ?? me.data?.team ?? nav.team ?? 'the team'
+  const origin = publicOrigin(window.location, join.data)
+  if (!origin) {
+    if (join.isPending) return null
+    return (
+      <p className="text-[12px] text-subtle" data-no-invite>
+        Send them the team&apos;s console address; its Setup page has the setup command.
+      </p>
+    )
+  }
+  return (
+    <CopyTextButton text={inviteMessage(name, origin)} label="invite message">
+      Copy invite message
+    </CopyTextButton>
+  )
+}
+
+/** M11 §6: a member's setup progress and whether their Mac answers now. */
+export type MemberProgress = { done: number; answering: boolean }
+
+function Progress({ p }: { p: MemberProgress }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[11.5px] text-subtle" data-setup-progress={p.done} data-answering={p.answering ? 'true' : 'false'}>
+      <span
+        aria-hidden
+        className={cn('size-1.5 shrink-0 rounded-full', p.answering ? 'bg-ok' : 'border border-faint')}
+      />
+      <span className="tnum">
+        {p.done} of {SETUP_STEPS} set up
+      </span>
+      {p.answering ? <span className="text-ok">answering now</span> : <span className="sr-only">, not answering now</span>}
+    </span>
+  )
+}
+
+function MemberRow({
+  m,
+  me,
+  owner,
+  lastOwner,
+  progress,
+}: {
+  m: RosterMember
+  me: string | null
+  owner: boolean
+  lastOwner: boolean
+  progress: MemberProgress | null
+}) {
   const change = useRosterChange()
   const [confirming, setConfirming] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -105,6 +162,7 @@ function MemberRow({ m, me, owner, lastOwner }: { m: RosterMember; me: string | 
               {emails.join(', ')}
             </span>
           ) : null}
+          {progress && !invited ? <Progress p={progress} /> : null}
         </div>
         {owner && invited ? (
           <div className="flex shrink-0 items-center gap-1 max-sm:basis-full max-sm:pl-[30px] sm:ml-auto">
@@ -177,6 +235,11 @@ function MemberRow({ m, me, owner, lastOwner }: { m: RosterMember; me: string | 
           </div>
         </div>
       ) : null}
+      {owner && invited ? (
+        <div className="ml-[38px]" data-invite-copy={m.member}>
+          <InviteCopy />
+        </div>
+      ) : null}
       <div className="ml-[38px]">
         <InlineError id={errorId}>{error}</InlineError>
       </div>
@@ -223,7 +286,7 @@ function AddMember({ roster }: { roster: Roster | undefined }) {
       { kind: 'add', member: id, email: address },
       {
         onSuccess: () => {
-          setAdded(member)
+          setAdded(id)
           setEmail('')
           setMember('')
           edited.current = false
@@ -291,12 +354,24 @@ function AddMember({ roster }: { roster: Roster | undefined }) {
       </div>
       <InlineError id={errorId}>{error}</InlineError>
       {added ? (
-        <p role="status" className="text-[12px] text-ok" data-added={added}>
-          Invited {added}. Send them the install steps from Join the team; they accept when they sign in.
-        </p>
+        <div className="flex flex-col gap-2" data-added={added}>
+          <p role="status" className="text-[12px] text-ok">
+            Invited {added}. Send them the invite message; they accept when they open the console.
+          </p>
+          <InviteCopy />
+        </div>
       ) : null}
     </form>
   )
+}
+
+/** Each member's progress from members-status (M11 §3), by member; empty without it. */
+export function progressByMember(statuses: MembersStatus | undefined, bounds: TeamBoundaries | undefined): Map<string, MemberProgress> {
+  const out = new Map<string, MemberProgress>()
+  if (!statuses) return out
+  const current = currentVersion(bounds, statuses.boundaries_version)
+  for (const e of statuses.members) out.set(e.member, { done: setupCount(e, bounds, current), answering: e.answering })
+  return out
 }
 
 export function Members({
@@ -306,6 +381,7 @@ export function Members({
   me,
   owner,
   className,
+  progress,
 }: {
   roster: Roster | undefined
   loading: boolean
@@ -313,6 +389,8 @@ export function Members({
   me: string | null
   owner: boolean
   className?: string
+  /** M11 §6: by member, from members-status; absent before M11. */
+  progress?: Map<string, MemberProgress>
 }) {
   const members = sortedMembers(roster)
   const owners = ownerCount(roster)
@@ -345,7 +423,14 @@ export function Members({
         <div className={cn('grid grid-cols-1', owner && 'lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] lg:divide-x lg:divide-hairline')}>
           <ul className="divide-y divide-hairline" aria-label="Team members" data-members-view={owner ? 'owner' : 'member'}>
             {members.map((m) => (
-              <MemberRow key={m.member} m={m} me={me} owner={owner} lastOwner={m.role === 'owner' && owners <= 1} />
+              <MemberRow
+                key={m.member}
+                m={m}
+                me={me}
+                owner={owner}
+                lastOwner={m.role === 'owner' && owners <= 1}
+                progress={progress?.get(m.member) ?? null}
+              />
             ))}
           </ul>
           {owner ? (

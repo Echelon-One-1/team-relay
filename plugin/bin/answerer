@@ -101,6 +101,9 @@ if [[ $lock_status -eq 3 ]]; then
   if [[ "$holder_role" == "host" ]]; then
     die "refusing to start: your channel working session (pid $holder_pid) already answers teammates automatically; stop it, or start it with TEAM_RELAY_AUTO_ANSWER=0, to use this answering session instead"
   fi
+  if [[ "$holder_role" == "daemon" ]]; then
+    die "refusing to start: the background answerer (pid $holder_pid) already answers teammates on this computer; remove it with: node \"$plugin_root/dist/setup-cli.js\" daemon uninstall"
+  fi
   die "refusing to start: another answering session (pid $holder_pid) is already running on this computer"
 elif [[ $lock_status -ne 0 ]]; then
   die "cannot check who answers on this computer (dist/answering-lock-info.js failed)"

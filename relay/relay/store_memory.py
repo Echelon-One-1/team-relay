@@ -13,8 +13,11 @@ from typing import Any
 from .store import (
     DELIVERY_SCAN_LIMIT,
     MAX_LIVE_CREDENTIALS,
+    RECENT_SCAN_LIMIT,
     STREAM_SCAN_LIMIT,
     TEAM_DELETED,
+    Acceptance,
+    AcceptanceFn,
     AccountRecord,
     AdminAuditEntry,
     AuditEntry,
@@ -28,6 +31,7 @@ from .store import (
     LoginDoc,
     LoginFn,
     MemberDoc,
+    MemberStatus,
     MutateFn,
     ProgressEntry,
     Quota,
@@ -40,6 +44,7 @@ from .store import (
     RosterFn,
     RosterOutcome,
     RosterState,
+    StatusFn,
     StreamPage,
     TeamBoundaries,
     TeamCreateFn,
@@ -85,6 +90,11 @@ class MemoryStore:
         self._login_counters: dict[str, int] = {}
         # teams/{team}/settings/boundaries (M10-SPEC §1).
         self._boundaries: dict[str, TeamBoundaries] = {}
+        # M11-SPEC §2, §3: teams/{team}/acceptances/{member}, teams/{team}/member_status/{member}.
+        self._acceptances: dict[tuple[str, str], Acceptance] = {}
+        self._statuses: dict[tuple[str, str], MemberStatus] = {}
+        # M11-SPEC §4: teams/{team}/requests/{id}/answers/{member}.
+        self._answers: dict[tuple[str, str], dict[str, str]] = {}
 
     async def aclose(self) -> None:
         return None
@@ -220,6 +230,12 @@ class MemoryStore:
             if mutation.progress:
                 bucket = self._progress.setdefault((team, request_id), [])
                 bucket.extend(copy.deepcopy(mutation.progress))
+            if mutation.answers:
+                answers = self._answers.setdefault((team, request_id), {})
+                for entry in mutation.answers:
+                    if entry.member in answers:
+                        raise RuntimeError("an answer is written once")
+                    answers[entry.member] = entry.text
             self._audit.extend(copy.deepcopy(mutation.audit))
             return mutation.result
 
@@ -255,6 +271,23 @@ class MemoryStore:
             ]
             found.sort(key=lambda d: d.request_id)
             return copy.deepcopy(found[:limit])
+
+    async def list_answers(self, team: str, request_id: str) -> dict[str, str]:
+        async with self._lock:
+            return dict(self._answers.get((team, request_id), {}))
+
+    async def recent_questions(
+        self, team: str, asker: str, now: datetime, limit: int
+    ) -> list[RequestDoc]:
+        async with self._lock:
+            mine = [
+                doc
+                for (t, _), doc in self._requests.items()
+                if t == team and doc.asker == asker and doc.kind == "question"
+            ]
+            mine.sort(key=lambda d: (d.created_at, d.request_id), reverse=True)
+            live = [d for d in mine[:RECENT_SCAN_LIMIT] if now < d.expire_at]
+            return copy.deepcopy(live[:limit])
 
     # Streams --------------------------------------------------------------------------
     async def read_stream(
@@ -379,6 +412,9 @@ class MemoryStore:
             revoked: list[str] = []
             for member in change.remove:
                 entries.pop(member, None)
+                # M11-SPEC §2, §3: the member's acceptance and status leave with them.
+                self._acceptances.pop((team, member), None)
+                self._statuses.pop((team, member), None)
                 for (t, key), cred in sorted(self._credentials.items()):
                     if t == team and cred.member == member and cred.live(now):
                         cred.revoked = True
@@ -525,7 +561,11 @@ class MemoryStore:
         for key in sorted(self._requests):
             if key[0] == team:
                 docs += [("progress", key)] * len(self._progress.get(key, []))
+                docs += [("answer", (key, m)) for m in sorted(self._answers.get(key, {}))]
                 docs.append(("request", key))
+        for key in sorted(self._answers):
+            if key[0] == team and key not in self._requests:
+                docs += [("answer", (key, m)) for m in sorted(self._answers[key])]
         for key in sorted(self._progress):
             if key[0] == team and key not in self._requests:
                 docs += [("progress", key)] * len(self._progress[key])
@@ -534,6 +574,8 @@ class MemoryStore:
         docs += [("retired", m) for m in sorted(self._retired.get(team, {}))]
         if team in self._boundaries:
             docs.append(("boundaries", team))
+        docs += [("acceptance", k) for k in sorted(self._acceptances) if k[0] == team]
+        docs += [("status", k) for k in sorted(self._statuses) if k[0] == team]
         docs += [("audit", i) for i in range(sum(1 for e in self._audit if e.team == team))]
         return docs
 
@@ -565,6 +607,15 @@ class MemoryStore:
             del self._retired[team][key]
         elif kind == "boundaries":
             del self._boundaries[key]
+        elif kind == "acceptance":
+            del self._acceptances[key]
+        elif kind == "status":
+            del self._statuses[key]
+        elif kind == "answer":
+            request_key, member = key
+            del self._answers[request_key][member]
+            if not self._answers[request_key]:
+                del self._answers[request_key]
         elif kind == "audit":
             index = next(i for i, e in enumerate(self._audit) if e.team == team)
             del self._audit[index]
@@ -605,6 +656,58 @@ class MemoryStore:
             self._take(team, quotas)
             self._boundaries[team] = copy.deepcopy(change.boundaries)
             self._audit.extend(copy.deepcopy(change.audit))
+            return change.result
+
+    # A member's acceptance and status (M11-SPEC §2, §3) -------------------------------
+    def _check_team(self, team: str) -> None:
+        record = self._teams.get(team)
+        if record is not None and record.status == TEAM_DELETED:
+            raise TeamGone(team)
+
+    async def get_acceptances(self, team: str, members: Sequence[str]) -> dict[str, Acceptance]:
+        async with self._lock:
+            return {
+                m: copy.deepcopy(self._acceptances[(team, m)])
+                for m in members
+                if (team, m) in self._acceptances
+            }
+
+    async def set_acceptance[T](
+        self, team: str, member: str, fn: AcceptanceFn[T], quotas: Sequence[Quota] = ()
+    ) -> T:
+        async with self._lock:
+            self._check_team(team)
+            change = fn(
+                copy.deepcopy(self._boundaries.get(team)),
+                copy.deepcopy(self._acceptances.get((team, member))),
+                copy.deepcopy(self._roster.get(team, {}).get(member)),
+            )
+            if change.acceptance is None:
+                return change.result
+            self._take(team, quotas)
+            self._acceptances[(team, member)] = copy.deepcopy(change.acceptance)
+            self._audit.extend(copy.deepcopy(change.audit))
+            return change.result
+
+    async def get_member_statuses(
+        self, team: str, members: Sequence[str]
+    ) -> dict[str, MemberStatus]:
+        async with self._lock:
+            return {
+                m: copy.deepcopy(self._statuses[(team, m)])
+                for m in members
+                if (team, m) in self._statuses
+            }
+
+    async def set_member_status[T](self, team: str, member: str, fn: StatusFn[T]) -> T:
+        async with self._lock:
+            self._check_team(team)
+            change = fn(
+                copy.deepcopy(self._statuses.get((team, member))),
+                copy.deepcopy(self._roster.get(team, {}).get(member)),
+            )
+            if change.status is not None:
+                self._statuses[(team, member)] = copy.deepcopy(change.status)
             return change.result
 
     async def get_account(self, email_sha256: str) -> AccountRecord | None:

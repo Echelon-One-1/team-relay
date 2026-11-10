@@ -15413,6 +15413,26 @@ var RelayClient = class _RelayClient {
   setBoundaries(body, opts) {
     return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
   }
+  /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
+  acceptance(opts) {
+    return this.call("GET", this.teamPath("me", "acceptance"), void 0, opts);
+  }
+  /** M11-SPEC §2: accept the current boundaries version (only for oneself). Sent once. */
+  setAcceptance(version, opts) {
+    return this.call("PUT", this.teamPath("me", "acceptance"), { version }, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §3: the background answerer's status (the member itself only). Sent once. */
+  putStatus(body, opts) {
+    return this.call("PUT", this.teamPath("me", "status"), body, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §3: every member's setup progress and whether they are answering now. */
+  membersStatus(opts) {
+    return this.call("GET", this.teamPath("members", "status"), void 0, opts);
+  }
+  /** M11-SPEC §4: this member's recent requests, newest first. */
+  myRequests(limit = 20, opts) {
+    return this.call("GET", this.teamPath("me", "requests") + `?limit=${limit}`, void 0, opts);
+  }
   /**
    * M10-SPEC §2a: the Desktop OAuth client members use to connect Google Drive (read-only).
    * An installed-app client is not confidential (Google's rule); it is served to members so it
@@ -16060,7 +16080,14 @@ function parseTeamSettings(raw, env, team = "a team") {
   if (!isObj2(raw)) throw new MemberFoldersError(`the settings for ${team} are not a JSON object`);
   onlyKeys(raw, ["repo_roots", "extra_folders", "accepted"], `the settings for ${team}`);
   const folders = parseMemberFolders(raw, env, `the settings for ${team}`);
-  const accepted = raw.accepted === void 0 || raw.accepted === null ? null : parseAccepted(raw.accepted);
+  let accepted = null;
+  if (raw.accepted !== void 0 && raw.accepted !== null) {
+    try {
+      accepted = parseAccepted(raw.accepted);
+    } catch {
+      accepted = null;
+    }
+  }
   return { ...folders, accepted };
 }
 function emptyTeams() {
@@ -16180,6 +16207,22 @@ function narrowAccepted(current, accepted, since) {
     dropped
   };
 }
+function acceptedAtVersion(current, version, since) {
+  if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1 || version > since.version) return null;
+  try {
+    return acceptedFrom(current, version);
+  } catch {
+    return null;
+  }
+}
+function acceptedFrom(current, version) {
+  return parseAccepted({
+    version,
+    github_orgs: current.github_orgs,
+    drives: current.drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive })),
+    member_folders: current.member_folders
+  });
+}
 
 // src/manifest.ts
 var import_yaml = __toESM(require_dist(), 1);
@@ -16210,24 +16253,24 @@ function wideningText(w) {
   if (w.member_folders) parts.push("members' own folders");
   return parts.join(", ") || "nothing to read yet";
 }
-function boundariesSentence(current, version, settings, since) {
+function boundariesSentence(current, version, settings, since, acceptedVersion, consoleAt) {
   if ("error" in settings) {
     return `Your team has boundaries (version ${version}), but your folders file cannot be used (${settings.error.slice(0, 200)}), so teammates' questions to you are declined until you fix it: run /team-relay:folders.`;
   }
-  const eff = effectiveBoundaries(current, settings.accepted, since);
+  const eff = effectiveBoundaries(current, acceptedAtVersion(current, acceptedVersion, since), since);
   if (eff.notAccepted) {
-    return `Your team has boundaries (version ${version}) that you have not accepted yet, so teammates' questions to you are declined. Run /team-relay:folders accept to accept them (your channel working session would then answer on its own from ${wideningText(eff.pending ?? { github_orgs: [], drives: [], member_folders: false })}).`;
+    return `Your team has boundaries (version ${version}) that you have not accepted yet, so teammates' questions to you are declined. Accept them in the console at ${consoleAt} (your answerer would then answer on its own from ${wideningText(eff.pending ?? { github_orgs: [], drives: [], member_folders: false })}).`;
   }
   const b = eff.boundaries;
   const orgs = b.github_orgs.length ? `files git tracks in your clones of ${b.github_orgs.length === 1 ? "the GitHub org" : "the GitHub orgs"} ${b.github_orgs.join(", ")}` : null;
   const drives = b.drives.length ? `${b.drives.length === 1 ? "the shared drive" : "the shared drives"} ${b.drives.map((d) => quotedOwnerText(d.shared_drive, 100)).join(", ")}` : null;
   const own = b.member_folders ? "your own added folders" : null;
   const from = [orgs, drives, own].filter(Boolean).join(", ") || "nothing yet";
-  const pending = eff.pending ? ` Version ${version} adds ${wideningText(eff.pending)}, which you have not accepted: run /team-relay:folders accept; until then answers come only from what you accepted.` : "";
+  const pending = eff.pending ? ` Version ${version} adds ${wideningText(eff.pending)}, which you have not accepted: accept it in the console at ${consoleAt}; until then answers come only from what you accepted.` : "";
   let roots;
   if (b.github_orgs.length && settings.repo_roots.length === 0) roots = " You have set no repo roots yet: run /team-relay:folders add-root <the folder your clones are in>.";
   else roots = ` Repo roots set: ${settings.repo_roots.length} (/team-relay:folders shows them).`;
-  return `Your team has boundaries (version ${version}): your channel working session answers teammates on its own from ${from}; reads of anything else are denied and off-topic questions declined.${pending}${roots}`;
+  return `Your team has boundaries (version ${version}): your answerer answers teammates on its own from ${from}; reads of anything else are denied and off-topic questions declined.${pending}${roots}`;
 }
 var isObj3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function validBoundaries(v) {
@@ -16246,6 +16289,17 @@ function sinceValid(v, version) {
   if (!Array.isArray(v.drives) || v.drives.length > BOUNDARIES_MAX_DRIVES) return false;
   if (!v.drives.every((d) => isObj3(d) && keys(d, ["domain", "shared_drive", "since"]) && domainOk(d.domain) && driveNameOk(d.shared_drive) && inRange(d.since))) return false;
   return v.member_folders === null || inRange(v.member_folders);
+}
+
+// src/console-url.ts
+function consoleUrl(relayUrl) {
+  try {
+    const u = new URL(relayUrl);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return relayUrl;
+    return u.origin;
+  } catch {
+    return relayUrl;
+  }
 }
 
 // src/session-start.ts
@@ -16270,18 +16324,19 @@ async function relayStatusLine(env) {
   }
   try {
     const client = new RelayClient({ url: conn.url, team: conn.team, token: conn.token, attempts: 1, timeoutMs: 3e3 });
-    const [me, summary, invitations, boundaries] = await Promise.all([
+    const [me, summary, invitations, boundaries, accepted] = await Promise.all([
       client.me(),
       readSummary(client, 3e3),
       readInvitations(client, 3e3),
-      readBoundaries(client, 3e3)
+      readBoundaries(client, 3e3),
+      readAccepted(client, 3e3)
     ]);
     if (!MEMBER_RE.test(me.member) || !TEAM_RE.test(me.team)) throw new Error("unexpected answer from the relay");
     const teammates = Array.isArray(me.teammates) ? me.teammates.filter((m) => typeof m === "string" && MEMBER_RE.test(m)) : [];
     const mates = teammates.length ? teammates.join(", ") : "none yet";
     const waiting = summary ? waitingSentence(summary, Date.now(), answeringCommand(env)) : null;
     const invited = invitationsSentence(invitations);
-    const bounded = boundaries?.boundaries && boundaries.team === me.team ? boundariesSentence(boundaries.boundaries, boundaries.version, teamSettings2(env, me.team), sinceOf(boundaries)) : null;
+    const bounded = boundaries?.boundaries && boundaries.team === me.team && accepted !== null ? boundariesSentence(boundaries.boundaries, boundaries.version, teamSettings2(env, me.team), sinceOf(boundaries), accepted, consoleUrl(conn.url)) : null;
     return `team-relay: you are ${me.member} in team ${me.team}; teammates: ${mates}. Use list_teammates, ask_question and invoke_capability to reach them.${waiting ? ` ${waiting}` : ""}${invited ? ` ${invited}` : ""}${bounded ? ` ${bounded}` : ""} ${TRUST}`;
   } catch (err) {
     if (err instanceof RelayError && err.status === 401 && conn.mode === "credential") {
@@ -16293,6 +16348,14 @@ async function relayStatusLine(env) {
     if (err instanceof NotConnected) return `${NOT_CONNECTED_LINE} to reach your teammates' sessions.`;
     const why = err instanceof Error ? err.message : "error";
     return `team-relay: the relay is not reachable right now (${why}); asking teammates will fail until it is. ${TRUST}`;
+  }
+}
+async function readAccepted(client, timeoutMs) {
+  try {
+    const a = await client.acceptance({ attempts: 1, timeoutMs });
+    return typeof a?.version === "number" && Number.isSafeInteger(a.version) && a.version >= 0 ? a.version : null;
+  } catch {
+    return null;
   }
 }
 async function readBoundaries(client, timeoutMs) {

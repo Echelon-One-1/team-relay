@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { credentialFileExists, credentialsPath, normaliseRelayUrl, readCredential } from './credentials.js';
 import { MEMBER_RE, TEAM_RE, parseRelayUrl } from './relay-client-core.js';
 import { defaultRelayUrl } from './relay-default.js';
-import type { SetBoundariesBody, TeamBoundaries } from './boundaries-types.js';
+import type { Acceptance, MemberStatusBody, MembersStatus, MyRequest, SetBoundariesBody, TeamBoundaries } from './boundaries-types.js';
 
 export { MEMBER_RE, TEAM_RE, parseRelayUrl };
 export const REQUEST_ID_RE = /^rq_[0-9a-f]{32}$/;
@@ -765,6 +765,31 @@ export class RelayClient {
   /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
   setBoundaries(body: SetBoundariesBody, opts?: CallOptions) {
     return this.call<TeamBoundaries>('PUT', this.teamPath('boundaries'), body, { attempts: 1, ...opts });
+  }
+
+  /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
+  acceptance(opts?: CallOptions) {
+    return this.call<Acceptance>('GET', this.teamPath('me', 'acceptance'), undefined, opts);
+  }
+
+  /** M11-SPEC §2: accept the current boundaries version (only for oneself). Sent once. */
+  setAcceptance(version: number, opts?: CallOptions) {
+    return this.call<Acceptance>('PUT', this.teamPath('me', 'acceptance'), { version }, { attempts: 1, ...opts });
+  }
+
+  /** M11-SPEC §3: the background answerer's status (the member itself only). Sent once. */
+  putStatus(body: MemberStatusBody, opts?: CallOptions) {
+    return this.call<Record<string, unknown>>('PUT', this.teamPath('me', 'status'), body, { attempts: 1, ...opts });
+  }
+
+  /** M11-SPEC §3: every member's setup progress and whether they are answering now. */
+  membersStatus(opts?: CallOptions) {
+    return this.call<MembersStatus>('GET', this.teamPath('members', 'status'), undefined, opts);
+  }
+
+  /** M11-SPEC §4: this member's recent requests, newest first. */
+  myRequests(limit = 20, opts?: CallOptions) {
+    return this.call<{ requests: MyRequest[] }>('GET', this.teamPath('me', 'requests') + `?limit=${limit}`, undefined, opts);
   }
 
   /**

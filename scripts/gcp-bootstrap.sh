@@ -66,10 +66,11 @@ has_binding() {  # stdin: csv role,member rows; $1 role; $2 member
 # ---------------------------------------------------------------- 1. services
 echo "1. services"
 ENABLED="$(gcloud services list --enabled --project="$PROJECT" --format='value(config.name)')"
-# compute: the load balancer of scripts/deploy-lb.sh (M10-SPEC §5).
+# compute: the load balancer of scripts/deploy-lb.sh (M10-SPEC §5). cloudresourcemanager: the
+# IAP access step reads and changes IAM policies through it (M11-SPEC §7).
 for api in run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
     secretmanager.googleapis.com firestore.googleapis.com iam.googleapis.com iap.googleapis.com \
-    compute.googleapis.com; do
+    compute.googleapis.com cloudresourcemanager.googleapis.com; do
   if grep -qx "$api" <<<"$ENABLED"; then
     echo "   ${api}: exists"
   else
@@ -220,11 +221,24 @@ else
   echo "   index requests(asker, next_deadline): created (building)"
 fi
 
+# M11-SPEC §4: a member's own recent questions (GET me/requests), newest first.
+if gcloud firestore indexes composite list --database="$DATABASE" --project="$PROJECT" \
+    --format='value(fields[].fieldPath.list())' 2>/dev/null | grep -q "asker,kind,created_at"; then
+  echo "   index requests(asker, kind, created_at desc): exists"
+else
+  gcloud firestore indexes composite create --database="$DATABASE" --project="$PROJECT" \
+    --collection-group=requests --query-scope=COLLECTION \
+    --field-config=field-path=asker,order=ascending \
+    --field-config=field-path=kind,order=ascending \
+    --field-config=field-path=created_at,order=descending --async --quiet >/dev/null
+  echo "   index requests(asker, kind, created_at desc): created (building)"
+fi
+
 # TTL deletes expired documents lazily (typically within a day); the relay filters expired
 # documents on every read regardless, so this is storage hygiene, not correctness.
 TTLS="$(gcloud firestore fields ttls list --database="$DATABASE" --project="$PROJECT" \
   --format='csv[no-heading](name,ttlConfig.state)' 2>/dev/null || true)"
-for group in messages requests progress idempotency audit counters credentials logins \
+for group in messages requests answers progress idempotency audit counters credentials logins \
     login_codes login_limits retired credential_teams admin_audit; do
   state="$(grep "/collectionGroups/${group}/fields/expire_at," <<<"$TTLS" | cut -d, -f2 || true)"
   if [[ "$state" == "ACTIVE" || "$state" == "CREATING" ]]; then

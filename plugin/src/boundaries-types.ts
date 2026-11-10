@@ -52,3 +52,45 @@ export interface SetBoundariesBody {
   version: number;
   boundaries: Boundaries;
 }
+
+/** M11-SPEC §2: `GET`/`PUT /v1/teams/{team}/me/acceptance`. Never accepted: version 0. */
+export interface Acceptance {
+  version: number;
+  accepted_at: string | null;
+}
+
+/**
+ * M11-SPEC §3: `self_test.reason` while the daemon's first self-test is still running (not a
+ * failure). The console recognises the same literal (console/src/lib/setup.ts).
+ */
+export const SELF_TEST_PENDING = 'the self-test has not run yet';
+
+/** M11-SPEC §3: what a member's background answerer reports (counts and booleans only). */
+export interface MemberStatusBody {
+  daemon: { version: string; started_at: string };
+  claude: { found: boolean; signed_in: boolean };
+  folders: { repo_roots: number; clones: number; extra_folders: number };
+  drive: { connected: boolean };
+  self_test: { ok: boolean; at: string; reason: string | null };
+}
+
+/** M11-SPEC §3: one member in `GET /v1/teams/{team}/members/status`. */
+export interface MemberStatusEntry {
+  member: string;
+  status: (MemberStatusBody & { seen_at: string }) | null;
+  answering: boolean;
+  accepted_version: number;
+}
+
+export interface MembersStatus {
+  members: MemberStatusEntry[];
+  boundaries_version: number;
+}
+
+/** M11-SPEC §4: one of `GET /v1/teams/{team}/me/requests`. */
+export interface MyRequest {
+  id: string;
+  to: '*' | string[];
+  created_at: string;
+  question_preview: string;
+}

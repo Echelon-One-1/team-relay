@@ -7967,6 +7967,26 @@ var init_relay_client = __esm({
       setBoundaries(body, opts) {
         return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
       }
+      /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
+      acceptance(opts) {
+        return this.call("GET", this.teamPath("me", "acceptance"), void 0, opts);
+      }
+      /** M11-SPEC §2: accept the current boundaries version (only for oneself). Sent once. */
+      setAcceptance(version2, opts) {
+        return this.call("PUT", this.teamPath("me", "acceptance"), { version: version2 }, { attempts: 1, ...opts });
+      }
+      /** M11-SPEC §3: the background answerer's status (the member itself only). Sent once. */
+      putStatus(body, opts) {
+        return this.call("PUT", this.teamPath("me", "status"), body, { attempts: 1, ...opts });
+      }
+      /** M11-SPEC §3: every member's setup progress and whether they are answering now. */
+      membersStatus(opts) {
+        return this.call("GET", this.teamPath("members", "status"), void 0, opts);
+      }
+      /** M11-SPEC §4: this member's recent requests, newest first. */
+      myRequests(limit = 20, opts) {
+        return this.call("GET", this.teamPath("me", "requests") + `?limit=${limit}`, void 0, opts);
+      }
       /**
        * M10-SPEC §2a: the Desktop OAuth client members use to connect Google Drive (read-only).
        * An installed-app client is not confidential (Google's rule); it is served to members so it
@@ -8009,9 +8029,9 @@ var init_relay_client = __esm({
         return this.call("POST", "v1/teams", body, { attempts: 1, ...opts });
       }
       /** Accept or decline an invitation to `team`. */
-      answerInvitation(team, accept2, opts) {
+      answerInvitation(team, accept, opts) {
         if (!TEAM_RE.test(team)) throw new Error("invalid team id");
-        return this.call("POST", ["v1", "me", "invitations", team].map(encodeURIComponent).join("/"), { accept: accept2 }, {
+        return this.call("POST", ["v1", "me", "invitations", team].map(encodeURIComponent).join("/"), { accept }, {
           attempts: 1,
           ...opts
         });
@@ -25934,6 +25954,97 @@ var StdioServerTransport = class {
 
 // src/channel.ts
 init_relay_client();
+
+// src/relay-connect.ts
+init_relay_client();
+
+// src/tool-util.ts
+init_relay_client();
+function toolJson(value) {
+  return { content: [{ type: "text", text: JSON.stringify(value) }] };
+}
+function toolError(message) {
+  return { content: [{ type: "text", text: message }], isError: true };
+}
+function describeError(err) {
+  if (err instanceof RelayError) {
+    return `relay refused (${err.status} ${err.code})${err.detail ? `: ${err.detail}` : ""}`;
+  }
+  if (err instanceof RelayNetworkError) return err.message;
+  if (err instanceof Error) return err.message;
+  return "unexpected error";
+}
+function isPlainObject3(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isPlainObject3(value)) {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+function unknownKey(args, allowed) {
+  for (const k of Object.keys(args)) if (!allowed.includes(k)) return k;
+  return null;
+}
+function optionalInt(args, key, min, max) {
+  const v = args[key];
+  if (v === void 0 || v === null) return void 0;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) {
+    throw new Error(`${key} must be an integer between ${min} and ${max}`);
+  }
+  return v;
+}
+
+// src/relay-connect.ts
+async function connectOnce(env, opts = {}) {
+  let c;
+  try {
+    c = connectionFromEnv(env);
+  } catch (err) {
+    return err instanceof NotConnected ? { kind: "not_signed_in" } : { kind: "config", problem: describeError(err) };
+  }
+  let client;
+  try {
+    client = new RelayClient({ url: c.url, team: c.team, token: c.token });
+  } catch (err) {
+    return { kind: "config", problem: describeError(err) };
+  }
+  let me;
+  try {
+    me = await client.me({ attempts: 1, timeoutMs: opts.timeoutMs ?? 15e3 });
+  } catch (err) {
+    if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused" };
+    return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})` };
+  }
+  if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team" };
+  return { kind: "connected", client, me, connection: c };
+}
+function hostConnection(c, env, credentialsFile) {
+  return {
+    mode: c.mode,
+    url: c.url,
+    team: c.team,
+    ...c.mode === "credential" ? { credentialsFile } : {},
+    ...c.mode === "token" ? { tokenFile: configValue(env.RELAY_TOKEN_FILE), token: configValue(env.RELAY_TOKEN) } : {},
+    ...c.mode === "google" ? { gcloudAccount: configValue(env.RELAY_GCLOUD_ACCOUNT) } : {}
+  };
+}
+
+// src/console-url.ts
+function consoleUrl(relayUrl) {
+  try {
+    const u = new URL(relayUrl);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return relayUrl;
+    return u.origin;
+  } catch {
+    return relayUrl;
+  }
+}
+
+// src/channel.ts
 init_credentials();
 
 // src/login.ts
@@ -31889,15 +32000,15 @@ var RE2 = class RE22 {
     while (i < n && pos <= end) {
       const matches = this.executeEngine(input, pos, RE2Flags.UNANCHORED, this.prog.numCap);
       if (matches === null || matches.length === 0) break;
-      let accept2 = true;
+      let accept = true;
       if (matches[1] === pos) {
-        if (matches[0] === prevMatchEnd) accept2 = false;
+        if (matches[0] === prevMatchEnd) accept = false;
         const r = input.step(pos);
         if (r < 0) pos = end + 1;
         else pos += r & 7;
       } else pos = matches[1];
       prevMatchEnd = matches[1];
-      if (accept2) {
+      if (accept) {
         result.push(deliverFun(this.pad(matches)));
         i++;
       }
@@ -33013,7 +33124,7 @@ function parseManifest(text) {
 function loadManifest(path) {
   return parseManifest(readFileSync4(path, "utf8"));
 }
-function isPlainObject3(v) {
+function isPlainObject4(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 function validateOne(name, p, v) {
@@ -33051,7 +33162,7 @@ function validateOne(name, p, v) {
   }
 }
 function validateParams(cap, params) {
-  if (!isPlainObject3(params)) return { ok: false, param: "(params)", detail: "params must be an object" };
+  if (!isPlainObject4(params)) return { ok: false, param: "(params)", detail: "params must be an object" };
   for (const key of Object.keys(params)) {
     if (!Object.hasOwn(cap.params, key)) {
       return { ok: false, param: key, detail: `${key} is not a parameter of ${cap.name}` };
@@ -33314,57 +33425,15 @@ function answersAppearNote(env) {
 
 // src/waiting.ts
 init_relay_client();
-
-// src/tool-util.ts
-init_relay_client();
-function toolJson(value) {
-  return { content: [{ type: "text", text: JSON.stringify(value) }] };
-}
-function toolError(message) {
-  return { content: [{ type: "text", text: message }], isError: true };
-}
-function describeError(err) {
-  if (err instanceof RelayError) {
-    return `relay refused (${err.status} ${err.code})${err.detail ? `: ${err.detail}` : ""}`;
-  }
-  if (err instanceof RelayNetworkError) return err.message;
-  if (err instanceof Error) return err.message;
-  return "unexpected error";
-}
-function isPlainObject4(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (isPlainObject4(value)) {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-function unknownKey(args, allowed) {
-  for (const k of Object.keys(args)) if (!allowed.includes(k)) return k;
-  return null;
-}
-function optionalInt(args, key, min, max) {
-  const v = args[key];
-  if (v === void 0 || v === null) return void 0;
-  if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) {
-    throw new Error(`${key} must be an integer between ${min} and ${max}`);
-  }
-  return v;
-}
-
-// src/waiting.ts
 var ANSWERING_ONLINE_MS = 45e3;
 var CHECK_INTERVAL_MS = 6e4;
 var REPEAT_MS = 36e5;
 var SUMMARY_CAP = 50;
 function parseSummary(raw) {
-  if (!isPlainObject4(raw)) return null;
+  if (!isPlainObject3(raw)) return null;
   const { pending, more, oldest_at, from, answering } = raw;
   if (typeof pending !== "number" || !Number.isInteger(pending) || pending < 0 || pending > SUMMARY_CAP) return null;
-  const seen = isPlainObject4(answering) ? answering.last_seen : null;
+  const seen = isPlainObject3(answering) ? answering.last_seen : null;
   const time3 = (v) => typeof v === "string" && Number.isFinite(Date.parse(v)) ? v : null;
   return {
     pending,
@@ -33634,7 +33703,7 @@ function parseInfo(raw) {
   try {
     const v = JSON.parse(raw);
     if (typeof v.pid !== "number" || !Number.isInteger(v.pid) || v.pid <= 0) return null;
-    if (v.role !== "host" && v.role !== "answerer") return null;
+    if (v.role !== "host" && v.role !== "answerer" && v.role !== "daemon") return null;
     return { pid: v.pid, role: v.role, started_at: typeof v.started_at === "string" ? v.started_at : "" };
   } catch {
     return null;
@@ -33748,7 +33817,9 @@ function tryAcquire(path, role, opts = {}) {
 }
 function heldBy(holder) {
   if (!holder) return "another answering session on this computer";
-  return holder.role === "host" ? `a channel working session on this computer (pid ${holder.pid})` : `a manual answering session on this computer (pid ${holder.pid})`;
+  if (holder.role === "host") return `a channel working session on this computer (pid ${holder.pid})`;
+  if (holder.role === "daemon") return `the background answerer on this computer (pid ${holder.pid})`;
+  return `a manual answering session on this computer (pid ${holder.pid})`;
 }
 
 // src/approvals.ts
@@ -34567,7 +34638,14 @@ function parseTeamSettings(raw, env, team = "a team") {
   if (!isObj2(raw)) throw new MemberFoldersError(`the settings for ${team} are not a JSON object`);
   onlyKeys(raw, ["repo_roots", "extra_folders", "accepted"], `the settings for ${team}`);
   const folders = parseMemberFolders(raw, env, `the settings for ${team}`);
-  const accepted = raw.accepted === void 0 || raw.accepted === null ? null : parseAccepted(raw.accepted);
+  let accepted = null;
+  if (raw.accepted !== void 0 && raw.accepted !== null) {
+    try {
+      accepted = parseAccepted(raw.accepted);
+    } catch {
+      accepted = null;
+    }
+  }
   return { ...folders, accepted };
 }
 function emptyTeams() {
@@ -34632,6 +34710,9 @@ function readMemberSettings(path, env) {
     throw new MemberFoldersError("the folders file is not valid JSON");
   }
   return parseMemberSettings(json, env);
+}
+function readTeamSettings(path, env, team) {
+  return teamSettings(readMemberSettings(path, env), team);
 }
 function serialise(settings) {
   const teams = {};
@@ -34753,14 +34834,13 @@ function narrowAccepted(current, accepted, since) {
     dropped
   };
 }
-function settingsNarrowedTo(path, env, team, current, since) {
-  const all = readMemberSettings(path, env);
-  const mine = teamSettings(all, team);
-  const narrowed = narrowAccepted(current, mine.accepted, since);
-  if (!narrowed) return { settings: mine, dropped: null };
-  const next = { ...mine, accepted: narrowed.accepted };
-  writeMemberSettings(path, withTeam(all, team, next), env);
-  return { settings: next, dropped: narrowed.dropped };
+function acceptedAtVersion(current, version2, since) {
+  if (typeof version2 !== "number" || !Number.isSafeInteger(version2) || version2 < 1 || version2 > since.version) return null;
+  try {
+    return acceptedFrom(current, version2);
+  } catch {
+    return null;
+  }
 }
 function acceptedFrom(current, version2) {
   return parseAccepted({
@@ -36776,6 +36856,7 @@ var OFF_TOPIC_REPLY = (team) => `I only answer questions about ${team} topics.`;
 var WITHHELD_REPLY = (member) => `This answer may contain a credential, so it wasn't sent. Ask ${member} directly.`;
 var BUSY_REPLY = "Too many questions right now; try again later.";
 var NOT_SET_UP_REPLY = (member) => `${member} hasn't set up answering for this team yet.`;
+var NO_CAPABILITY_REPLY = (member) => `${member}'s background answerer does not run capabilities; ask ${member} directly.`;
 var OUTSIDE_SET = "That file is not one you may read for this team: only files git tracks in the team's GitHub repositories, files in its shared drive and the member's own added folders. Use mcp__host__list_files or mcp__host__search_files to find what you can read; do not try to reach it another way.";
 var TOO_LARGE_READ = `That file is larger than ${MAX_SNAPSHOT_BYTES / (1024 * 1024)} MB, so it cannot be read. Answer without it, and say so.`;
 var UNSAFE_READ = "That file changed or is not a regular file, so it cannot be read now. Answer without it, and say so.";
@@ -36857,6 +36938,8 @@ var AnswerHost = class {
   /** M10-SPEC §7.1: the member's acceptance as last worked out, and the last version a status line was pushed for. */
   acceptance = null;
   acceptanceNoted = -1;
+  /** M11-SPEC §1: no new run starts (the background answerer is finishing to restart). */
+  finishing = false;
   gitCache = new GitCache();
   get stopped() {
     return this.controller.signal.aborted;
@@ -36871,10 +36954,18 @@ var AnswerHost = class {
   /**
    * M10-SPEC §3, §7.6: past a volume limit a question is declined with the fixed busy line, never
    * held for approval, in boundary mode and while the boundaries were never read (whether the
-   * team has any is unknown then).
+   * team has any is unknown then). The background answerer never holds one (M11-SPEC §1).
    */
   get declinesWhenBusy() {
-    return this.boundaries === null || this.boundaryMode;
+    return this.o.background === true || this.boundaries === null || this.boundaryMode;
+  }
+  /** Whether an answerer run is in progress now. */
+  get busy() {
+    return this.current !== null;
+  }
+  /** Where the member accepts the team's boundaries (M11-SPEC §2): the console. */
+  get console() {
+    return consoleUrl(this.o.client.url);
   }
   status() {
     const boundary = this.boundaryMode;
@@ -36927,34 +37018,49 @@ var AnswerHost = class {
     }
     return this.boundaries;
   }
-  /**
-   * The member's settings for the team, with what the team's current boundaries dropped taken
-   * out of the accepted set (§7.1: narrowing applies at once, and a dropped item that comes
-   * back needs a new acceptance). A narrowing that cannot be written is an error: nothing is
-   * answered from a file that still holds it.
-   */
-  teamSettings(current, since) {
+  /** The member's folders for the team (M11-SPEC §2: any `accepted` in the file is ignored). */
+  teamSettings() {
     try {
-      const { settings, dropped } = settingsNarrowedTo(memberFoldersPath(this.env), this.env, this.o.me.team, current, since);
-      if (dropped) this.o.log(`your accepted boundaries no longer include ${wideningText(dropped)}: the team dropped it after you accepted (it needs a new acceptance once it is back)`);
-      return settings;
+      return { ...readTeamSettings(memberFoldersPath(this.env), this.env, this.o.me.team), accepted: null };
     } catch (err) {
       return { error: describeError(err) };
     }
   }
   /**
-   * M10-SPEC §7.1: the team's boundaries narrowed to what the member accepted, and what is
-   * waiting to be accepted. Null when the member's settings cannot be used (nothing is accepted then).
+   * M11-SPEC §2: the boundaries version the member accepted, read from the relay now (before every
+   * run). Null when the relay cannot say: nothing is taken as accepted then.
    */
-  effective(tb) {
+  async acceptedVersion() {
+    try {
+      const a = await this.o.client.acceptance({ attempts: 2, signal: this.controller.signal });
+      const v = isPlainObject3(a) ? a.version : void 0;
+      if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) throw new Error("the relay answered something that is not an acceptance");
+      return v;
+    } catch (err) {
+      if (!this.stopped) this.o.log(`which boundaries you accepted could not be read (${describeError(err)})`);
+      return null;
+    }
+  }
+  /**
+   * M10-SPEC §7.1: the team's boundaries narrowed to what the member accepted (M11-SPEC §2: the
+   * version the relay holds), and what is waiting to be accepted. Null when the member's folders
+   * file cannot be used (nothing is answered then); 'unknown' when the relay could not say what
+   * was accepted (the question gets the busy line).
+   */
+  async effective(tb) {
     const since = sinceOf(tb);
-    const settings = this.teamSettings(tb.boundaries, since);
+    const settings = this.teamSettings();
     if ("error" in settings) {
       this.o.log(`your folders file cannot be used (${settings.error}); questions are declined until it is fixed`);
       this.acceptance = { state: "unreadable", version: tb.version, adds: null };
       return null;
     }
-    const eff = effectiveBoundaries(tb.boundaries, settings.accepted, since);
+    const version2 = await this.acceptedVersion();
+    if (version2 === null) {
+      this.acceptance = { state: "unknown", version: tb.version, adds: null };
+      return "unknown";
+    }
+    const eff = effectiveBoundaries(tb.boundaries, acceptedAtVersion(tb.boundaries, version2, since), since);
     const adds = eff.pending ? wideningText(eff.pending) : null;
     this.acceptance = { state: eff.notAccepted ? "not_accepted" : eff.pending ? "pending" : "accepted", version: tb.version, adds };
     return { eff, settings };
@@ -36965,10 +37071,10 @@ var AnswerHost = class {
    */
   noteAcceptance(tb) {
     const a = this.acceptance;
-    if (!a || a.state === "accepted" || this.acceptanceNoted === tb.version || this.stopped) return;
+    if (!a || a.state === "accepted" || a.state === "unknown" || this.acceptanceNoted === tb.version || this.stopped) return;
     this.acceptanceNoted = tb.version;
     const team = this.o.me.team;
-    const text = a.state === "pending" ? `team-relay: ${team}'s boundaries changed (version ${tb.version} adds ${a.adds ?? "nothing"}); run /team-relay:folders accept to accept. Until then your automatic answers come only from what you accepted.` : a.state === "not_accepted" ? `team-relay: ${team} has boundaries (version ${tb.version}) you have not accepted yet, so teammates' questions to you are declined. Run /team-relay:folders accept to see and accept them.` : `team-relay: your folders file cannot be used, so teammates' questions to you are declined. Run /team-relay:folders to see why.`;
+    const text = a.state === "pending" ? `team-relay: ${team}'s boundaries changed (version ${tb.version} adds ${a.adds ?? "nothing"}); accept them in the console: ${this.console}. Until then your automatic answers come only from what you accepted.` : a.state === "not_accepted" ? `team-relay: ${team} has boundaries (version ${tb.version}) you have not accepted yet, so teammates' questions to you are declined. Open the console to see and accept them: ${this.console}` : `team-relay: your folders file cannot be used, so teammates' questions to you are declined. Run /team-relay:folders to see why.`;
     void Promise.resolve(this.o.push(text)).catch(() => {
     });
   }
@@ -36978,9 +37084,10 @@ var AnswerHost = class {
     if (!a) return {};
     const say = {
       accepted: "You accepted these boundaries; answers come from them.",
-      pending: `Version ${a.version} adds ${a.adds ?? "nothing"}, which you have not accepted: run /team-relay:folders accept. Until then answers come only from what you accepted.`,
-      not_accepted: "You have not accepted your team's boundaries yet, so teammates' questions are declined: run /team-relay:folders accept.",
-      unreadable: "Your folders file cannot be used, so teammates' questions are declined: run /team-relay:folders."
+      pending: `Version ${a.version} adds ${a.adds ?? "nothing"}, which you have not accepted: accept it in the console (${this.console}). Until then answers come only from what you accepted.`,
+      not_accepted: `You have not accepted your team's boundaries yet, so teammates' questions are declined: accept them in the console (${this.console}).`,
+      unreadable: "Your folders file cannot be used, so teammates' questions are declined: run /team-relay:folders.",
+      unknown: "Which boundaries you accepted could not be read from the relay just now, so teammates' questions get a busy reply until it can."
     };
     return { boundaries_acceptance: a.state, boundaries_acceptance_note: singleLine(say[a.state], 800) };
   }
@@ -37008,13 +37115,13 @@ var AnswerHost = class {
   async start() {
     const retry = this.o.lockRetryMs ?? LOCK_RETRY_MS;
     let lockedAt = Date.now();
-    if (!this.scope.qualifies) {
+    if (!this.scope.qualifies && !this.o.background) {
       this.o.log(`the working folder cannot be read automatically (${this.scope.reason}): every read will need your approval`);
     }
     while (!this.stopped) {
       let got;
       try {
-        got = tryAcquire(this.lockFile, "host");
+        got = tryAcquire(this.lockFile, this.o.background ? "daemon" : "host");
       } catch (err) {
         this.whyNot = `the answering lock could not be taken (${describeError(err)})`;
         this.o.log(this.whyNot);
@@ -37049,8 +37156,9 @@ var AnswerHost = class {
     const tb = await this.readBoundaries();
     if (this.stopped) return;
     if (tb?.boundaries) {
-      const e = this.effective(tb);
-      const set = e && !e.eff.notAccepted ? await this.allowedSet(tb, e.eff, e.settings) : null;
+      const e = await this.effective(tb);
+      if (this.stopped) return;
+      const set = e && e !== "unknown" && !e.eff.notAccepted ? await this.allowedSet(tb, e.eff, e.settings) : null;
       if (this.stopped) return;
       if (!set) this.lastSet = null;
       this.announceBoundaries(tb, set);
@@ -37059,8 +37167,13 @@ var AnswerHost = class {
       this.sharing = this.shares.length > 0;
       await this.publish(this.shares, { attempts: 2, signal: this.controller.signal });
       this.o.log(
-        set ? `answering automatically within the team's boundaries (version ${tb.version}): ${setSummary(set)}` : `the team's boundaries (version ${tb.version}) are not accepted yet: questions are declined`
+        set ? `answering automatically within the team's boundaries (version ${tb.version}): ${setSummary(set)}` : e === "unknown" ? `which boundaries you accepted could not be read (version ${tb.version}): questions get the busy reply until it can` : `the team's boundaries (version ${tb.version}) are not accepted yet: questions are declined`
       );
+    } else if (this.o.background) {
+      this.shares = [];
+      this.sharing = false;
+      await this.publish([], { attempts: 2, signal: this.controller.signal });
+      this.o.log(tb ? "your team has no boundaries: teammates' questions are declined until an owner sets them" : "the team's boundaries could not be read: questions get the busy reply until they can");
     } else {
       this.announce();
       const shares = this.scope.qualifies && this.scope.share ? [this.scope.share] : [];
@@ -37083,10 +37196,19 @@ var AnswerHost = class {
    * with nothing accepted (null), that questions are declined until the member accepts (§7.1).
    */
   announceBoundaries(tb, set) {
-    const text = set ? `team-relay: This session now answers teammates automatically within your team's boundaries (version ${tb.version}): ${singleLine(setSummary(set), 600)}. Reads of anything else are denied without asking, off-topic questions are declined, and nothing waits for your approval except a capability call. Change where your clones are with /team-relay:folders.` : "team-relay: This session now answers teammates for you, but declines their questions until you accept your team's boundaries with /team-relay:folders accept.";
+    const text = set ? `team-relay: This session now answers teammates automatically within your team's boundaries (version ${tb.version}): ${singleLine(setSummary(set), 600)}. Reads of anything else are denied without asking, off-topic questions are declined, and nothing waits for your approval except a capability call. Change where your clones are with /team-relay:folders.` : `team-relay: This session now answers teammates for you, but declines their questions until you accept your team's boundaries in the console: ${this.console}`;
     void Promise.resolve(this.o.push(text)).catch(() => {
     });
     this.notifyDesktop(TAKEOVER_TEXT);
+  }
+  /**
+   * M11-SPEC §1: start no new run, let the one in progress end, then stop (the lock released).
+   * Questions not yet answered are received again by the next host (§7 item 12).
+   */
+  async finishAndStop(pollMs = 200) {
+    this.finishing = true;
+    while (this.current !== null && !this.stopped) await new Promise((r) => setTimeout(r, pollMs));
+    await this.stop();
   }
   async stop() {
     if (this.stopped) return;
@@ -37126,8 +37248,7 @@ var AnswerHost = class {
   /** M4-SPEC §3 / M8-SPEC §1: the capabilities this member runs, and the folder it shares. */
   async publish(shares, opts) {
     try {
-      const manifest = loadManifest(this.env.MANIFEST_PATH || defaultManifestPath());
-      const { exposed } = exposedCapabilities(manifest, this.env);
+      const exposed = this.o.background ? [] : exposedCapabilities(loadManifest(this.env.MANIFEST_PATH || defaultManifestPath()), this.env).exposed;
       const payload = validateManifest(discoveryPayload(exposed, shares.map((name) => ({ name }))));
       const res = await this.o.client.publishManifest(this.o.me.member, payload, opts);
       this.o.log(`published capabilities: ${res.capabilities.join(", ") || "(none)"}; shared folder: ${shares.join(", ") || "(none)"}`);
@@ -37236,9 +37357,18 @@ var AnswerHost = class {
       kind: envelope.type === "capability_call" ? "capability_call" : "question",
       question: typeof data.question === "string" ? data.question : "",
       answer_deadline: Date.parse(deadline),
-      ...envelope.type === "capability_call" ? { capability: { name: String(data.capability), params: isPlainObject4(data.params) ? data.params : {} } } : {}
+      ...envelope.type === "capability_call" ? { capability: { name: String(data.capability), params: isPlainObject3(data.params) ? data.params : {} } } : {}
     };
     const job = { item, seq, approved: false };
+    if (this.o.background && item.kind === "capability_call") {
+      try {
+        await this.sendReply(item.request_id, NO_CAPABILITY_REPLY(me.member), null);
+        this.o.log(`declined ${item.request_id}: the background answerer runs no capability`);
+      } catch (err) {
+        this.o.log(`the answer to ${item.request_id} could not be sent (${describeError(err)})`);
+      }
+      return false;
+    }
     const queued = this.work.filter((j) => j.item.from === item.from).length;
     if (queued >= this.perAsker) {
       if (this.declinesWhenBusy) {
@@ -37260,7 +37390,7 @@ var AnswerHost = class {
     if (this.working) return;
     this.working = true;
     try {
-      while (!this.stopped) {
+      while (!this.stopped && !this.finishing) {
         const job = this.work.shift();
         if (!job) break;
         const item = job.item;
@@ -37348,14 +37478,20 @@ var AnswerHost = class {
     }
     let boundary = null;
     if (tb.boundaries) {
-      const e = this.effective(tb);
+      const e = await this.effective(tb);
+      if (this.stopped) return false;
       this.noteAcceptance(tb);
+      if (e === "unknown") {
+        await this.declineBusy(job, "which boundaries you accepted could not be read");
+        this.finish(job);
+        return false;
+      }
       if (!e || e.eff.notAccepted) {
         this.lastSet = null;
         await this.publishShares([]);
         try {
           await this.sendReply(item.request_id, NOT_SET_UP_REPLY(this.o.me.member), null);
-          this.o.log(`declined ${item.request_id}: the team's boundaries are not accepted yet (run /team-relay:folders accept)`);
+          this.o.log(`declined ${item.request_id}: the team's boundaries are not accepted yet (accept them in the console)`);
         } catch (err) {
           this.o.log(`the answer to ${item.request_id} could not be sent (${describeError(err)})`);
         }
@@ -37366,6 +37502,18 @@ var AnswerHost = class {
       if (this.stopped) return false;
       boundary = { set, teamName: this.o.me.name?.trim() || this.o.me.team, ctx: denyContext(this.env) };
       await this.publishShares(shareNames(set));
+    } else if (this.o.background) {
+      this.lastSet = null;
+      this.acceptance = null;
+      await this.publishShares([]);
+      try {
+        await this.sendReply(item.request_id, NOT_SET_UP_REPLY(this.o.me.member), null);
+        this.o.log(`declined ${item.request_id}: your team has no boundaries`);
+      } catch (err) {
+        this.o.log(`the answer to ${item.request_id} could not be sent (${describeError(err)})`);
+      }
+      this.finish(job);
+      return false;
     } else {
       this.lastSet = null;
       this.acceptance = null;
@@ -37397,7 +37545,8 @@ var AnswerHost = class {
         node: this.node,
         claudeBin: this.claudeBin(),
         log: this.o.log,
-        ...boundary && tb.boundaries ? { boundaries: { teamName: boundary.teamName, topic: tb.boundaries.topic } } : {}
+        ...boundary && tb.boundaries ? { boundaries: { teamName: boundary.teamName, topic: tb.boundaries.topic } } : {},
+        ...this.o.background ? { capabilities: false } : {}
       });
     } catch (err) {
       rmSync8(runDir, { recursive: true, force: true });
@@ -37464,7 +37613,7 @@ var AnswerHost = class {
   }
   async onCall(run3, method, params) {
     if (this.current !== run3) throw new Error("this answer is over");
-    const p = isPlainObject4(params) ? params : {};
+    const p = isPlainObject3(params) ? params : {};
     if (method === "reply") return this.onReply(run3, p);
     if (method === "list_files" || method === "search_files" || method === "read_google_file") return this.onFileTool(run3, method, p);
     if (method === "request_approval") {
@@ -37535,7 +37684,7 @@ var AnswerHost = class {
     if (hasLoneSurrogate(text)) return { ok: false, message: "text contains a lone surrogate" };
     let data = null;
     if (p.data !== void 0 && p.data !== null) {
-      if (!isPlainObject4(p.data)) return { ok: false, message: "data must be a JSON object" };
+      if (!isPlainObject3(p.data)) return { ok: false, message: "data must be a JSON object" };
       if (Buffer.byteLength(JSON.stringify(p.data), "utf8") > REPLY_DATA_LIMIT) return { ok: false, message: "data is larger than 64 KiB" };
       data = p.data;
     }
@@ -37640,7 +37789,7 @@ var AnswerHost = class {
   async onPermission(run3, p) {
     if (!run3.boundary) run3.approvalNeeded = true;
     const toolName = typeof p.tool_name === "string" ? p.tool_name : "";
-    const input = isPlainObject4(p.input) ? p.input : {};
+    const input = isPlainObject3(p.input) ? p.input : {};
     const ask = run3.boundary ? await this.classifyBoundary(run3, run3.boundary, toolName, input) : this.classify(run3, toolName, input);
     if ("allow" in ask) return ask.updatedInput ? { allow: true, updatedInput: ask.updatedInput } : { allow: true };
     if ("deny" in ask) {
@@ -37689,7 +37838,7 @@ var AnswerHost = class {
       }
       return { allow: true, updatedInput: { ...input, file_path: snap.path } };
     }
-    if (server === "capabilities") return this.classify(run3, toolName, input);
+    if (server === "capabilities" && !this.o.background) return this.classify(run3, toolName, input);
     return { deny: `${toolName || "That tool"} is not available when answering automatically.` };
   }
   /** What the member is asked, or why it is denied without asking. */
@@ -37856,22 +38005,24 @@ function planRun(p) {
   const claudeConfig = env.CLAUDE_CONFIG_DIR?.trim();
   if (claudeConfig && isAbsolute9(claudeConfig)) denyDirs.push(claudeConfig);
   let capabilities = null;
-  try {
-    const manifestPath = env.MANIFEST_PATH || defaultManifestPath();
-    const { exposed } = exposedCapabilities(loadManifest(manifestPath), env);
-    if (exposed.length > 0) {
-      const capEnv = {
-        ...relay.env,
-        MANIFEST_PATH: manifestPath,
-        ALLOW_PRODUCTION: env.ALLOW_PRODUCTION === "true" ? "true" : "false"
-      };
-      for (const [k, v] of Object.entries(env)) {
-        if (/^CAP_[A-Z][A-Z0-9_]*_(ENABLED|RUNNER)$/.test(k) && typeof v === "string") capEnv[k] = v;
+  if (p.capabilities !== false) {
+    try {
+      const manifestPath = env.MANIFEST_PATH || defaultManifestPath();
+      const { exposed } = exposedCapabilities(loadManifest(manifestPath), env);
+      if (exposed.length > 0) {
+        const capEnv = {
+          ...relay.env,
+          MANIFEST_PATH: manifestPath,
+          ALLOW_PRODUCTION: env.ALLOW_PRODUCTION === "true" ? "true" : "false"
+        };
+        for (const [k, v] of Object.entries(env)) {
+          if (/^CAP_[A-Z][A-Z0-9_]*_(ENABLED|RUNNER)$/.test(k) && typeof v === "string") capEnv[k] = v;
+        }
+        capabilities = { script: join13(p.dist, "capabilities.js"), env: capEnv };
       }
-      capabilities = { script: join13(p.dist, "capabilities.js"), env: capEnv };
+    } catch (err) {
+      p.log?.(`capabilities not offered to this answer (${describeError(err)})`);
     }
-  } catch (err) {
-    p.log?.(`capabilities not offered to this answer (${describeError(err)})`);
   }
   const token = p.token ?? newToken();
   const mcpConfig = join13(runDir, "mcp.json");
@@ -37935,7 +38086,7 @@ function defaultNotify(text) {
 // src/folders-tool.ts
 var FOLDERS_TOOL = {
   name: "folders",
-  description: `Show or change where your automatic answerer looks when your team has boundaries (/team-relay:folders): repo roots (folders searched 3 levels deep for clones of the team's GitHub repositories; only files git tracks are read), folders of your own when the team allows them, and which of the team's boundaries you accepted. action "show" (default) lists them and what they give; "add_root", "remove_root", "add_folder" and "remove_folder" take a path (absolute or starting with ~/); "accept" accepts the team's current boundaries. Every change asks the user in a dialog first: only the user decides there.`,
+  description: `Show or change where your automatic answerer looks when your team has boundaries (/team-relay:folders): repo roots (folders searched 3 levels deep for clones of the team's GitHub repositories; only files git tracks are read), folders of your own when the team allows them, and which version of the team's boundaries you accepted. action "show" (default) lists them and what they give; "add_root", "remove_root", "add_folder" and "remove_folder" take a path (absolute or starting with ~/); "accept" says where to accept the team's boundaries (the team console, in the browser). Every change asks the user in a dialog first: only the user decides there.`,
   inputSchema: {
     type: "object",
     properties: {
@@ -37947,6 +38098,9 @@ var FOLDERS_TOOL = {
 };
 var DIALOG_MS = 10 * 6e4;
 var NO_DIALOGS = "This Claude Code does not offer dialogs to plugins (MCP elicitation)";
+function whereToAccept(url) {
+  return url ? `Accept your team's boundaries in the team console: open ${url} and press Accept on the Join or Team page. Only you can accept for yourself.` : "Accept your team's boundaries in the team console (sign in first with /team-relay:login to see its address). Only you can accept for yourself.";
+}
 function describeFolders(v, env) {
   const one = (raw) => {
     const { path, reason } = memberFolderProblem(raw, env);
@@ -37969,19 +38123,16 @@ function teamPart(tb, otherTeam = false) {
     }
   };
 }
-function acceptancePart(tb, t) {
-  const a = t.accepted;
-  const accepted = a ? {
-    version: a.version,
-    github_orgs: a.github_orgs,
-    shared_drives: a.drives.map((d) => `${quotedOwnerText(d.shared_drive, 100)} (${d.domain})`),
-    member_folders: a.member_folders
-  } : "nothing yet: teammates' questions to you are declined until you accept your team's boundaries (/team-relay:folders accept)";
+function acceptancePart(tb, version2, url) {
+  if (version2 === null) return { accepted: "unknown (the relay could not say which version you accepted)" };
+  const where = url ? `in the console (${url})` : "in the console";
+  const accepted = version2 > 0 ? { version: version2 } : `nothing yet: teammates' questions to you are declined until you accept your team's boundaries ${where}`;
   if (!tb?.boundaries) return { accepted };
-  const eff = effectiveBoundaries(tb.boundaries, a, sinceOf(tb));
+  const since = sinceOf(tb);
+  const eff = effectiveBoundaries(tb.boundaries, acceptedAtVersion(tb.boundaries, version2, since), since);
   return {
     accepted,
-    ...eff.pending ? { not_accepted_yet: `version ${tb.version} adds ${wideningText(eff.pending)}: run /team-relay:folders accept` } : {}
+    ...eff.pending && !eff.notAccepted ? { not_accepted_yet: `version ${tb.version} adds ${wideningText(eff.pending)}: accept it ${where}` } : {}
   };
 }
 async function decide(elicit, message, yes, no) {
@@ -38007,7 +38158,7 @@ This was asked for in your session; only your choice here changes it.`,
     },
     DIALOG_MS
   );
-  const content = isPlainObject4(res.content) ? res.content : {};
+  const content = isPlainObject3(res.content) ? res.content : {};
   return res.action === "accept" && content.decision === "change";
 }
 async function foldersTool(args, deps) {
@@ -38027,17 +38178,14 @@ async function foldersTool(args, deps) {
     const read = await deps.boundaries().catch(() => null);
     const otherTeam = read !== null && read.team !== team;
     const tb = otherTeam ? null : read;
-    if (tb?.boundaries) {
-      try {
-        current = settingsNarrowedTo(file, deps.env, team, tb.boundaries, sinceOf(tb)).settings;
-      } catch (err) {
-        return toolError(`your folders file cannot be used (${describeError(err)}): fix or remove ${file}`);
-      }
-    }
+    const version2 = tb?.boundaries ? await deps.acceptance().catch(() => null) : null;
     let gives = null;
     if (tb?.boundaries) {
-      const eff = effectiveBoundaries(tb.boundaries, current.accepted, sinceOf(tb));
-      if (eff.notAccepted) {
+      const since = sinceOf(tb);
+      const eff = effectiveBoundaries(tb.boundaries, version2 === null ? null : acceptedAtVersion(tb.boundaries, version2, since), since);
+      if (version2 === null) {
+        gives = "unknown: the relay could not say which version you accepted";
+      } else if (eff.notAccepted) {
         gives = "nothing: teammates' questions are declined until you accept your team's boundaries";
       } else {
         try {
@@ -38053,14 +38201,14 @@ async function foldersTool(args, deps) {
       team,
       ...describeFolders(current, deps.env),
       ...teamPart(tb, otherTeam),
-      ...acceptancePart(tb, current),
+      ...tb?.boundaries ? acceptancePart(tb, version2, deps.console()) : {},
       ...gives ? { answers_come_from: gives } : {},
-      how_to_change: "Ask to add or remove a repo root or a folder, or to accept the team's boundaries; each change opens a dialog where you decide."
+      how_to_change: `Ask to add or remove a repo root or a folder; each change opens a dialog where you decide. ${whereToAccept(deps.console())}`
     });
   }
   if (action === "accept") {
     if (args.path !== void 0) return toolError("accept takes no path");
-    return accept(deps, team, file, current);
+    return toolJson({ message: whereToAccept(deps.console()) });
   }
   const ops = {
     add_root: ["repo_roots", "add"],
@@ -38103,46 +38251,6 @@ async function foldersTool(args, deps) {
     return toolJson({ message: `${kind === "add" ? "Added" : "Removed"}. Your automatic answerer uses it from its next answer.`, ...describeFolders(again.value, deps.env) });
   } catch (err) {
     return toolError(`nothing changed (${describeError(err)})`);
-  }
-}
-async function accept(deps, team, file, current) {
-  const tb = await deps.boundaries().catch(() => null);
-  if (!tb) return toolError("Your team's boundaries cannot be read now (not signed in, or the relay could not be reached); nothing was accepted.");
-  if (tb.team !== team) return toolError("The relay answered for a different team; nothing was accepted.");
-  if (!tb.boundaries) return toolJson({ message: "Your team has no boundaries, so there is nothing to accept." });
-  const eff = effectiveBoundaries(tb.boundaries, current.accepted, sinceOf(tb));
-  if (!eff.notAccepted && !eff.pending) {
-    return toolJson({ message: `Nothing new to accept: everything in version ${tb.version} of your team's boundaries is already accepted.` });
-  }
-  let record2;
-  try {
-    record2 = acceptedFrom(tb.boundaries, tb.version);
-  } catch (err) {
-    return toolError(`these boundaries cannot be accepted (${describeError(err)}); nothing was accepted`);
-  }
-  if (!deps.elicit) return toolError(`${NO_DIALOGS}, so nothing was accepted. Run /team-relay:folders accept in a Claude Code that offers dialogs.`);
-  const adds = wideningText(eff.pending ?? { github_orgs: [], drives: [], member_folders: false });
-  const message = eff.notAccepted ? `Accept your team's boundaries (version ${tb.version})? Your automatic answerer will then answer teammates' questions on its own, without asking you, from ${adds} (for GitHub, only files git tracks in your clones under your repo roots). Reads of anything else stay denied.` : `Accept what version ${tb.version} of your team's boundaries adds? Your automatic answerer will then also answer teammates' questions on its own, without asking you, from ${adds}.`;
-  let yes;
-  try {
-    yes = await decide(deps.elicit, message, "Yes, accept", "No, not now");
-  } catch (err) {
-    return toolError(`the dialog could not be shown (${describeError(err)}); nothing was accepted`);
-  }
-  if (!yes) return toolJson({ message: "Not accepted; nothing changed." });
-  try {
-    const fresh = readMemberSettings(file, deps.env);
-    const mine = teamSettings(fresh, team);
-    if (mine.accepted && mine.accepted.version > record2.version) {
-      const now = await deps.boundaries().catch(() => null);
-      const nowVersion = now && now.team === team ? now.version : null;
-      if (nowVersion === null) return toolError("nothing was accepted (the relay could not be asked which version is current); try again");
-      if (mine.accepted.version <= nowVersion) return toolJson({ message: "A newer version was accepted meanwhile; nothing changed." });
-    }
-    writeMemberSettings(file, withTeam(fresh, team, { ...mine, accepted: record2 }), deps.env);
-    return toolJson({ message: `Accepted version ${tb.version} of your team's boundaries. Your automatic answerer uses them from its next answer.` });
-  } catch (err) {
-    return toolError(`nothing was accepted (${describeError(err)})`);
   }
 }
 
@@ -38280,7 +38388,7 @@ function requestIdArg(args) {
 async function listTeammates(client) {
   const dir = await client.directory();
   const members2 = dir.members.map((m) => {
-    const caps = isPlainObject4(m.manifest) && Array.isArray(m.manifest.capabilities) ? m.manifest.capabilities.map((c) => ({
+    const caps = isPlainObject3(m.manifest) && Array.isArray(m.manifest.capabilities) ? m.manifest.capabilities.map((c) => ({
       name: c.name,
       title: c.title,
       description: c.description,
@@ -38288,7 +38396,7 @@ async function listTeammates(client) {
       params: c.params,
       required: c.required ?? []
     })) : [];
-    const shares = isPlainObject4(m.manifest) && Array.isArray(m.manifest.shares) ? m.manifest.shares.map((x) => x?.name).filter((n) => typeof n === "string") : [];
+    const shares = isPlainObject3(m.manifest) && Array.isArray(m.manifest.shares) ? m.manifest.shares.map((x) => x?.name).filter((n) => typeof n === "string") : [];
     return { member: m.member, last_seen: m.last_seen, published_at: m.published_at, capabilities: caps, shares };
   });
   return toolJson({
@@ -38303,7 +38411,7 @@ async function requestStatus(client, args) {
   const labelled = neutraliseDeep(status);
   return toolJson({
     ...labelled,
-    teammate_authored_data: `${TEAMMATE_DATA_LABEL} The question and every progress text are teammate-authored.`
+    teammate_authored_data: `${TEAMMATE_DATA_LABEL} The question and every progress text, and every answer (each recipient's answer and answer_preview), are teammate-authored.`
   });
 }
 async function askQuestion(client, args) {
@@ -38331,7 +38439,12 @@ async function askQuestion(client, args) {
   if (ack !== void 0) body.ack_timeout_seconds = ack;
   if (answer !== void 0) body.answer_timeout_seconds = answer;
   const res = await client.createRequest(body);
-  return toolJson({ request_id: res.request_id, recipients: res.recipients });
+  return toolJson({
+    request_id: res.request_id,
+    recipients: res.recipients,
+    // M11-SPEC §4: answers can also be followed in the browser.
+    follow_in_console: `Answers can also be followed in the team console: ${consoleUrl(client.url)} (the Ask page).`
+  });
 }
 async function invokeCapability(client, args) {
   const bad = unknownKey(args, ["member", "capability", "params"]);
@@ -38372,7 +38485,7 @@ async function reply(client, args, active) {
   if (hasLoneSurrogate(text)) return toolError("text contains a lone surrogate");
   let data = null;
   if (args.data !== void 0 && args.data !== null) {
-    if (!isPlainObject4(args.data)) return toolError("data must be a JSON object");
+    if (!isPlainObject3(args.data)) return toolError("data must be a JSON object");
     if (Buffer.byteLength(JSON.stringify(args.data), "utf8") > REPLY_DATA_LIMIT2) {
       return toolError("data is larger than 64 KiB");
     }
@@ -38626,41 +38739,31 @@ var AskerConnection = class {
   }
   /** One attempt; returns how long to wait before the next look. */
   async tryConnect(fp) {
-    let c;
-    try {
-      c = connectionFromEnv(this.env);
-    } catch (err) {
-      this.problem = err instanceof NotConnected ? null : describeError(err);
-      this.note(err instanceof NotConnected ? "not connected: waiting for /team-relay:login" : `not connected: ${describeError(err)}`);
-      return 2e3;
-    }
-    let client;
-    try {
-      client = new RelayClient({ url: c.url, team: c.team, token: c.token });
-    } catch (err) {
-      this.problem = describeError(err);
-      this.note(`not connected: ${this.problem}`);
-      return 2e3;
-    }
-    let me;
-    try {
-      me = await client.me({ attempts: 1, timeoutMs: 15e3 });
-    } catch (err) {
-      if (err instanceof RelayError && err.status === 401 && c.mode === "credential") {
+    const attempt = await connectOnce(this.env);
+    switch (attempt.kind) {
+      case "not_signed_in":
+        this.problem = null;
+        this.note("not connected: waiting for /team-relay:login");
+        return 2e3;
+      case "config":
+        this.problem = attempt.problem;
+        this.note(`not connected: ${this.problem}`);
+        return 2e3;
+      case "refused":
         this.refusedAt = fp;
         this.problem = null;
         this.note(`not connected: ${SIGN_IN_AGAIN}`);
         return 2e3;
-      }
-      this.problem = `the relay did not answer (${describeError(err)})`;
-      this.note(`not connected yet: ${this.problem}; trying again`);
-      return backoffDelay(this.failures++, { baseMs: 2e3, maxMs: 6e4 });
+      case "unreachable":
+        this.problem = attempt.problem;
+        this.note(`not connected yet: ${this.problem}; trying again`);
+        return backoffDelay(this.failures++, { baseMs: 2e3, maxMs: 6e4 });
+      case "wrong_team":
+        this.problem = attempt.problem;
+        this.note(`not connected: ${this.problem}`);
+        return 6e4;
     }
-    if (me.team !== client.team || !MEMBER_RE.test(me.member)) {
-      this.problem = "the relay answered for a different team";
-      this.note(`not connected: ${this.problem}`);
-      return 6e4;
-    }
+    const { client, me, connection: c } = attempt;
     this.failures = 0;
     this.problem = null;
     const stopper = new Stopper();
@@ -38880,16 +38983,6 @@ var AskerConnection = class {
 function autoAnswer(env) {
   return (env.TEAM_RELAY_AUTO_ANSWER ?? "").trim() !== "0";
 }
-function hostConnection(c, env, credentialsFile) {
-  return {
-    mode: c.mode,
-    url: c.url,
-    team: c.team,
-    ...c.mode === "credential" ? { credentialsFile } : {},
-    ...c.mode === "token" ? { tokenFile: configValue(env.RELAY_TOKEN_FILE), token: configValue(env.RELAY_TOKEN) } : {},
-    ...c.mode === "google" ? { gcloudAccount: configValue(env.RELAY_GCLOUD_ACCOUNT) } : {}
-  };
-}
 var SIGNED_IN_WITH = {
   credential: "device credential (/team-relay:login)",
   google: "gcloud identity",
@@ -38909,7 +39002,7 @@ function withNote(result, note, extra) {
   if (!result.isError) {
     try {
       const value = JSON.parse(text);
-      if (isPlainObject4(value)) return toolJson({ ...value, ...extra, channel_session: false, channel_note: note });
+      if (isPlainObject3(value)) return toolJson({ ...value, ...extra, channel_session: false, channel_note: note });
     } catch {
     }
   }
@@ -38921,7 +39014,7 @@ function elicitFor(server) {
   if (!server.getClientCapabilities()?.elicitation) return null;
   return async (params, timeoutMs) => {
     const res = await server.elicitInput({ mode: "form", message: params.message, requestedSchema: params.requestedSchema }, { timeout: timeoutMs });
-    const content = isPlainObject4(res.content) ? res.content : void 0;
+    const content = isPlainObject3(res.content) ? res.content : void 0;
     return { action: res.action, ...content ? { content } : {} };
   };
 }
@@ -39003,7 +39096,7 @@ async function main() {
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const name = req.params.name;
     const args = req.params.arguments ?? {};
-    if (!isPlainObject4(args)) return noted(toolError("arguments must be an object"));
+    if (!isPlainObject3(args)) return noted(toolError("arguments must be an object"));
     const result = await callTool(name, args, extra);
     if (name === "ask_question" || name === "invoke_capability") return noted(result, { where_answers_appear: answersAppearNote(env) });
     return noted(result);
@@ -39036,6 +39129,21 @@ async function main() {
               } catch {
                 return null;
               }
+            },
+            // M11-SPEC §2: what the member accepted is the relay's, never the local file's.
+            acceptance: async () => {
+              const live2 = liveNow();
+              if (!live2) return null;
+              try {
+                const a = await live2.client.acceptance({ attempts: 1, timeoutMs: 5e3 });
+                return typeof a?.version === "number" && Number.isSafeInteger(a.version) && a.version >= 0 ? a.version : null;
+              } catch {
+                return null;
+              }
+            },
+            console: () => {
+              const live2 = liveNow();
+              return live2 ? consoleUrl(live2.client.url) : null;
             }
           });
         }

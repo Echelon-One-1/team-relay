@@ -23,11 +23,14 @@ asker polls `replies` or anyone reads a request.
 | `relay/jsonutil.py` | the strict body parser (§11.9), canonical JSON and hashing |
 | `relay/models.py` | request bodies, strict, `extra="forbid"` |
 | `relay/manifest.py` | schema validation, the §3.3 checks, RE2 patterns (§11.1), param validation with defaults (§3.5, §11.2) |
-| `relay/store.py` | the store protocol: `create_request`, `mutate_request`, `set_cursor`, `count_quota`, `mutate_roster`, `mutate_login`, `redeem_code`, `create_team`, `delete_team`, `purge_team` and reads; `stamp_deliveries`, the one delivery-time rule both stores run (M2 §3.2); `monotonic_updated_at` (M2 §7.1) |
+| `relay/member_state.py` | M11 §2, §3: the strict bodies of `PUT me/acceptance` and `PUT me/status`, and their JSON |
+| `relay/setup_script.py` | M11 §5: `RELAY_PLUGIN_MARKETPLACE`, and the setup script rendered once at start for `GET /setup` |
+| `relay/static/setup.sh` | M11 §5: the setup script's template (package data; written with the plugin) |
+| `relay/store.py` | the store protocol: `create_request`, `mutate_request`, `set_cursor`, `count_quota`, `mutate_roster`, `mutate_login`, `redeem_code`, `create_team`, `delete_team`, `purge_team`, `set_boundaries`, `set_acceptance`, `set_member_status` and reads; `stamp_deliveries`, the one delivery-time rule both stores run (M2 §3.2); `monotonic_updated_at` (M2 §7.1) |
 | `relay/store_memory.py`, `relay/store_firestore.py` | the two stores; one contract suite covers both |
 | `relay/service.py` | the state machine, the sweep (§4), audit (§7), tool events, the activity feed and the directory's stats (M2 §3); store-agnostic |
 | `relay/app.py` | `create_app(settings, store, oauth=…)`; `relay.app:app` builds one from env; authentication (device credentials, Google ID tokens, static tokens, delegates with `X-Relay-On-Behalf-Of`, the any-team delegate), the delegate routes (M3 §2, M6 §3, M9 §5), the account and admin routes (M9 §2, §4), the login pages (M5 §2) |
-| `firestore.indexes.json` | the one composite index, for the sweep (`asker ASC, next_deadline ASC`); the feed, the stats, the roster, the credentials and the teams need none |
+| `firestore.indexes.json` | the composite indexes: the sweep's (`asker ASC, next_deadline ASC`) and, M11 §4, a member's recent questions (`asker ASC, kind ASC, created_at DESC`); the feed, the stats, the roster, the credentials and the teams need none |
 | `tests/fake_google.py`, `tests/fake_oauth_app.py` | a fake Google for the tests, and a launcher that serves the relay with it for the plugin's e2e (below) |
 | `Dockerfile` | the Cloud Run image |
 
@@ -70,6 +73,7 @@ points them at another copy (tests only).
 | `RELAY_DRIVE_CLIENT_FILE` | unset | M10-SPEC §2a: path to the Desktop OAuth client members connect Google Drive with: Google's downloaded JSON (`{"installed": {client_id, client_secret, …}}`) or a flat `{client_id, client_secret}`; on Cloud Run the optional mounted secret `team-relay-drive-client` (`/secrets/drive-oauth/client.json`). No setting or no file: `GET /drive-client` is `404 drive_not_configured`. A `"web"` client, an unreadable file, or the login's own client id is a startup error |
 | `RELAY_FORWARDED_FOR_HOPS` | `1`; required on Cloud Run when `RELAY_PUBLIC_URL` is not a `run.app` address | M10-SPEC §5: how many right-most `X-Forwarded-For` entries Google appends in front of the relay; the per-IP limits count the left-most of them. `1` when Cloud Run is reached directly (its front end's entry); `2` behind the external Application Load Balancer (the client's address, then the forwarding rule's). `1`, `2` or `3`. Check the `x_forwarded_for_hops` field of `login_started` on the live service |
 | `RELAY_ALLOWED_DOMAINS` | unset (any domain) | M10-SPEC §7.2: comma-separated lower-case domains, e.g. `example.com`; set it for any deployment meant for one organisation. When set, every Google identity needs a verified email whose domain is exactly one of them (a subdomain is not its parent) and an `hd` claim equal to that domain; see "Allowed domains" below. A malformed or empty entry, or a seed member or admin in the team file outside them, is a startup error |
+| `RELAY_PLUGIN_MARKETPLACE` | unset | M11-SPEC §5: the plugin's marketplace as a GitHub `owner/repo` (`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`), written into the setup script `GET /setup` serves. Malformed: a startup error; set with a `RELAY_PUBLIC_URL` that is not an `https` origin: a startup error. Unset (or `RELAY_PUBLIC_URL` unset, or no `relay/static/setup.sh` in the image): `/setup` is `404` |
 | `RELAY_AUTH_MODE` | `google` | `google` or `static`; `static` is refused when `K_SERVICE` is set |
 | `RELAY_AUDIENCE` | required for `google` | the accepted ID token audiences, comma-separated (on Cloud Run: gcloud's OAuth client id and the service URL); whitespace around an entry is dropped, an empty entry is a startup error |
 | `RELAY_MANIFEST_SCHEMA` | `../schema/manifest.schema.json` from this directory | the image sets `/app/schema/manifest.schema.json` |
@@ -268,7 +272,8 @@ like any refused mutation.
 
 ### Delegates that manage the roster (M6-SPEC §3)
 
-`scope` is `read` (as in M3) or a list holding `read` and optionally `manage-roster`. With
+`scope` is `read` (as in M3) or a list holding `read` and optionally `manage-roster`,
+`manage-teams` (M9) and `member-self` (M11, below); any other value is a startup error. With
 `manage-roster` a delegate may also call `POST /roster`, `PATCH` and `DELETE
 /roster/{member}` (`ROSTER_MUTATIONS` in `relay/app.py`); the service then requires the
 member it names to be an owner, as for anyone. Its changes are audited with the owner as the
@@ -643,6 +648,52 @@ matches `plugin/src/boundaries-types.ts`.
   `boundaries_set` with `version N` (and `; via delegate`) in the detail, never the text;
   refusals are audited like any other mutation's.
 
+## A member's own state and asking from the console (M11-SPEC §2-§5, 10 Nov 2026)
+
+The JSON matches `plugin/src/boundaries-types.ts` (`Acceptance`, `MemberStatusBody`,
+`MembersStatus`, `MyRequest`).
+
+- `GET /v1/teams/{team}/me/acceptance` (the member; a delegate reading for them) → `200
+  {"version": n, "accepted_at": iso | null}`; never accepted: `version: 0`.
+- `PUT /v1/teams/{team}/me/acceptance` with `{"version": n}` (strict: an integer
+  0..2^31-1, nothing else; `400 invalid_body`) → `200`, the same shape. Only the caller's own
+  (a `member-self` delegate's caller is its viewer): no route names another member, so an
+  owner accepts for nobody. `version` must be the current boundaries version (`409
+  version_conflict`); boundaries never set: `409 not_set`; accepting the version already
+  accepted changes nothing. Checked in one transaction with the boundaries and the member's
+  roster entry. Counted per member and hour (`roster_mutations_per_hour`, its own counter).
+  Audited as `boundaries_accepted` with `version N` (and `; via delegate`). Stored at
+  `teams/{team}/acceptances/{member}` `{version, accepted_at}`.
+- `PUT /v1/teams/{team}/me/status` (the member only; never a delegate) with the background
+  answerer's report (strict, every field required: `daemon {version ≤32 chars, started_at}`,
+  `claude {found, signed_in}`, `folders {repo_roots 0-64, clones 0-10000, extra_folders
+  0-64}`, `drive {connected}`, `self_test {ok, at, reason ≤200 chars | null}`; times RFC 3339
+  with a zone, answered in the relay's form) → `200` the status with the relay's `seen_at`. At
+  most one write per member per 20 s (`429 rate_limited`). Counts, booleans and times only;
+  not audited. Stored, overwritten, at `teams/{team}/member_status/{member}`.
+- `GET /v1/teams/{team}/members/status` (any active member; a delegate reading for one) →
+  `{"members": [{member, status | null, answering, accepted_version}], "boundaries_version"}`
+  for every active member; `answering` is a status received in the last 180 s.
+- `GET /v1/teams/{team}/requests/{id}` also answers each visible recipient's
+  `answer_preview` and, to the asker only (a delegate reading for the asker included),
+  `answer`: the full reply text. It is kept at `teams/{team}/requests/{id}/answers/{member}`
+  (`expire_at` the request's), written in the reply's transaction, not on the request
+  document (a broadcast's answers together could pass Firestore's 1 MiB).
+- `GET /v1/teams/{team}/me/requests?limit=1..50` (default 20; the member, or a delegate
+  reading for them) → `{"requests": [{id, to, created_at, question_preview}]}`: the caller's
+  own unexpired questions, newest first, `to` `"*"` for a broadcast, the first 200 code points
+  of the question.
+- The three reads count per member and minute (`reads_per_minute`, a counter each).
+- Delegates with `member-self` (`MEMBER_SELF_MUTATIONS` in `relay/app.py`) may also `PUT
+  me/acceptance` and `POST /requests` for the viewer they name, under the viewer's limits;
+  a capability call from a delegate is `403`. Those requests are audited with `via
+  delegate`.
+- A member's acceptance and status are deleted in the roster transaction that removes the
+  member, and with the team's purge.
+- `GET /setup` (no authentication, outside `/v1`) → the setup script with `__RELAY_URL__` and
+  `__MARKETPLACE__` replaced, `text/x-shellscript; charset=utf-8`, `Cache-Control: no-store`;
+  read once at start. See `RELAY_PLUGIN_MARKETPLACE`.
+
 ## Google Drive's client (M10-SPEC §2a)
 
 `GET /v1/teams/{team}/drive-client` (any active member, by a device credential or a Google
@@ -930,13 +981,14 @@ A question sent while its recipient's answering session is not running waits in 
 - Build from `multiagent/`: `docker build -f relay/Dockerfile .`. The image holds no team
   config; mount it (Secret Manager volume) and point `RELAY_TEAM_CONFIG` at it. The M2 shape
   (service, database, env) is in `docs/M2-SPEC.md` §1.
-- Create the composite index from `firestore.indexes.json` before the first sweep runs. The
+- Create the composite indexes from `firestore.indexes.json` before the first sweep runs
+  (M11: and before the console lists a member's questions). The
   activity feed and the stats use only single-field indexes on `updated_at`, which Firestore
   creates automatically (do not add a single-field exemption for `updated_at`).
 - Switch on TTL for the `expire_at` field on every collection group that carries it:
   `messages`, `requests`, `progress`, `idempotency`, `audit`, `counters`, (M5, M6)
-  `credentials`, `logins`, `login_codes`, `login_limits`, `retired`, and (M9)
-  `credential_teams`, `admin_audit`, for example
+  `credentials`, `logins`, `login_codes`, `login_limits`, `retired`, (M9)
+  `credential_teams`, `admin_audit`, and (M11) `answers`, for example
   `gcloud firestore fields ttls update expire_at --collection-group=messages --enable-ttl`.
   Reads already ignore expired documents, because TTL deletion lags (a day or more).
 - `max-instances` is not a correctness requirement: every invariant is a Firestore

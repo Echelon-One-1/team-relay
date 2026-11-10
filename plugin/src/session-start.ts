@@ -15,6 +15,7 @@ import { readSummary, waitingSentence } from './waiting.js';
 import { invitationsSentence, readInvitations } from './invitations.js';
 import { approvalsSentence, readApprovalsState, statePath } from './approvals-state.js';
 import { boundariesSentence, validBoundaries } from './boundary-set.js';
+import { consoleUrl } from './console-url.js';
 import { memberFoldersPath, readTeamSettings, sinceOf, type TeamSettings } from './member-folders.js';
 import type { TeamBoundaries } from './boundaries-types.js';
 
@@ -49,11 +50,13 @@ async function relayStatusLine(env: NodeJS.ProcessEnv): Promise<string> {
     // silence when it cannot be read.
     // M10-SPEC: the team's boundaries, read beside /me within 3 s; silence when they cannot be read.
     // The sentence says whether the member accepted them (§7.1).
-    const [me, summary, invitations, boundaries] = await Promise.all([
+    // M11-SPEC §2: what the member accepted is the relay's; silence about boundaries when it cannot be read.
+    const [me, summary, invitations, boundaries, accepted] = await Promise.all([
       client.me(),
       readSummary(client, 3000),
       readInvitations(client, 3000),
       readBoundaries(client, 3000),
+      readAccepted(client, 3000),
     ]);
     // Only id-shaped values reach the session's context.
     if (!MEMBER_RE.test(me.member) || !TEAM_RE.test(me.team)) throw new Error('unexpected answer from the relay');
@@ -61,7 +64,10 @@ async function relayStatusLine(env: NodeJS.ProcessEnv): Promise<string> {
     const mates = teammates.length ? teammates.join(', ') : 'none yet';
     const waiting = summary ? waitingSentence(summary, Date.now(), answeringCommand(env)) : null;
     const invited = invitationsSentence(invitations);
-    const bounded = boundaries?.boundaries && boundaries.team === me.team ? boundariesSentence(boundaries.boundaries, boundaries.version, teamSettings(env, me.team), sinceOf(boundaries)) : null;
+    const bounded =
+      boundaries?.boundaries && boundaries.team === me.team && accepted !== null
+        ? boundariesSentence(boundaries.boundaries, boundaries.version, teamSettings(env, me.team), sinceOf(boundaries), accepted, consoleUrl(conn.url))
+        : null;
     return `team-relay: you are ${me.member} in team ${me.team}; teammates: ${mates}. Use list_teammates, ask_question and invoke_capability to reach them.${waiting ? ` ${waiting}` : ''}${invited ? ` ${invited}` : ''}${bounded ? ` ${bounded}` : ''} ${TRUST}`;
   } catch (err) {
     if (err instanceof RelayError && err.status === 401 && conn.mode === 'credential') {
@@ -76,6 +82,15 @@ async function relayStatusLine(env: NodeJS.ProcessEnv): Promise<string> {
   }
 }
 
+async function readAccepted(client: RelayClient, timeoutMs: number): Promise<number | null> {
+  try {
+    const a = await client.acceptance({ attempts: 1, timeoutMs });
+    return typeof a?.version === 'number' && Number.isSafeInteger(a.version) && a.version >= 0 ? a.version : null;
+  } catch {
+    return null;
+  }
+}
+
 async function readBoundaries(client: RelayClient, timeoutMs: number): Promise<TeamBoundaries | null> {
   try {
     const tb = await client.boundaries({ attempts: 1, timeoutMs });
@@ -85,7 +100,7 @@ async function readBoundaries(client: RelayClient, timeoutMs: number): Promise<T
   }
 }
 
-/** M10-SPEC §7.1: the member's settings for this team (folders and what they accepted). */
+/** M10-SPEC §7.1: the member's settings for this team (its folders; acceptance is the relay's, M11-SPEC §2). */
 function teamSettings(env: NodeJS.ProcessEnv, team: string): TeamSettings | { error: string } {
   try {
     return readTeamSettings(memberFoldersPath(env), env, team);

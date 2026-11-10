@@ -24,9 +24,16 @@ Who the caller is (M5-SPEC §3, §4; M6-SPEC §1):
 A delegate may reach only the GET routes in DELEGATE_ROUTES, and with ``manage-roster`` the
 roster mutations in ROSTER_MUTATIONS (the service then requires the member it names to be an
 owner, as for anyone), and with ``manage-teams`` an owner's deletion of the team
-(TEAM_MUTATIONS, M9-SPEC §7.7). A delegate with ``team: "*"`` (M9-SPEC §5) acts in the team
-the URL names, for the member of that team its header's email is; a team that is not one and
-a team the email is not a member of are the same ``404`` (M9-SPEC §7.3).
+(TEAM_MUTATIONS, M9-SPEC §7.7), and with ``member-self`` the viewer's own acceptance of the
+boundaries and the viewer's own questions (MEMBER_SELF_MUTATIONS, M11-SPEC §2, §4; the service
+refuses a capability call from a delegate). ``PUT me/status`` is never a delegate's (M11-SPEC
+§3). No route names another member's acceptance: an owner accepts for nobody. A delegate with
+``team: "*"`` (M9-SPEC §5) acts in the team the URL names, for the member of that team its
+header's email is; a team that is not one and a team the email is not a member of are the
+same ``404`` (M9-SPEC §7.3).
+
+``GET /setup`` (M11-SPEC §5) is unauthenticated and outside ``/v1``: the setup script, rendered
+at start (:mod:`relay.setup_script`); 404 when it is not configured.
 
 A roster entry that is only invited (M9-SPEC §7.2) is not a member anywhere here: it never
 resolves a principal, a delegate's email or a credential.
@@ -115,6 +122,11 @@ DELEGATE_ROUTES = frozenset(
         "/v1/teams/{team}/inbox/summary",
         # M10-SPEC §1: the console shows the team's boundaries (read-only to non-owners).
         "/v1/teams/{team}/boundaries",
+        # M11-SPEC §2, §3, §4: the Join, Team and Ask pages: the viewer's acceptance, the
+        # team's status and the viewer's own recent questions.
+        "/v1/teams/{team}/me/acceptance",
+        "/v1/teams/{team}/members/status",
+        "/v1/teams/{team}/me/requests",
     }
 )
 # M6-SPEC §3: with scope manage-roster, a delegate may also make these, by (method, route).
@@ -129,6 +141,15 @@ ROSTER_MUTATIONS = frozenset(
 )
 # M9-SPEC §7.7: with scope manage-teams, a delegate may delete a team for its owner.
 TEAM_MUTATIONS = frozenset({("DELETE", "/v1/teams/{team}")})
+# M11-SPEC §2, §4, §8: with scope member-self, a delegate acts as its viewer for these: the
+# viewer's own acceptance and the viewer's own questions (never a capability call). Never
+# PUT me/status.
+MEMBER_SELF_MUTATIONS = frozenset(
+    {
+        ("PUT", "/v1/teams/{team}/me/acceptance"),
+        ("POST", "/v1/teams/{team}/requests"),
+    }
+)
 # M9-SPEC §7.6: the console's report of the viewer's address: a salted SHA-256, hex.
 CLIENT_IP_HASH_HEADER = "x-relay-client-ip-hash"
 CLIENT_IP_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -200,6 +221,10 @@ def _audited_action(request: Request) -> str | None:
         return "manifest.publish"
     if path.endswith("/boundaries"):
         return "boundaries_set"
+    if path.endswith("/me/acceptance"):
+        return "boundaries_accepted"
+    if path.endswith("/me/status"):
+        return None  # M11-SPEC §3: the answerer's status, bookkeeping like a cursor move
     for suffix in ("ack", "reply", "progress"):
         if path.endswith("/" + suffix):
             return f"request.{suffix}"
@@ -577,9 +602,12 @@ def create_app(
             remember_member(principal, team)
         route_path = getattr(request.scope.get("route"), "path", None)
         reads = request.method == "GET" and route_path in DELEGATE_ROUTES
+        route = (request.method, route_path)
         manages = (
-            delegate.manages_roster and (request.method, route_path) in ROSTER_MUTATIONS
-        ) or (delegate.manages_teams and (request.method, route_path) in TEAM_MUTATIONS)
+            (delegate.manages_roster and route in ROSTER_MUTATIONS)
+            or (delegate.manages_teams and route in TEAM_MUTATIONS)
+            or (delegate.acts_as_member and route in MEMBER_SELF_MUTATIONS)
+        )
         if team != identity.team or not (reads or manages):
             # A delegate's refusals go to stdout, never to the audit log: the member it names
             # did not attempt them (M3-SPEC §2).
@@ -850,6 +878,17 @@ def create_app(
     async def healthz() -> dict[str, bool]:
         return {"ok": True}
 
+    # M11-SPEC §5: the one-command setup script; no authentication, the same for everyone.
+    @app.get("/setup")
+    async def setup() -> Response:
+        if settings.setup_script is None:
+            raise not_found()
+        return Response(
+            content=settings.setup_script,
+            media_type="text/x-shellscript; charset=utf-8",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
     # M2-SPEC §1: Cloud Run's front end reserves some paths ending in "z", so the same
     # health check is also served here. No credentials at the app (Cloud Run IAM still
     # applies in front of it).
@@ -891,6 +930,32 @@ def create_app(
             service, caller, "boundaries_set", lambda: read_json_body(request)
         )
         return await service.boundaries_set(caller, raw)
+
+    # M11-SPEC §2: the caller's own acceptance of the boundaries. No route names a member.
+    @app.get("/v1/teams/{team}/me/acceptance")
+    async def acceptance_get(caller: Caller = CallerDep) -> dict[str, Any]:
+        return await service.acceptance_get(caller)
+
+    @app.put("/v1/teams/{team}/me/acceptance")
+    async def acceptance_put(request: Request, caller: Caller = CallerDep) -> dict[str, Any]:
+        raw = await _read_guarded(
+            service, caller, "boundaries_accepted", lambda: read_json_body(request)
+        )
+        return await service.acceptance_set(caller, raw)
+
+    # M11-SPEC §3: the background answerer's status (the member itself only) and the team's.
+    @app.put("/v1/teams/{team}/me/status")
+    async def status_put(request: Request, caller: Caller = CallerDep) -> dict[str, Any]:
+        return await service.status_set(caller, await read_json_body(request))
+
+    @app.get("/v1/teams/{team}/members/status")
+    async def members_status(caller: Caller = CallerDep) -> dict[str, Any]:
+        return await service.members_status(caller)
+
+    # M11-SPEC §4: the caller's own recent questions.
+    @app.get("/v1/teams/{team}/me/requests")
+    async def my_requests(request: Request, caller: Caller = CallerDep) -> dict[str, Any]:
+        return await service.my_requests(caller, request.query_params.get("limit"))
 
     # M10-SPEC §2a: the Desktop OAuth client members connect Drive with. Any active member
     # (a device credential or a Google identity); not a delegate (not in DELEGATE_ROUTES).
@@ -1068,6 +1133,7 @@ def create_app_from_env() -> FastAPI:
         teams=sorted(settings.team_config.teams),
         login=settings.login_enabled,
         drive_client=settings.drive_client is not None,
+        setup_script=settings.setup_script is not None,
         forwarded_for_hops=settings.forwarded_for_hops,
     )
     return create_app(settings, store)

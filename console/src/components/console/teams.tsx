@@ -157,9 +157,15 @@ export function TeamSwitcher() {
   const current = teams.teams.find((t) => t.team === nav.team) ?? null
   const invitations = teams.invitations.length
   const left = slotsLeft(teams)
+  // Another team opens on the same page (an admin goes back to a team's own page).
   const pick = (team: string) => {
     setOpen(false)
-    nav.selectTeam(team)
+    nav.selectTeam(team, undefined, nav.view === 'admin' ? 'team' : nav.view)
+  }
+  // M11 §6: a team just joined opens on its Join checklist.
+  const joined = (team: string) => {
+    setOpen(false)
+    nav.selectTeam(team, undefined, 'join')
   }
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -190,7 +196,7 @@ export function TeamSwitcher() {
           {teams.teams.length > 0 ? (
             <ul className="flex flex-col gap-0.5" aria-label="Your teams">
               {teams.teams.map((t) => (
-                <TeamOption key={t.team} t={t} current={nav.view === 'team' && t.team === nav.team} onPick={() => pick(t.team)} />
+                <TeamOption key={t.team} t={t} current={nav.view !== 'admin' && t.team === nav.team} onPick={() => pick(t.team)} />
               ))}
             </ul>
           ) : (
@@ -201,7 +207,7 @@ export function TeamSwitcher() {
               <p className="text-[11.5px] font-medium text-subtle">
                 {invitations === 1 ? 'An invitation' : `${invitations} invitations`}
               </p>
-              <InvitationList invitations={teams.invitations} onAccepted={pick} />
+              <InvitationList invitations={teams.invitations} onAccepted={joined} />
             </div>
           ) : null}
           <div className="mt-1 flex flex-col gap-0.5 border-t border-hairline pt-1">
@@ -558,7 +564,7 @@ export function NoTeamPage({ teams, lost }: { teams: Teams; lost?: string | null
             <p className="text-[12px] font-medium text-subtle">
               {teams.invitations.length === 1 ? 'You have an invitation' : `You have ${teams.invitations.length} invitations`}
             </p>
-            <InvitationList invitations={teams.invitations} onAccepted={(team) => nav.selectTeam(team)} />
+            <InvitationList invitations={teams.invitations} onAccepted={(team) => nav.selectTeam(team, undefined, 'join')} />
           </div>
         ) : null}
         <div className="flex flex-wrap items-center gap-2 border-t border-hairline pt-4">

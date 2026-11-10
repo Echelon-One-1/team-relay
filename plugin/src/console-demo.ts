@@ -25,6 +25,12 @@
 // listing. She can create teams (at most 3), accept or decline, and delete, by the relay's
 // rules and with its refusals; a new team is quiet (no traffic). Nothing leaves the process.
 //
+// M11-SPEC §2-§4: alice accepted version 1 of `demo`'s boundaries (they are at 2 now, so the
+// console asks her to accept again); each member's background answerer reports its status
+// (bob is fully set up, alice has not connected Drive, carol's Claude Code is signed out), and
+// questions alice asks from the console are answered by bob and carol on a short script. The
+// quiet teams have no statuses and nobody answers there.
+//
 // M10-SPEC §1: each team has boundaries. `demo` and `ops` have them set (alice owns `demo`, so
 // she can change them; she is a member of `ops`, so she reads them only); `research` and any
 // new team have none yet. A change needs the current version (else 409 version_conflict), as
@@ -32,7 +38,7 @@
 
 import { createHash } from 'node:crypto';
 import { nextSince } from './boundaries-rule.js';
-import type { Boundaries, SetBoundariesBody, TeamBoundaries } from './boundaries-types.js';
+import type { Acceptance, Boundaries, MemberStatusEntry, MembersStatus, MyRequest, SetBoundariesBody, TeamBoundaries } from './boundaries-types.js';
 import { defaultManifestPath } from './exposed.js';
 import { loadManifest, type Capability, type Manifest } from './manifest.js';
 
@@ -92,19 +98,20 @@ type ProgressItem =
 // ---------------------------------------------------------------------------------------
 // Scripts: offsets in ms from the request's creation.
 
+// A step names a member of any team (a question asked from the console may go to a quiet team).
 type Step =
-  | { at: number; to: Member; do: 'deliver' | 'ack' | 'answer_delivered' }
-  | { at: number; to: Member; do: 'answer'; text: string }
-  | { at: number; to: Member; do: 'tool'; tool: string; status: 'ok' | 'error'; duration_ms: number }
+  | { at: number; to: string; do: 'deliver' | 'ack' | 'answer_delivered' }
+  | { at: number; to: string; do: 'answer'; text: string }
+  | { at: number; to: string; do: 'tool'; tool: string; status: 'ok' | 'error'; duration_ms: number }
   // M4-SPEC §2: a permission request in the answering session (no duration).
-  | { at: number; to: Member; do: 'waiting'; tool: string }
-  | { at: number; to: Member; do: 'progress'; text: string; pct: number };
+  | { at: number; to: string; do: 'waiting'; tool: string }
+  | { at: number; to: string; do: 'progress'; text: string; pct: number };
 
 type Script = {
   offset: number;
   kind: 'question' | 'capability';
-  asker: Member;
-  to: Member[];
+  asker: string;
+  to: string[];
   broadcast: boolean;
   question?: string;
   capability?: { name: string; params: Record<string, unknown> };
@@ -283,6 +290,8 @@ function requestId(epoch: number, cycle: number, index: number): string {
 type Materialised = {
   doc: ActivityRequest; // the full (participant) view
   progress: ProgressItem[];
+  /** M11-SPEC §4: each recipient's full answer (the asker reads it on the request). */
+  answers: Record<string, string>;
 };
 
 function materialise(s: Script, created: number, id: string, now: number, environments: Map<string, string>): Materialised | null {
@@ -302,6 +311,7 @@ function materialise(s: Script, created: number, id: string, now: number, enviro
     };
   }
   const progress: ProgressItem[] = [];
+  const answers: Record<string, string> = {};
   let updated = created;
   const ackDeadline = created + s.ackTimeout * 1000;
   const answerDeadline = created + s.answerTimeout * 1000;
@@ -338,6 +348,7 @@ function materialise(s: Script, created: number, id: string, now: number, enviro
           r.acked_at ??= t;
           r.answered_at = t;
           r.answer_preview = step.text.slice(0, PREVIEW_CHARS);
+          answers[step.to] = step.text;
           break;
         case 'answer_delivered':
           r.answer_delivered_at ??= t;
@@ -375,7 +386,7 @@ function materialise(s: Script, created: number, id: string, now: number, enviro
     recipients,
     participant: true,
   };
-  return { doc, progress };
+  return { doc, progress, answers };
 }
 
 /**
@@ -485,6 +496,23 @@ export const DEMO_BOUNDARIES: Boundaries = {
 /** M6-SPEC §1: at most this many members per team. */
 export const ROSTER_MAX = 50;
 
+/** M11-SPEC §4: how the scripted teammates answer a question asked from the console (synthetic). */
+const DEMO_REPLIES: Record<string, { ack: number; at: number; text: string }> = {
+  bob: {
+    ack: 1500,
+    at: 6000,
+    text:
+      'From the orders-service repository: the export job is jobs/export_invoices, and its retries are set in config/jobs.yaml (three attempts, backoff from 30 s).\n\nI read README.md and config/jobs.yaml to answer.',
+  },
+  carol: {
+    ack: 2500,
+    at: 14_000,
+    text: 'I could not find that in what I answer from. bob owns the worker service; he will know.',
+  },
+};
+/** The questions a demo team keeps from the console (the oldest go first). */
+const ASKED_MAX = 200;
+
 export class BadRequest extends Error {
   constructor(readonly detail: string) {
     super(detail);
@@ -506,6 +534,10 @@ export class DemoTeam {
   private readonly rosterEntries: DemoRosterEntry[];
   /** M10-SPEC §1, in memory. */
   private bounds: TeamBoundaries;
+  /** M11-SPEC §2, in memory: the boundaries version the viewer accepted (0: never). */
+  private accepted: Acceptance;
+  /** M11-SPEC §4, in memory: questions the viewer asked from the console, oldest first. */
+  private readonly asked: Array<{ id: string; created: number; script: Script }> = [];
 
   constructor(
     private readonly now: () => number = Date.now,
@@ -554,6 +586,115 @@ export class DemoTeam {
           updated_by: set.updated_by,
         }
       : { team: this.team, version: 0, boundaries: null, since: null, updated_at: null, updated_by: null };
+    this.accepted = options.roster === undefined ? { version: 1, accepted_at: iso(this.epoch - 3 * DAY_MS) } : { version: 0, accepted_at: null };
+  }
+
+  /** GET /v1/teams/{team}/me/acceptance (M11-SPEC §2): the viewer's own. Never accepted: 0. */
+  acceptance(): Acceptance {
+    return { ...this.accepted };
+  }
+
+  /**
+   * PUT /v1/teams/{team}/me/acceptance (M11-SPEC §2): the viewer accepts, for themselves, the
+   * version they were shown; it must be the current one.
+   */
+  setAcceptance(version: number): Acceptance {
+    if (this.bounds.boundaries === null) throw new RosterRefusal(409, 'not_set', 'The team has no boundaries to accept yet.');
+    if (version !== this.bounds.version) {
+      throw new RosterRefusal(409, 'version_conflict', 'The boundaries changed since you read them. Read them again.');
+    }
+    this.accepted = { version, accepted_at: iso(this.now()) };
+    return this.acceptance();
+  }
+
+  /**
+   * GET /v1/teams/{team}/members/status (M11-SPEC §3): each active member's last status (counts
+   * and booleans only), whether they answered within 180 s, and the version they accepted.
+   */
+  membersStatus(): MembersStatus {
+    const now = this.now();
+    const active = this.rosterEntries.filter((e) => e.status === 'active').map((e) => e.member);
+    const status = (o: { signedIn?: boolean; roots?: number; clones?: number; drive?: boolean; selfOk?: boolean; reason?: string; seenAgo: number }) => ({
+      daemon: { version: '0.11.0', started_at: iso(now - 5 * 3_600_000) },
+      claude: { found: true, signed_in: o.signedIn ?? true },
+      folders: { repo_roots: o.roots ?? 1, clones: o.clones ?? 7, extra_folders: 0 },
+      drive: { connected: o.drive ?? true },
+      self_test: { ok: o.selfOk ?? true, at: iso(now - 2 * 3_600_000), reason: o.reason ?? null },
+      seen_at: iso(now - o.seenAgo),
+    });
+    const entry = (member: string): MemberStatusEntry => {
+      const accepted = member === this.viewer ? this.accepted.version : 0;
+      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted };
+      const s =
+        member === 'bob'
+          ? status({ seenAgo: 25_000 })
+          : member === 'carol'
+            ? status({ signedIn: false, roots: 0, clones: 0, selfOk: false, reason: 'Claude Code is not signed in.', seenAgo: 9 * 60_000 })
+            : status({ drive: false, seenAgo: 40_000 });
+      const version = member === 'bob' ? this.bounds.version : accepted;
+      return { member, status: s, answering: now - Date.parse(s.seen_at) < 180_000, accepted_version: version };
+    };
+    return { members: active.map(entry), boundaries_version: this.bounds.version };
+  }
+
+  /** GET /v1/teams/{team}/me/requests (M11-SPEC §4): the viewer's own questions, newest first. */
+  myRequests(limit: number): { requests: MyRequest[] } {
+    const askedIds = new Set(this.asked.map((a) => a.id));
+    const mine = this.all(this.now())
+      .map((m) => m.doc)
+      .filter((d) => d.asker === this.viewer && d.kind === 'question')
+      .sort(
+        (a, b) =>
+          Date.parse(b.created_at) - Date.parse(a.created_at) ||
+          Number(askedIds.has(b.request_id)) - Number(askedIds.has(a.request_id)) ||
+          b.request_id.localeCompare(a.request_id),
+      );
+    return {
+      requests: mine.slice(0, limit).map((d) => ({
+        id: d.request_id,
+        to: d.broadcast ? '*' : Object.keys(d.recipients),
+        created_at: d.created_at,
+        question_preview: [...(d.question ?? '')].slice(0, 200).join(''),
+      })),
+    };
+  }
+
+  /**
+   * POST /v1/teams/{team}/requests as a question from the viewer (M11-SPEC §4), with the relay's
+   * refusals. On `demo`, bob answers after 6 s and carol after 14 s; nobody answers on a quiet team.
+   */
+  ask(body: { to: '*' | string[]; question: string }) {
+    const teammates = this.me().teammates;
+    let to: string[];
+    if (body.to === '*') {
+      to = [...teammates].sort();
+      if (to.length === 0) throw new RosterRefusal(400, 'bad_recipients', 'You have no teammates to broadcast to.');
+    } else {
+      if (body.to.includes(this.viewer)) throw new RosterRefusal(400, 'bad_recipients', 'You cannot send a request to yourself.');
+      if (body.to.some((m) => !teammates.includes(m))) throw new RosterRefusal(400, 'bad_recipients', "'to' names someone who is not in your team.");
+      to = [...body.to];
+    }
+    const created = this.now();
+    const id = `rq_${createHash('sha256').update(`team-relay-demo-ask:${this.team}:${this.epoch}:${this.asked.length}:${created}`).digest('hex').slice(0, 32)}`;
+    const steps: Step[] = [];
+    if (!this.quiet) {
+      for (const m of to) {
+        const reply = DEMO_REPLIES[m];
+        if (!reply) continue;
+        steps.push({ at: reply.ack - 900, to: m, do: 'deliver' }, { at: reply.ack, to: m, do: 'ack' }, { at: reply.at, to: m, do: 'answer', text: reply.text });
+      }
+    }
+    const script: Script = { offset: 0, kind: 'question', asker: this.viewer, to, broadcast: body.to === '*', question: body.question, ackTimeout: 120, answerTimeout: 1800, steps };
+    this.asked.push({ id, created, script });
+    if (this.asked.length > ASKED_MAX) this.asked.shift();
+    return {
+      request_id: id,
+      recipients: to,
+      created: true,
+      ack_deadline: iso(created + 120_000),
+      answer_deadline: iso(created + 1_800_000),
+      expire_at: iso(created + DEMO_TTL_MS),
+    };
   }
 
   /** GET /v1/teams/{team}/boundaries (M10-SPEC §1): any member. Never set: version 0, null. */
@@ -684,6 +825,10 @@ export class DemoTeam {
   /** Every request created by `now`; expired ones only when asked for (the feed passes them). */
   private all(now: number, withExpired = false): Materialised[] {
     const out: Materialised[] = [];
+    for (const a of this.asked) {
+      const m = materialise(a.script, a.created, a.id, now, this.environments);
+      if (m && (withExpired || Date.parse(m.doc.expire_at) > now)) out.push(m);
+    }
     if (this.quiet) return out;
     const first = Math.max(0, Math.floor((now - DEMO_TTL_MS - this.epoch) / DEMO_CYCLE_MS) - 1);
     const last = Math.floor((now - this.epoch) / DEMO_CYCLE_MS);
@@ -816,12 +961,15 @@ export class DemoTeam {
     const now = this.now();
     const found = this.all(now).find((m) => m.doc.request_id === id);
     if (!found) throw new NotFound();
-    const { doc, progress } = found;
-    const isAsker = doc.asker === DEMO_ME;
-    if (!isAsker && !doc.recipients[DEMO_ME]) throw new NotFound();
-    const recipients: Record<string, { status: Status; acked_at: string | null; answered_at: string | null }> = {};
+    const { doc, progress, answers } = found;
+    const isAsker = doc.asker === this.viewer;
+    if (!isAsker && !doc.recipients[this.viewer]) throw new NotFound();
+    // M11-SPEC §4: the asker reads each recipient's full answer next to its preview.
+    type RecipientDetail = { status: Status; acked_at: string | null; answered_at: string | null; answer_preview?: string | null; answer?: string | null };
+    const recipients: Record<string, RecipientDetail> = {};
     for (const [m, r] of Object.entries(doc.recipients)) {
-      if (isAsker || m === DEMO_ME) recipients[m] = { status: r.status, acked_at: r.acked_at, answered_at: r.answered_at };
+      if (isAsker) recipients[m] = { status: r.status, acked_at: r.acked_at, answered_at: r.answered_at, answer_preview: r.answer_preview, answer: answers[m] ?? null };
+      else if (m === this.viewer) recipients[m] = { status: r.status, acked_at: r.acked_at, answered_at: r.answered_at };
     }
     return {
       request_id: doc.request_id,
@@ -836,7 +984,7 @@ export class DemoTeam {
       expire_at: doc.expire_at,
       recipients,
       progress: progress
-        .filter((p) => isAsker || p.member === DEMO_ME)
+        .filter((p) => isAsker || p.member === this.viewer)
         .map((p) =>
           p.kind === 'progress'
             ? { seq: p.seq, member: p.member, kind: p.kind, text: p.text, pct: p.pct, tool: null, status: null, duration_ms: null, time: p.time }

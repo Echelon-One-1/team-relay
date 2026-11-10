@@ -22977,22 +22977,24 @@ function planRun(p) {
   const claudeConfig = env.CLAUDE_CONFIG_DIR?.trim();
   if (claudeConfig && isAbsolute5(claudeConfig)) denyDirs.push(claudeConfig);
   let capabilities = null;
-  try {
-    const manifestPath = env.MANIFEST_PATH || defaultManifestPath();
-    const { exposed } = exposedCapabilities(loadManifest(manifestPath), env);
-    if (exposed.length > 0) {
-      const capEnv = {
-        ...relay.env,
-        MANIFEST_PATH: manifestPath,
-        ALLOW_PRODUCTION: env.ALLOW_PRODUCTION === "true" ? "true" : "false"
-      };
-      for (const [k, v] of Object.entries(env)) {
-        if (/^CAP_[A-Z][A-Z0-9_]*_(ENABLED|RUNNER)$/.test(k) && typeof v === "string") capEnv[k] = v;
+  if (p.capabilities !== false) {
+    try {
+      const manifestPath = env.MANIFEST_PATH || defaultManifestPath();
+      const { exposed } = exposedCapabilities(loadManifest(manifestPath), env);
+      if (exposed.length > 0) {
+        const capEnv = {
+          ...relay.env,
+          MANIFEST_PATH: manifestPath,
+          ALLOW_PRODUCTION: env.ALLOW_PRODUCTION === "true" ? "true" : "false"
+        };
+        for (const [k, v] of Object.entries(env)) {
+          if (/^CAP_[A-Z][A-Z0-9_]*_(ENABLED|RUNNER)$/.test(k) && typeof v === "string") capEnv[k] = v;
+        }
+        capabilities = { script: join5(p.dist, "capabilities.js"), env: capEnv };
       }
-      capabilities = { script: join5(p.dist, "capabilities.js"), env: capEnv };
+    } catch (err) {
+      p.log?.(`capabilities not offered to this answer (${describeError(err)})`);
     }
-  } catch (err) {
-    p.log?.(`capabilities not offered to this answer (${describeError(err)})`);
   }
   const token = p.token ?? newToken();
   const mcpConfig = join5(runDir, "mcp.json");
@@ -23050,6 +23052,7 @@ function draftReasons(d) {
 // src/answer-dry-run.ts
 init_relay_client();
 var USAGE = "usage: answer-dry-run.js [--question TEXT] [--run [--offline]]";
+var NOWHERE_RELAY = { mode: "token", url: "http://127.0.0.1:9", team: "demo", token: "dry-run-token" };
 function shellQuote(a) {
   return /^[A-Za-z0-9_./:=@%+,-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`;
 }
@@ -23076,10 +23079,100 @@ async function closedPort() {
   await new Promise((r) => s.close(() => r()));
   return port;
 }
+function offlineEnv(port) {
+  return { ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, CLAUDE_CODE_MAX_RETRIES: "0", API_TIMEOUT_MS: "5000" };
+}
+function prepareDryRun(i) {
+  const scope = scopeFolder(i.cwd, i.env);
+  const socket = new HostSocket();
+  const runDir = mkdtempSync3(join6(socket.dir, "run-"));
+  const item = {
+    request_id: `rq_${"0".repeat(32)}`,
+    from: "teammate",
+    kind: "question",
+    question: i.question,
+    answer_deadline: Date.now() + 15 * 6e4
+  };
+  try {
+    const plan = planRun({
+      item,
+      runDir,
+      socket: { path: socket.path, dir: socket.dir },
+      scope,
+      env: i.env,
+      connection: i.connection,
+      member: i.member,
+      dist: i.dist,
+      node: i.node ?? process.execPath,
+      claudeBin: i.claudeBin,
+      ...i.boundaries ? { boundaries: i.boundaries } : {},
+      ...i.capabilities === false ? { capabilities: false } : {}
+    });
+    return { plan, scope, socket, runDir };
+  } catch (err) {
+    void socket.close();
+    throw err;
+  }
+}
+async function disposeDryRun(p) {
+  await p.socket.close().catch(() => {
+  });
+  rmSync4(p.runDir, { recursive: true, force: true });
+  rmSync4(p.socket.dir, { recursive: true, force: true });
+}
+async function executeDryRun(p, o) {
+  const { plan, socket } = p;
+  await socket.listen();
+  const calls = [];
+  socket.setRun(plan.token, async (method, params) => {
+    const q = isPlainObject(params) ? params : {};
+    if (method === "permission") {
+      calls.push(`permission ${String(q.tool_name)} ${JSON.stringify(q.input).slice(0, 300)} -> denied (dry run)`);
+      return { allow: false, message: "Dry run: every permission request is denied." };
+    }
+    if (method === "request_approval") {
+      calls.push(`request_approval ${JSON.stringify(q.reason)}`);
+      return { ok: true, message: "Noted (dry run)." };
+    }
+    if (method === "list_files" || method === "search_files" || method === "read_google_file") {
+      calls.push(`${method} -> refused (dry run)`);
+      return { ok: false, message: "Dry run: nothing can be read." };
+    }
+    if (method === "reply") {
+      const text = typeof q.text === "string" ? q.text : "";
+      const data = isPlainObject(q.data) ? q.data : null;
+      const reasons = draftReasons({
+        needsApproval: q.needs_approval === true,
+        reason: typeof q.reason === "string" ? q.reason : null,
+        requested: null,
+        approvalDuringRun: calls.some((c) => c.startsWith("permission")),
+        text,
+        data
+      });
+      calls.push(`reply ${JSON.stringify(text.slice(0, 500))} -> ${reasons.length ? `would wait for approval: ${reasons.join("; ")}` : "would be sent automatically"} (nothing sent: dry run)`);
+      return { ok: true, message: "Dry run: nothing was sent." };
+    }
+    if (method === "trail") return { ok: true };
+    throw new Error(`unknown method ${method}`);
+  });
+  const runEnv = { ...plan.env };
+  if (o.offline) Object.assign(runEnv, offlineEnv(await closedPort()));
+  const result = await runChild({
+    bin: plan.bin,
+    args: plan.args,
+    cwd: plan.cwd,
+    env: runEnv,
+    stdin: plan.stdin,
+    limitMs: o.limitMs ?? 5 * 6e4,
+    ...o.signal ? { signal: o.signal } : {}
+  });
+  socket.clearRun();
+  return { result, calls };
+}
 async function main() {
   const opts = parse(process.argv.slice(2));
   const env = { ...process.env };
-  let connection = { mode: "token", url: "http://127.0.0.1:9", team: "demo", token: "dry-run-token" };
+  let connection = NOWHERE_RELAY;
   let member = "member";
   try {
     const c = connectionFromEnv(env);
@@ -23087,18 +23180,9 @@ async function main() {
     if (c.member && MEMBER_RE.test(c.member)) member = c.member;
   } catch {
   }
-  const scope = scopeFolder(process.cwd(), env);
-  const socket = new HostSocket();
-  const runDir = mkdtempSync3(join6(socket.dir, "run-"));
-  const item = {
-    request_id: `rq_${"0".repeat(32)}`,
-    from: "teammate",
-    kind: "question",
-    question: opts.question,
-    answer_deadline: Date.now() + 15 * 6e4
-  };
   const claudeBin = env.TEAM_RELAY_CLAUDE_BIN?.trim() || "claude";
-  const plan = planRun({ item, runDir, socket: { path: socket.path, dir: socket.dir }, scope, env, connection, member, dist: import.meta.dirname, node: process.execPath, claudeBin });
+  const prepared = prepareDryRun({ env, question: opts.question, cwd: process.cwd(), connection, member, claudeBin, dist: import.meta.dirname });
+  const { plan, scope } = prepared;
   const redact = (text) => text.split(plan.token).join("<per-run token>");
   const out = (line = "") => process.stdout.write(`${line}
 `);
@@ -23115,43 +23199,12 @@ ${readFileSync5(plan.files.settings, "utf8")}`);
 ${redact(readFileSync5(plan.files.mcpConfig, "utf8"))}`);
   out(`environment kept: ${Object.keys(plan.env).sort().join(" ")}`);
   if (!opts.run) {
-    await socket.close();
+    await disposeDryRun(prepared);
     return;
   }
-  await socket.listen();
-  const calls = [];
-  socket.setRun(plan.token, async (method, params) => {
-    const p = isPlainObject(params) ? params : {};
-    if (method === "permission") {
-      calls.push(`permission ${String(p.tool_name)} ${JSON.stringify(p.input).slice(0, 300)} -> denied (dry run)`);
-      return { allow: false, message: "Dry run: every permission request is denied." };
-    }
-    if (method === "request_approval") {
-      calls.push(`request_approval ${JSON.stringify(p.reason)}`);
-      return { ok: true, message: "Noted (dry run)." };
-    }
-    if (method === "reply") {
-      const text = typeof p.text === "string" ? p.text : "";
-      const data = isPlainObject(p.data) ? p.data : null;
-      const reasons = draftReasons({
-        needsApproval: p.needs_approval === true,
-        reason: typeof p.reason === "string" ? p.reason : null,
-        requested: null,
-        approvalDuringRun: calls.some((c) => c.startsWith("permission")),
-        text,
-        data
-      });
-      calls.push(`reply ${JSON.stringify(text.slice(0, 500))} -> ${reasons.length ? `would wait for approval: ${reasons.join("; ")}` : "would be sent automatically"} (nothing sent: dry run)`);
-      return { ok: true, message: "Dry run: nothing was sent." };
-    }
-    throw new Error(`unknown method ${method}`);
-  });
-  const runEnv = { ...plan.env };
-  if (opts.offline) runEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await closedPort()}`;
   out(opts.offline ? "running offline (no model call)\u2026" : "running (this makes a model call)\u2026");
-  const result = await runChild({ bin: plan.bin, args: plan.args, cwd: plan.cwd, env: runEnv, stdin: plan.stdin, limitMs: 5 * 6e4 });
-  await socket.close();
-  rmSync4(runDir, { recursive: true, force: true });
+  const { result, calls } = await executeDryRun(prepared, { offline: opts.offline });
+  await disposeDryRun(prepared);
   out(`exit: ${result.code ?? result.signal}${result.timedOut ? " (timed out)" : ""}`);
   for (const c of calls) out(`tool call: ${c}`);
   if (result.result) {
@@ -23163,8 +23216,17 @@ ${redact(readFileSync5(plan.files.mcpConfig, "utf8"))}`);
     if (result.stderrTail) out(`stderr: ${redact(result.stderrTail).slice(-1500)}`);
   }
 }
-main().catch((err) => {
-  process.stderr.write(`answer-dry-run: ${err instanceof Error ? err.message : "failed"}
+if (process.argv[1] && /answer-dry-run\.[jt]s$/.test(process.argv[1])) {
+  main().catch((err) => {
+    process.stderr.write(`answer-dry-run: ${err instanceof Error ? err.message : "failed"}
 `);
-  process.exit(1);
-});
+    process.exit(1);
+  });
+}
+export {
+  NOWHERE_RELAY,
+  disposeDryRun,
+  executeDryRun,
+  offlineEnv,
+  prepareDryRun
+};

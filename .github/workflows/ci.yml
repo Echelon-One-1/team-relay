@@ -1,0 +1,150 @@
+name: CI
+
+# The repository's checks (docs/M11-SPEC.md §7). Both jobs are required on main: `checks` and
+# `gitleaks`.
+#
+# checks: the setup script's tests and shellcheck; the plugin's type check and tests, and that the
+# committed plugin/dist/ is exactly what src/ and console/ build to; the console's type check, tests
+# and build; the relay's lint and its whole test suite against a throwaway Firestore emulator
+# (scripts/test-relay.sh: Docker, image pinned by digest, bound to 127.0.0.1).
+#
+# gitleaks: scans every commit of every branch for credentials. The gitleaks GitHub Action needs a
+# paid licence for organisation accounts, so this downloads the pinned release binary and checks it
+# against the hash pinned here and the release's own checksums file. Known synthetic test fixtures
+# are listed by exact fingerprint in .github/.gitleaksignore.
+#
+# Every action is pinned by commit SHA (Dependabot proposes updates). pnpm comes from corepack at
+# the version in package.json's packageManager field. Node 22 is the oldest line the plugin
+# supports (engines >=22.12; its bundles target node22).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the run it supersedes; every other run gets its own group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  # gitleaks_8.30.1_linux_x64.tar.gz
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false  # the pnpm store is cached below
+      - name: Enable pnpm through corepack
+        working-directory: plugin
+        run: |
+          corepack enable
+          pnpm --version
+
+      - name: Setup script tests
+        run: bash scripts/tests/setup-script.test.sh
+      - name: Shellcheck (warnings and errors)
+        run: |
+          shellcheck --version
+          shellcheck --severity=warning scripts/*.sh scripts/tests/*.sh relay/relay/static/setup.sh
+      - name: Locate the pnpm store
+        id: pnpm-store
+        working-directory: plugin
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('plugin/pnpm-lock.yaml', 'console/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
+      - name: Plugin - install (frozen lockfile)
+        working-directory: plugin
+        run: pnpm install --frozen-lockfile
+      - name: Plugin - type check
+        working-directory: plugin
+        run: pnpm typecheck
+      - name: Plugin - tests
+        working-directory: plugin
+        run: pnpm test
+
+      - name: Console - install (frozen lockfile)
+        working-directory: console
+        run: pnpm install --frozen-lockfile
+      - name: Console - type check
+        working-directory: console
+        run: pnpm typecheck
+      - name: Console - tests
+        working-directory: console
+        run: pnpm test
+      - name: Console - build (into plugin/dist/console)
+        working-directory: console
+        run: pnpm build
+
+      - name: plugin/dist is built from src/ and console/
+        run: |
+          set -euo pipefail
+          (cd plugin && pnpm build)
+          changes="$(git status --porcelain --untracked-files=all -- plugin/dist)"
+          if [ -n "$changes" ]; then
+            echo "plugin/dist/ differs from a fresh build; run pnpm build in plugin/ and console/ and commit dist/:"
+            echo "$changes"
+            git --no-pager diff --stat -- plugin/dist
+            exit 1
+          fi
+          echo "plugin/dist/ matches the build"
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Relay - install
+        run: |
+          python -m venv relay/.venv
+          relay/.venv/bin/pip install --disable-pip-version-check -e './relay[dev]'
+      - name: Relay - lint
+        working-directory: relay
+        run: .venv/bin/ruff check .
+      - name: Relay - tests against the Firestore emulator
+        run: bash scripts/test-relay.sh
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # every commit, not just the tip
+          persist-credentials: false
+      - name: Download and verify gitleaks
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/gitleaks"
+          mkdir -p "$dir"
+          cd "$dir"
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$tarball" "$base/$tarball"
+          curl -sSfL -o checksums.txt "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          echo "${GITLEAKS_SHA256}  $tarball" | sha256sum --check --strict
+          grep -F "  $tarball" checksums.txt | sha256sum --check --strict
+          tar -xzf "$tarball" gitleaks
+          ./gitleaks version
+      - name: Scan the full history
+        run: |
+          "$RUNNER_TEMP/gitleaks/gitleaks" git --redact --no-banner --verbose --exit-code 1 \
+            --gitleaks-ignore-path .github/.gitleaksignore .

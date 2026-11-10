@@ -567,7 +567,8 @@ describe('console --demo backend', () => {
     const asked = requests.find((r) => r.asker === 'alice' && r.kind === 'capability')!;
     const detail = team.request(asked.request_id) as Record<string, any>;
     expect(detail.recipients).toHaveProperty('bob');
-    expect(Object.keys(detail.recipients.bob).sort()).toEqual(['acked_at', 'answered_at', 'status']);
+    // M11-SPEC §4: the asker reads each recipient's full answer next to its preview.
+    expect(Object.keys(detail.recipients.bob).sort()).toEqual(['acked_at', 'answer', 'answer_preview', 'answered_at', 'status']);
     for (const p of detail.progress) {
       expect(Object.keys(p).sort()).toEqual(['duration_ms', 'kind', 'member', 'pct', 'seq', 'status', 'text', 'time', 'tool']);
     }
@@ -575,6 +576,8 @@ describe('console --demo backend', () => {
     const broadcast = requests.find((r) => r.broadcast)!;
     const asRecipient = team.request(broadcast.request_id) as Record<string, any>;
     expect(Object.keys(asRecipient.recipients)).toEqual(['alice']);
+    // A recipient reads its own state only, never the answer text.
+    expect(Object.keys(asRecipient.recipients.alice).sort()).toEqual(['acked_at', 'answered_at', 'status']);
     expect(asRecipient.progress.every((p: { member: string }) => p.member === 'alice')).toBe(true);
   });
 

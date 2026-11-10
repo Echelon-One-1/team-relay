@@ -119,6 +119,15 @@ export class FakeRelay {
     updated_at: null,
     updated_by: null,
   };
+  // --- M11-SPEC §2, §3: acceptances and member status ----------------------------------------
+  /** The boundaries version each member accepted (absent: 0, never). */
+  readonly acceptances = new Map<string, number>();
+  /** Each member's last status (M11-SPEC §3), as stored, with seen_at. */
+  readonly memberStatus = new Map<string, Record<string, unknown>>();
+  /** At most one status write per member per this long (the relay's is 20 s; 0: no limit). */
+  statusGapMs = 0;
+  private readonly statusAt = new Map<string, number>();
+
   /** Tests only: the team a boundaries document names (null: this team), to play a relay that answers with another team's. */
   boundariesTeam: string | null = null;
   /** M10-SPEC §1: the team's display name /me reports (absent: the field is left out). */
@@ -282,6 +291,36 @@ export class FakeRelay {
     }
     if (m === 'GET' && rest.length === 1 && rest[0] === 'boundaries') {
       return this.send(res, 200, { team: this.boundariesTeam ?? TEAM, ...this.boundaries });
+    }
+    if (rest.length === 2 && rest[0] === 'me' && rest[1] === 'acceptance' && (m === 'GET' || m === 'PUT')) {
+      if (m === 'PUT') {
+        const keys = Object.keys(body);
+        if (keys.length !== 1 || keys[0] !== 'version' || typeof body.version !== 'number' || !Number.isInteger(body.version)) {
+          return this.send(res, 400, { error: 'invalid_body' });
+        }
+        if (this.boundaries.version === 0) return this.send(res, 409, { error: 'not_set' });
+        if (body.version !== this.boundaries.version) return this.send(res, 409, { error: 'version_conflict' });
+        this.acceptances.set(member, body.version);
+      }
+      const v = this.acceptances.get(member) ?? 0;
+      return this.send(res, 200, { version: v, accepted_at: v > 0 ? iso() : null });
+    }
+    if (m === 'PUT' && rest.length === 2 && rest[0] === 'me' && rest[1] === 'status') {
+      const last = this.statusAt.get(member) ?? Number.NEGATIVE_INFINITY;
+      if (Date.now() - last < this.statusGapMs) return this.send(res, 429, { error: 'rate_limited' });
+      this.statusAt.set(member, Date.now());
+      this.memberStatus.set(member, { ...body, seen_at: iso() });
+      return this.send(res, 200, { ok: true });
+    }
+    if (m === 'GET' && rest.length === 2 && rest[0] === 'members' && rest[1] === 'status') {
+      return this.send(res, 200, {
+        members: MEMBERS.map((x) => {
+          const st = this.memberStatus.get(x) ?? null;
+          const seen = st ? Date.parse(String(st.seen_at)) : NaN;
+          return { member: x, status: st, answering: Number.isFinite(seen) && Date.now() - seen < 180_000, accepted_version: this.acceptances.get(x) ?? 0 };
+        }),
+        boundaries_version: this.boundaries.version,
+      });
     }
     if (m === 'GET' && rest.length === 1 && rest[0] === 'drive-client') {
       return this.send(res, 404, { error: 'drive_not_configured' });

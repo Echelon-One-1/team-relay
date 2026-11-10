@@ -100,7 +100,7 @@ describe('Members panel: owner (M6 §4)', () => {
     await user.type(email, 'Dave.Smith+relay@Example.com')
     expect(id).toHaveValue('dave_smith')
     await user.click(screen.getByRole('button', { name: 'Invite' }))
-    await screen.findByText(/Invited dave_smith\. Send them the install steps/)
+    await screen.findByText(/Invited dave_smith\. Send them the invite message/)
     expect(s.sent).toEqual([
       expect.objectContaining({ method: 'POST', path: '/api/roster', body: { member: 'dave_smith', email: 'dave.smith+relay@example.com' } }),
     ])

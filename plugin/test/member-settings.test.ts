@@ -1,6 +1,7 @@
-// M10-SPEC §7.1: the member's settings per team, what they accepted, and the folders tool's
-// accept flow. The answerer reads only from the intersection of the team's current boundaries
-// and what the member accepted; widening waits for a dialog; nothing accepted, nothing answered.
+// M10-SPEC §7.1: the member's settings per team, what they accepted, and the folders tool. The
+// answerer reads only from the intersection of the team's current boundaries and what the member
+// accepted; nothing accepted, nothing answered. M11-SPEC §2: the accepted version is the relay's
+// (the member accepts in the console); the folders tool only says where.
 
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mkdirSync, readFileSync, statSync, writeFileSync, chmodSync } from 'node:fs';
@@ -10,6 +11,7 @@ import type { Boundaries, BoundariesSince, TeamBoundaries } from '../src/boundar
 import { boundariesSentence, validBoundaries, wideningText } from '../src/boundary-set.js';
 import { foldersTool, FOLDERS_TOOL } from '../src/folders-tool.js';
 import {
+  acceptedAtVersion,
   acceptedFrom,
   effectiveBoundaries,
   memberFoldersPath,
@@ -17,6 +19,7 @@ import {
   narrowAccepted,
   parseAccepted,
   parseMemberSettings,
+  parseTeamSettings,
   readMemberSettings,
   readTeamSettings,
   settingsNarrowedTo,
@@ -138,15 +141,42 @@ describe('the answerer reads the intersection (M10-SPEC §7.1)', () => {
   });
 
   it('the SessionStart sentence says when nothing is accepted, and what a newer version adds', () => {
-    const none = boundariesSentence(BOUNDARIES, 1, { repo_roots: [REPO_ROOT], extra_folders: [], accepted: null }, OLD);
+    const none = boundariesSentence(BOUNDARIES, 1, { repo_roots: [REPO_ROOT], extra_folders: [], accepted: null }, OLD, 0, 'https://relay.example.com');
     expect(none).toBe(
-      `Your team has boundaries (version 1) that you have not accepted yet, so teammates' questions to you are declined. Run /team-relay:folders accept to accept them (your channel working session would then answer on its own from the GitHub org ${ORG}, the shared drive "${SHARED_DRIVE}" (${DOMAIN})).`,
+      `Your team has boundaries (version 1) that you have not accepted yet, so teammates' questions to you are declined. Accept them in the console at https://relay.example.com (your answerer would then answer on its own from the GitHub org ${ORG}, the shared drive "${SHARED_DRIVE}" (${DOMAIN})).`,
     );
-    const pending = boundariesSentence({ ...BOUNDARIES, github_orgs: [ORG, 'second-org'] }, 2, { repo_roots: [REPO_ROOT], extra_folders: [], accepted: ACCEPTED }, OLD);
+    const secondAdded: ItemSince = { version: 2, org: (o) => (o === 'second-org' ? 2 : 1), drive: () => 1, memberFolders: () => 1 };
+    const pending = boundariesSentence({ ...BOUNDARIES, github_orgs: [ORG, 'second-org'] }, 2, { repo_roots: [REPO_ROOT], extra_folders: [], accepted: ACCEPTED }, secondAdded, 1, 'https://relay.example.com');
     expect(pending).toContain(`answers teammates on its own from files git tracks in your clones of the GitHub org ${ORG}, the shared drive "${SHARED_DRIVE}";`);
-    expect(pending).toContain('Version 2 adds the GitHub org second-org, which you have not accepted: run /team-relay:folders accept; until then answers come only from what you accepted.');
-    const broken = boundariesSentence(BOUNDARIES, 1, { error: 'the folders file has mode 644' }, OLD);
+    expect(pending).toContain('Version 2 adds the GitHub org second-org, which you have not accepted: accept it in the console at https://relay.example.com; until then answers come only from what you accepted.');
+    const broken = boundariesSentence(BOUNDARIES, 1, { error: 'the folders file has mode 644' }, OLD, 1, 'https://relay.example.com');
     expect(broken).toMatch(/cannot be used \(the folders file has mode 644\), so teammates' questions to you are declined/);
+  });
+});
+
+describe('the accepted version comes from the relay (M11-SPEC §2)', () => {
+  const current: Boundaries = { topic: 'T', github_orgs: [ORG, 'second-org'], drives: [drive('One')], member_folders: true };
+  // second-org and member folders came in at version 3; the rest at version 1.
+  const since: ItemSince = { version: 3, org: (o) => (o.toLowerCase() === 'second-org' ? 3 : 1), drive: () => 1, memberFolders: () => 3 };
+
+  it('a version covers what was in the boundaries since then; 0, a non-number and a version past the document cover nothing', () => {
+    const at1 = effectiveBoundaries(current, acceptedAtVersion(current, 1, since), since);
+    expect(at1.boundaries).toEqual({ topic: 'T', github_orgs: [ORG], drives: [drive('One')], member_folders: false });
+    expect(at1.pending).toEqual({ github_orgs: ['second-org'], drives: [], member_folders: true });
+    const at3 = effectiveBoundaries(current, acceptedAtVersion(current, 3, since), since);
+    expect(at3.boundaries).toEqual(current);
+    expect(at3.pending).toBeNull();
+    for (const v of [0, -1, 1.5, '3', null, undefined, true, 4, 2 ** 40]) {
+      expect(acceptedAtVersion(current, v, since), String(v)).toBeNull();
+      expect(effectiveBoundaries(current, acceptedAtVersion(current, v, since), since).notAccepted).toBe(true);
+    }
+  });
+
+  it('an `accepted` entry left in the local file is read without complaint, even a malformed one', () => {
+    expect(parseTeamSettings({ repo_roots: [], extra_folders: [], accepted: ACCEPTED }, f.env).accepted).toEqual(ACCEPTED);
+    for (const bad of [{ version: 0 }, 'yes', { ...ACCEPTED, extra: 1 }, [], 7]) {
+      expect(parseTeamSettings({ repo_roots: [REPO_ROOT], extra_folders: [], accepted: bad }, f.env), JSON.stringify(bad)).toEqual({ repo_roots: [REPO_ROOT], extra_folders: [], accepted: null });
+    }
   });
 });
 
@@ -276,7 +306,7 @@ describe('what the team drops leaves the accepted set (M10-SPEC §7.1)', () => {
     expect(validBoundaries({ team: TEAM, version: 0, boundaries: null, since: good })).toBe(false);
   });
 
-  it('/team-relay:folders show narrows the file too (no dialog); a file that cannot be written is an error', async () => {
+  it('/team-relay:folders show writes nothing: the local file only gives the folders (M11-SPEC §2)', async () => {
     writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] }, { accepted: acceptedFrom(withB, 1) });
     const dialogs: unknown[] = [];
     const elicit: Elicit = async () => {
@@ -284,24 +314,23 @@ describe('what the team drops leaves the accepted set (M10-SPEC §7.1)', () => {
       return { action: 'decline' };
     };
     const tb = (b2: Boundaries, team = TEAM): TeamBoundaries => ({ team, version: 2, boundaries: b2, since: since1(b2), updated_at: null, updated_by: 'alice' });
-    // The relay answering for another team narrows nothing, and nothing is worked out from it.
-    const elsewhere = JSON.parse((await foldersTool({}, { env: f.env, elicit, team: () => TEAM, boundaries: async () => tb(withB, 'elsewhere') })).content[0]!.text!);
+    const deps = (t: TeamBoundaries, version: number | null = 1) => ({ env: f.env, elicit, team: () => TEAM, boundaries: async () => t, acceptance: async () => version, console: () => 'https://relay.example.com' });
+    // The relay answering for another team: nothing is worked out from it.
+    const elsewhere = JSON.parse((await foldersTool({}, deps(tb(withB, 'elsewhere')))).content[0]!.text!);
     expect(elsewhere.team_boundaries).toBe("unknown (the relay answered with another team's boundaries)");
     expect(elsewhere).not.toHaveProperty('answers_come_from');
     expect(elsewhere).not.toHaveProperty('not_accepted_yet');
-    await foldersTool({}, { env: f.env, elicit, team: () => TEAM, boundaries: async () => tb(withoutB, 'elsewhere') });
-    expect(readTeamSettings(memberFoldersPath(f.env), f.env, TEAM).accepted).toEqual(acceptedFrom(withB, 1));
-    const shown = JSON.parse((await foldersTool({}, { env: f.env, elicit, team: () => TEAM, boundaries: async () => tb(withoutB) })).content[0]!.text!);
-    expect(shown.accepted).toEqual({ version: 1, github_orgs: [ORG], shared_drives: [`"One" (${DOMAIN})`], member_folders: false });
+    // A narrowing is not written back any more: the stored entry is left as it was (and ignored).
+    const shown = JSON.parse((await foldersTool({}, deps(tb(withoutB)))).content[0]!.text!);
+    expect(shown.accepted).toEqual({ version: 1 });
     expect(dialogs).toEqual([]);
-    expect(readTeamSettings(memberFoldersPath(f.env), f.env, TEAM).accepted).toEqual({ version: 1, github_orgs: [ORG], drives: [drive('One')], member_folders: false });
-    writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] }, { accepted: acceptedFrom(withB, 1) });
+    expect(readTeamSettings(memberFoldersPath(f.env), f.env, TEAM).accepted).toEqual(acceptedFrom(withB, 1));
+    // A read-only configuration directory is no error for show.
     const dir = join(f.xdg, 'team-relay');
     chmodSync(dir, 0o500);
     try {
-      expect(() => settingsNarrowedTo(memberFoldersPath(f.env), f.env, TEAM, withoutB, OLD)).toThrow(MemberFoldersError);
-      const r = await foldersTool({}, { env: f.env, elicit, team: () => TEAM, boundaries: async () => tb(withoutB) });
-      expect(r.isError).toBe(true);
+      const r = await foldersTool({}, deps(tb(withoutB)));
+      expect(r.isError).toBeFalsy();
     } finally {
       chmodSync(dir, 0o700);
       writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] });
@@ -309,103 +338,66 @@ describe('what the team drops leaves the accepted set (M10-SPEC §7.1)', () => {
   });
 });
 
-describe('/team-relay:folders accept (M10-SPEC §7.1)', () => {
-  type Dialog = { message: string; answer: 'change' | 'keep' | null };
-  function deps(tb: TeamBoundaries | null, dialogs: Dialog[] | null, team: string | null = TEAM) {
+describe('/team-relay:folders and acceptance from the relay (M11-SPEC §2)', () => {
+  type Dialog = { message: string };
+  const URL_ = 'https://relay.example.com';
+  function deps(tb: TeamBoundaries | null, version: number | null, dialogs: Dialog[] | null = [], team: string | null = TEAM) {
     const elicit: Elicit | null = dialogs
       ? async (params) => {
-          const d = { message: params.message, answer: null as Dialog['answer'] };
-          dialogs.push(d);
-          const next = answers.shift() ?? null;
-          d.answer = next;
-          return next === null ? { action: 'decline' } : { action: 'accept', content: { decision: next } };
+          dialogs.push({ message: params.message });
+          return { action: 'accept', content: { decision: 'change' } };
         }
       : null;
-    const answers: Array<'change' | 'keep' | null> = [];
-    return { d: { env: f.env, elicit, team: () => team, boundaries: async () => tb }, answers };
+    return { env: f.env, elicit, team: () => team, boundaries: async () => tb, acceptance: async () => version, console: () => (team ? URL_ : null) };
   }
   const tb = (version: number, b: Boundaries | null, team = TEAM): TeamBoundaries => ({ team, version, boundaries: b, since: b ? since1(b) : null, updated_at: null, updated_by: 'alice' });
-  const file = () => memberFoldersPath(f.env);
   const json = (r: { content: Array<{ text?: string }> }) => JSON.parse(r.content[0]!.text!) as Record<string, unknown>;
 
-  it('the tool lists accept', () => {
-    expect(FOLDERS_TOOL.inputSchema.properties.action.enum).toContain('accept');
-  });
-
-  it('the first acceptance shows everything it adds; only "Yes" records it; without dialogs nothing is accepted', async () => {
+  it('accept no longer accepts anything: it says where to accept, opens no dialog and writes nothing', async () => {
     writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] }, { accepted: null });
     const dialogs: Dialog[] = [];
-    const { d, answers } = deps(tb(1, BOUNDARIES), dialogs);
-    // show: nothing accepted, questions declined.
-    const shown = json(await foldersTool({}, d));
-    expect(shown.accepted).toMatch(/^nothing yet/);
-    expect(shown.answers_come_from).toMatch(/^nothing: teammates' questions are declined/);
-    answers.push('keep');
-    expect(json(await foldersTool({ action: 'accept' }, d)).message).toBe('Not accepted; nothing changed.');
-    expect(dialogs[0]!.message).toContain(`Accept your team's boundaries (version 1)? Your automatic answerer will then answer teammates' questions on its own, without asking you, from the GitHub org ${ORG}, the shared drive "${SHARED_DRIVE}" (${DOMAIN})`);
-    expect(readTeamSettings(file(), f.env, TEAM).accepted).toBeNull();
-    // Without dialogs: refused, nothing written.
-    const none = await foldersTool({ action: 'accept' }, deps(tb(1, BOUNDARIES), null).d);
-    expect(none.isError).toBe(true);
-    expect(none.content[0]!.text).toMatch(/does not offer dialogs to plugins.*so nothing was accepted/);
-    expect(readTeamSettings(file(), f.env, TEAM).accepted).toBeNull();
-    // A path is not part of accept.
-    expect((await foldersTool({ action: 'accept', path: '~/x' }, d)).isError).toBe(true);
-    answers.push('change');
-    expect(json(await foldersTool({ action: 'accept' }, d)).message).toBe("Accepted version 1 of your team's boundaries. Your automatic answerer uses them from its next answer.");
-    expect(readTeamSettings(file(), f.env, TEAM)).toEqual({ repo_roots: [REPO_ROOT], extra_folders: [], accepted: ACCEPTED });
-    // Mode 600 kept, the folders untouched.
-    expect(JSON.parse(readFileSync(file(), 'utf8')).teams[TEAM].repo_roots).toEqual([REPO_ROOT]);
-    // Nothing new: no dialog.
-    const before = dialogs.length;
-    expect(json(await foldersTool({ action: 'accept' }, d)).message).toMatch(/^Nothing new to accept/);
-    expect(dialogs).toHaveLength(before);
-  });
-
-  it('a widening shows exactly what is added; show says what is not accepted yet', async () => {
-    writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] });
-    const wider = { ...BOUNDARIES, github_orgs: [ORG, 'second-org'], drives: [...BOUNDARIES.drives, drive('Ops <b>')], member_folders: true };
-    const dialogs: Dialog[] = [];
-    const { d, answers } = deps(tb(2, wider), dialogs);
-    const shown = json(await foldersTool({}, d));
-    expect(shown.not_accepted_yet).toBe(`version 2 adds the GitHub org second-org, the shared drive "Ops <b>" (${DOMAIN}), members' own folders: run /team-relay:folders accept`);
-    expect(shown.answers_come_from).toMatch(/^4 GitHub repositories/);
-    answers.push('change');
-    await foldersTool({ action: 'accept' }, d);
-    expect(dialogs[0]!.message).toBe(
-      `Accept what version 2 of your team's boundaries adds? Your automatic answerer will then also answer teammates' questions on its own, without asking you, from the GitHub org second-org, the shared drive "Ops <b>" (${DOMAIN}), members' own folders.\n\nThis was asked for in your session; only your choice here changes it.`,
+    const r = await foldersTool({ action: 'accept' }, deps(tb(1, BOUNDARIES), 0, dialogs));
+    expect(r.isError).toBeFalsy();
+    expect(json(r).message).toBe(
+      `Accept your team's boundaries in the team console: open ${URL_} and press Accept on the Join or Team page. Only you can accept for yourself.`,
     );
-    expect(readTeamSettings(file(), f.env, TEAM).accepted).toEqual({ version: 2, github_orgs: [ORG, 'second-org'], drives: wider.drives, member_folders: true });
+    expect(dialogs).toEqual([]);
+    expect(readTeamSettings(memberFoldersPath(f.env), f.env, TEAM).accepted).toBeNull();
+    expect((await foldersTool({ action: 'accept', path: '~/x' }, deps(tb(1, BOUNDARIES), 0))).isError).toBe(true);
+    expect(FOLDERS_TOOL.description).toMatch(/"accept" says where to accept/);
     writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] });
   });
 
-  it('refuses when not signed in, when the relay answers for another team, and never downgrades a newer acceptance', async () => {
-    writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] }, { accepted: { ...ACCEPTED, version: 5 } });
-    const dialogs: Dialog[] = [];
-    expect((await foldersTool({}, deps(tb(1, BOUNDARIES), dialogs, null).d)).isError).toBe(true);
-    const other = await foldersTool({ action: 'accept' }, deps(tb(1, BOUNDARIES, 'elsewhere'), dialogs).d);
-    expect(other.content[0]!.text).toMatch(/different team; nothing was accepted/);
-    expect((await foldersTool({ action: 'accept' }, deps(null, dialogs).d)).content[0]!.text).toMatch(/cannot be read now/);
-    // The dialog showed version 3; meanwhile the team reached version 5 and 5 was accepted.
-    const v3 = tb(3, { ...BOUNDARIES, member_folders: true });
-    const v5 = tb(5, { ...BOUNDARIES, member_folders: true });
-    const { d, answers } = deps(v3, dialogs);
-    const seen = [v3, v5];
-    answers.push('change');
-    expect(json(await foldersTool({ action: 'accept' }, { ...d, boundaries: async () => seen.shift() ?? v5 })).message).toBe(
-      'A newer version was accepted meanwhile; nothing changed.',
-    );
-    expect(readTeamSettings(file(), f.env, TEAM).accepted!.version).toBe(5);
-    // The relay is still at version 3: the stored 5 belongs to an earlier team under this id, and
-    // the acceptance of version 3 replaces it.
-    const again = deps(v3, dialogs);
-    again.answers.push('change');
-    expect(json(await foldersTool({ action: 'accept' }, again.d)).message).toMatch(/^Accepted version 3 /);
-    expect(readTeamSettings(file(), f.env, TEAM).accepted!.version).toBe(3);
+  it('show: what was accepted comes from the relay, whatever the local file says', async () => {
+    // The local file claims version 1 was accepted; the relay says nothing was.
     writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] });
+    const none = json(await foldersTool({}, deps(tb(1, BOUNDARIES), 0)));
+    expect(none.accepted).toBe(`nothing yet: teammates' questions to you are declined until you accept your team's boundaries in the console (${URL_})`);
+    expect(none.answers_come_from).toMatch(/^nothing: teammates' questions are declined/);
+    expect(none).not.toHaveProperty('not_accepted_yet');
+    // The relay says version 1: the answerer reads from it.
+    const one = json(await foldersTool({}, deps(tb(1, BOUNDARIES), 1)));
+    expect(one.accepted).toEqual({ version: 1 });
+    expect(one.answers_come_from).toMatch(/^4 GitHub repositories/);
+    // Version 2 widens: what it adds is named, with where to accept it.
+    const wider = { ...BOUNDARIES, github_orgs: [ORG, 'second-org'], member_folders: true };
+    const v2 = { ...tb(2, wider), since: { github_orgs: { [ORG]: 1, 'second-org': 2 }, drives: BOUNDARIES.drives.map((d) => ({ ...d, since: 1 })), member_folders: 2 } };
+    const pending = json(await foldersTool({}, deps(v2, 1)));
+    expect(pending.not_accepted_yet).toBe(`version 2 adds the GitHub org second-org, members' own folders: accept it in the console (${URL_})`);
+    // The relay cannot say: unknown, never taken as accepted.
+    const unknown = json(await foldersTool({}, deps(tb(1, BOUNDARIES), null)));
+    expect(unknown.accepted).toBe('unknown (the relay could not say which version you accepted)');
+    expect(unknown.answers_come_from).toBe('unknown: the relay could not say which version you accepted');
+    // An accepted version the document has not reached (an earlier team under this id) covers nothing.
+    expect(json(await foldersTool({}, deps(tb(1, BOUNDARIES), 5))).answers_come_from).toMatch(/^nothing/);
+  });
+
+  it('refuses when not signed in', async () => {
+    expect((await foldersTool({}, deps(tb(1, BOUNDARIES), 1, [], null))).isError).toBe(true);
   });
 
   it('a folder change is kept per team: the other team\'s entry is untouched', async () => {
+    const file = () => memberFoldersPath(f.env);
     const dir = join(f.xdg, 'team-relay');
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     writeFileSync(
@@ -413,9 +405,7 @@ describe('/team-relay:folders accept (M10-SPEC §7.1)', () => {
       JSON.stringify({ teams: { [TEAM]: { repo_roots: [REPO_ROOT], extra_folders: [], accepted: ACCEPTED }, other: { repo_roots: [], extra_folders: [] } } }),
     );
     chmodSync(file(), 0o600);
-    const { d, answers } = deps(tb(1, { ...BOUNDARIES, member_folders: true }), []);
-    answers.push('change');
-    const added = json(await foldersTool({ action: 'add_folder', path: '~/notes/team' }, d));
+    const added = json(await foldersTool({ action: 'add_folder', path: '~/notes/team' }, deps(tb(1, { ...BOUNDARIES, member_folders: true }), 1)));
     expect(added.extra_folders).toEqual([{ path: '~/notes/team', resolved: f.myFolder }]);
     const all = readMemberSettings(file(), f.env);
     expect(all.teams.other).toEqual({ repo_roots: [], extra_folders: [], accepted: null });

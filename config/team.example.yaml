@@ -37,11 +37,12 @@ teams:
 
 # The hosted console reads as a delegate on behalf of the signed-in member (M3-SPEC §2);
 # with manage-roster it may also change the roster, only for a member who is an owner
-# (M6-SPEC §3).
+# (M6-SPEC §3). With member-self it accepts the boundaries and asks questions for the
+# signed-in member only (M11-SPEC §2, §4).
 # delegates:
 #   - principal: "google:team-relay-console@<project>.iam.gserviceaccount.com"
 #     team: "*"
-#     scope: [read, manage-roster, manage-teams]
+#     scope: [read, manage-roster, manage-teams, member-self]
 
 # Limits for teams created by signed-in accounts (M9-SPEC §2); these are the defaults.
 # limits:

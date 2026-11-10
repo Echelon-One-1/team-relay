@@ -368,6 +368,50 @@ tool events.
 | `TEAM_RELAY_DESKTOP_NOTIFY=0` | no desktop notification (the status event still comes) |
 | `CAP_<NAME>_ENABLED`, `CAP_<NAME>_RUNNER`, `ALLOW_PRODUCTION`, `MANIFEST_PATH` | the capabilities you offer, as for `bin/answerer` |
 
+## Answering in the background (M11-SPEC)
+
+On macOS a background answerer answers teammates while your computer is on, without a Claude
+Code window open. The setup command from the console's Join page installs it; `dist/setup-cli.js`
+holds its steps, and each can be run again:
+
+```
+node dist/setup-cli.js login [--relay <url>]          # skipped when already signed in to that relay
+node dist/setup-cli.js folders                        # choose the folders that hold your clones
+node dist/setup-cli.js drive                          # when the team has shared drives
+node dist/setup-cli.js daemon install --claude <abs path of claude> --plugin team-relay@<marketplace>
+node dist/setup-cli.js daemon uninstall
+node dist/setup-cli.js status                         # your setup checklist
+```
+
+`daemon install` writes `~/.config/team-relay/daemon-launch.mjs` (at each start it finds the
+plugin installed for you under exactly that `team-relay@<marketplace>` key in
+`~/.claude/plugins/installed_plugins.json` and starts its `dist/daemon.js`) and the per-user
+LaunchAgent `~/Library/LaunchAgents/com.team-relay.answerer.plist`, then loads it. It refuses
+when nothing is installed under that key. Files are readable by you only.
+
+The first time the background answerer reads a folder in Documents, Desktop, Downloads, iCloud
+Drive or Google Drive, macOS may ask whether "node" may access it: click Allow. A refusal is
+written to the log.
+
+The background answerer:
+
+- answers only within your team's boundaries and what you accepted; a team without boundaries
+  gets "not set up yet", it never answers from a folder, runs no capabilities and asks for no
+  approvals;
+- holds the answering lock as `daemon`, so a working session or `bin/answerer` on the same
+  computer does not read your inbox while it runs;
+- reports to the relay every minute only counts and yes/no facts (signed in, folders and
+  clones found, Drive connected, self-test result), never a path, question or answer;
+- runs a self-test at start and every 6 hours, with no network (the first one beside connecting);
+- writes `~/Library/Logs/team-relay/daemon.log` (yours only, 5 MB, one older file kept) with
+  events and request ids, never question or answer text;
+- finishes its current answer and restarts when the plugin is updated; stops within 15 s of
+  `launchctl bootout` or `daemon uninstall`.
+
+You accept your team's boundaries in the team console (Join or Team page), never on this
+computer: the relay keeps the version you accepted, and when the relay cannot say it, questions
+are declined as busy. `TEAM_RELAY_DESKTOP_NOTIFY=0` turns off its desktop notifications.
+
 ## Running the answering session
 
 Optional since M8: a channel working session answers on its own (above). The manual session

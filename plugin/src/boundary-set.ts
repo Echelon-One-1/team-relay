@@ -28,7 +28,7 @@ import { basename, dirname, extname, join, normalize, relative, sep } from 'node
 import type { Boundaries, DriveBoundary, TeamBoundaries } from './boundaries-types.js';
 import { BOUNDARIES_MAX_DRIVES, BOUNDARIES_MAX_ORGS, boundariesValid, domainOk, driveNameOk, orgOk, versionOk } from './boundaries-rule.js';
 import { ANY_DEPTH, credentialHit, globRe, within } from './deny-list.js';
-import { effectiveBoundaries, memberFolderProblem, type ItemSince, type MemberFolders, type TeamSettings, type Widening } from './member-folders.js';
+import { acceptedAtVersion, effectiveBoundaries, memberFolderProblem, type ItemSince, type MemberFolders, type TeamSettings, type Widening } from './member-folders.js';
 import { SHARE_NAME_RE, MAX_SHARES } from './manifest.js';
 import { neutraliseChannelTags } from './notify.js';
 import { sensitiveName } from './read-trail-core.js';
@@ -595,19 +595,28 @@ export function wideningText(w: Widening): string {
  * M10-SPEC: the SessionStart sentence for a team with boundaries (names only; drive names are
  * owner-written, so quoted): what answers come from (the team's boundaries narrowed to what the
  * member accepted, §7.1), what is waiting to be accepted, and how many repo roots the member set.
+ * M11-SPEC §2: what the member accepted is the relay's (`acceptedVersion`, GET me/acceptance);
+ * accepting happens in the console at `consoleAt`.
  */
-export function boundariesSentence(current: Boundaries, version: number, settings: TeamSettings | { error: string }, since: ItemSince): string {
+export function boundariesSentence(
+  current: Boundaries,
+  version: number,
+  settings: TeamSettings | { error: string },
+  since: ItemSince,
+  acceptedVersion: number,
+  consoleAt: string,
+): string {
   if ('error' in settings) {
     return (
       `Your team has boundaries (version ${version}), but your folders file cannot be used (${settings.error.slice(0, 200)}), ` +
       'so teammates\' questions to you are declined until you fix it: run /team-relay:folders.'
     );
   }
-  const eff = effectiveBoundaries(current, settings.accepted, since);
+  const eff = effectiveBoundaries(current, acceptedAtVersion(current, acceptedVersion, since), since);
   if (eff.notAccepted) {
     return (
       `Your team has boundaries (version ${version}) that you have not accepted yet, so teammates' questions to you are declined. ` +
-      `Run /team-relay:folders accept to accept them (your channel working session would then answer on its own from ${wideningText(eff.pending ?? { github_orgs: [], drives: [], member_folders: false })}).`
+      `Accept them in the console at ${consoleAt} (your answerer would then answer on its own from ${wideningText(eff.pending ?? { github_orgs: [], drives: [], member_folders: false })}).`
     );
   }
   const b = eff.boundaries;
@@ -616,12 +625,12 @@ export function boundariesSentence(current: Boundaries, version: number, setting
   const own = b.member_folders ? 'your own added folders' : null;
   const from = [orgs, drives, own].filter(Boolean).join(', ') || 'nothing yet';
   const pending = eff.pending
-    ? ` Version ${version} adds ${wideningText(eff.pending)}, which you have not accepted: run /team-relay:folders accept; until then answers come only from what you accepted.`
+    ? ` Version ${version} adds ${wideningText(eff.pending)}, which you have not accepted: accept it in the console at ${consoleAt}; until then answers come only from what you accepted.`
     : '';
   let roots: string;
   if (b.github_orgs.length && settings.repo_roots.length === 0) roots = ' You have set no repo roots yet: run /team-relay:folders add-root <the folder your clones are in>.';
   else roots = ` Repo roots set: ${settings.repo_roots.length} (/team-relay:folders shows them).`;
-  return `Your team has boundaries (version ${version}): your channel working session answers teammates on its own from ${from}; reads of anything else are denied and off-topic questions declined.${pending}${roots}`;
+  return `Your team has boundaries (version ${version}): your answerer answers teammates on its own from ${from}; reads of anything else are denied and off-topic questions declined.${pending}${roots}`;
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);

@@ -14794,7 +14794,7 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // src/console-app.ts
-import { createHash as createHash2, timingSafeEqual } from "node:crypto";
+import { createHash as createHash2, randomUUID, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 import { existsSync, readFileSync as readFileSync5, realpathSync, statSync } from "node:fs";
 import { createServer } from "node:http";
@@ -21682,6 +21682,7 @@ function materialise(s, created, id, now, environments) {
     };
   }
   const progress = [];
+  const answers = {};
   let updated = created;
   const ackDeadline = created + s.ackTimeout * 1e3;
   const answerDeadline = created + s.answerTimeout * 1e3;
@@ -21716,6 +21717,7 @@ function materialise(s, created, id, now, environments) {
           r.acked_at ??= t;
           r.answered_at = t;
           r.answer_preview = step.text.slice(0, PREVIEW_CHARS);
+          answers[step.to] = step.text;
           break;
         case "answer_delivered":
           r.answer_delivered_at ??= t;
@@ -21749,7 +21751,7 @@ function materialise(s, created, id, now, environments) {
     recipients,
     participant: true
   };
-  return { doc, progress };
+  return { doc, progress, answers };
 }
 function viewFor(doc, viewer) {
   const isAsker = doc.asker === viewer;
@@ -21820,6 +21822,19 @@ var DEMO_BOUNDARIES = {
   member_folders: true
 };
 var ROSTER_MAX = 50;
+var DEMO_REPLIES = {
+  bob: {
+    ack: 1500,
+    at: 6e3,
+    text: "From the orders-service repository: the export job is jobs/export_invoices, and its retries are set in config/jobs.yaml (three attempts, backoff from 30 s).\n\nI read README.md and config/jobs.yaml to answer."
+  },
+  carol: {
+    ack: 2500,
+    at: 14e3,
+    text: "I could not find that in what I answer from. bob owns the worker service; he will know."
+  }
+};
+var ASKED_MAX = 200;
 var BadRequest = class extends Error {
   constructor(detail) {
     super(detail);
@@ -21866,6 +21881,7 @@ var DemoTeam = class {
       updated_at: iso(this.epoch - 2 * DAY_MS),
       updated_by: set.updated_by
     } : { team: this.team, version: 0, boundaries: null, since: null, updated_at: null, updated_by: null };
+    this.accepted = options.roster === void 0 ? { version: 1, accepted_at: iso(this.epoch - 3 * DAY_MS) } : { version: 0, accepted_at: null };
   }
   now;
   team;
@@ -21881,6 +21897,102 @@ var DemoTeam = class {
   rosterEntries;
   /** M10-SPEC §1, in memory. */
   bounds;
+  /** M11-SPEC §2, in memory: the boundaries version the viewer accepted (0: never). */
+  accepted;
+  /** M11-SPEC §4, in memory: questions the viewer asked from the console, oldest first. */
+  asked = [];
+  /** GET /v1/teams/{team}/me/acceptance (M11-SPEC §2): the viewer's own. Never accepted: 0. */
+  acceptance() {
+    return { ...this.accepted };
+  }
+  /**
+   * PUT /v1/teams/{team}/me/acceptance (M11-SPEC §2): the viewer accepts, for themselves, the
+   * version they were shown; it must be the current one.
+   */
+  setAcceptance(version) {
+    if (this.bounds.boundaries === null) throw new RosterRefusal(409, "not_set", "The team has no boundaries to accept yet.");
+    if (version !== this.bounds.version) {
+      throw new RosterRefusal(409, "version_conflict", "The boundaries changed since you read them. Read them again.");
+    }
+    this.accepted = { version, accepted_at: iso(this.now()) };
+    return this.acceptance();
+  }
+  /**
+   * GET /v1/teams/{team}/members/status (M11-SPEC §3): each active member's last status (counts
+   * and booleans only), whether they answered within 180 s, and the version they accepted.
+   */
+  membersStatus() {
+    const now = this.now();
+    const active = this.rosterEntries.filter((e) => e.status === "active").map((e) => e.member);
+    const status = (o) => ({
+      daemon: { version: "0.11.0", started_at: iso(now - 5 * 36e5) },
+      claude: { found: true, signed_in: o.signedIn ?? true },
+      folders: { repo_roots: o.roots ?? 1, clones: o.clones ?? 7, extra_folders: 0 },
+      drive: { connected: o.drive ?? true },
+      self_test: { ok: o.selfOk ?? true, at: iso(now - 2 * 36e5), reason: o.reason ?? null },
+      seen_at: iso(now - o.seenAgo)
+    });
+    const entry = (member) => {
+      const accepted = member === this.viewer ? this.accepted.version : 0;
+      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted };
+      const s = member === "bob" ? status({ seenAgo: 25e3 }) : member === "carol" ? status({ signedIn: false, roots: 0, clones: 0, selfOk: false, reason: "Claude Code is not signed in.", seenAgo: 9 * 6e4 }) : status({ drive: false, seenAgo: 4e4 });
+      const version = member === "bob" ? this.bounds.version : accepted;
+      return { member, status: s, answering: now - Date.parse(s.seen_at) < 18e4, accepted_version: version };
+    };
+    return { members: active.map(entry), boundaries_version: this.bounds.version };
+  }
+  /** GET /v1/teams/{team}/me/requests (M11-SPEC §4): the viewer's own questions, newest first. */
+  myRequests(limit) {
+    const askedIds = new Set(this.asked.map((a) => a.id));
+    const mine = this.all(this.now()).map((m) => m.doc).filter((d) => d.asker === this.viewer && d.kind === "question").sort(
+      (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || Number(askedIds.has(b.request_id)) - Number(askedIds.has(a.request_id)) || b.request_id.localeCompare(a.request_id)
+    );
+    return {
+      requests: mine.slice(0, limit).map((d) => ({
+        id: d.request_id,
+        to: d.broadcast ? "*" : Object.keys(d.recipients),
+        created_at: d.created_at,
+        question_preview: [...d.question ?? ""].slice(0, 200).join("")
+      }))
+    };
+  }
+  /**
+   * POST /v1/teams/{team}/requests as a question from the viewer (M11-SPEC §4), with the relay's
+   * refusals. On `demo`, bob answers after 6 s and carol after 14 s; nobody answers on a quiet team.
+   */
+  ask(body) {
+    const teammates = this.me().teammates;
+    let to;
+    if (body.to === "*") {
+      to = [...teammates].sort();
+      if (to.length === 0) throw new RosterRefusal(400, "bad_recipients", "You have no teammates to broadcast to.");
+    } else {
+      if (body.to.includes(this.viewer)) throw new RosterRefusal(400, "bad_recipients", "You cannot send a request to yourself.");
+      if (body.to.some((m) => !teammates.includes(m))) throw new RosterRefusal(400, "bad_recipients", "'to' names someone who is not in your team.");
+      to = [...body.to];
+    }
+    const created = this.now();
+    const id = `rq_${createHash("sha256").update(`team-relay-demo-ask:${this.team}:${this.epoch}:${this.asked.length}:${created}`).digest("hex").slice(0, 32)}`;
+    const steps = [];
+    if (!this.quiet) {
+      for (const m of to) {
+        const reply = DEMO_REPLIES[m];
+        if (!reply) continue;
+        steps.push({ at: reply.ack - 900, to: m, do: "deliver" }, { at: reply.ack, to: m, do: "ack" }, { at: reply.at, to: m, do: "answer", text: reply.text });
+      }
+    }
+    const script = { offset: 0, kind: "question", asker: this.viewer, to, broadcast: body.to === "*", question: body.question, ackTimeout: 120, answerTimeout: 1800, steps };
+    this.asked.push({ id, created, script });
+    if (this.asked.length > ASKED_MAX) this.asked.shift();
+    return {
+      request_id: id,
+      recipients: to,
+      created: true,
+      ack_deadline: iso(created + 12e4),
+      answer_deadline: iso(created + 18e5),
+      expire_at: iso(created + DEMO_TTL_MS)
+    };
+  }
   /** GET /v1/teams/{team}/boundaries (M10-SPEC §1): any member. Never set: version 0, null. */
   boundaries() {
     return structuredClone(this.bounds);
@@ -21993,6 +22105,10 @@ var DemoTeam = class {
   /** Every request created by `now`; expired ones only when asked for (the feed passes them). */
   all(now, withExpired = false) {
     const out = [];
+    for (const a of this.asked) {
+      const m = materialise(a.script, a.created, a.id, now, this.environments);
+      if (m && (withExpired || Date.parse(m.doc.expire_at) > now)) out.push(m);
+    }
     if (this.quiet) return out;
     const first = Math.max(0, Math.floor((now - DEMO_TTL_MS - this.epoch) / DEMO_CYCLE_MS) - 1);
     const last = Math.floor((now - this.epoch) / DEMO_CYCLE_MS);
@@ -22107,12 +22223,13 @@ var DemoTeam = class {
     const now = this.now();
     const found = this.all(now).find((m) => m.doc.request_id === id);
     if (!found) throw new NotFound();
-    const { doc, progress } = found;
-    const isAsker = doc.asker === DEMO_ME;
-    if (!isAsker && !doc.recipients[DEMO_ME]) throw new NotFound();
+    const { doc, progress, answers } = found;
+    const isAsker = doc.asker === this.viewer;
+    if (!isAsker && !doc.recipients[this.viewer]) throw new NotFound();
     const recipients = {};
     for (const [m, r] of Object.entries(doc.recipients)) {
-      if (isAsker || m === DEMO_ME) recipients[m] = { status: r.status, acked_at: r.acked_at, answered_at: r.answered_at };
+      if (isAsker) recipients[m] = { status: r.status, acked_at: r.acked_at, answered_at: r.answered_at, answer_preview: r.answer_preview, answer: answers[m] ?? null };
+      else if (m === this.viewer) recipients[m] = { status: r.status, acked_at: r.acked_at, answered_at: r.answered_at };
     }
     return {
       request_id: doc.request_id,
@@ -22126,7 +22243,7 @@ var DemoTeam = class {
       answer_deadline: doc.answer_deadline,
       expire_at: doc.expire_at,
       recipients,
-      progress: progress.filter((p) => isAsker || p.member === DEMO_ME).map(
+      progress: progress.filter((p) => isAsker || p.member === this.viewer).map(
         (p) => p.kind === "progress" ? { seq: p.seq, member: p.member, kind: p.kind, text: p.text, pct: p.pct, tool: null, status: null, duration_ms: null, time: p.time } : { seq: p.seq, member: p.member, kind: p.kind, text: null, pct: null, tool: p.tool, status: p.status, duration_ms: p.duration_ms, time: p.time }
       )
     };
@@ -23811,6 +23928,26 @@ var RelayClient = class _RelayClient {
   setBoundaries(body, opts) {
     return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
   }
+  /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
+  acceptance(opts) {
+    return this.call("GET", this.teamPath("me", "acceptance"), void 0, opts);
+  }
+  /** M11-SPEC §2: accept the current boundaries version (only for oneself). Sent once. */
+  setAcceptance(version, opts) {
+    return this.call("PUT", this.teamPath("me", "acceptance"), { version }, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §3: the background answerer's status (the member itself only). Sent once. */
+  putStatus(body, opts) {
+    return this.call("PUT", this.teamPath("me", "status"), body, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §3: every member's setup progress and whether they are answering now. */
+  membersStatus(opts) {
+    return this.call("GET", this.teamPath("members", "status"), void 0, opts);
+  }
+  /** M11-SPEC §4: this member's recent requests, newest first. */
+  myRequests(limit = 20, opts) {
+    return this.call("GET", this.teamPath("me", "requests") + `?limit=${limit}`, void 0, opts);
+  }
   /**
    * M10-SPEC §2a: the Desktop OAuth client members use to connect Google Drive (read-only).
    * An installed-app client is not confidential (Google's rule); it is served to members so it
@@ -23939,6 +24076,7 @@ var MIME = {
 var TEAMS_TTL_MS = 15e3;
 var TEAMS_CACHE_MAX = 1e3;
 var RFC33392 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+var MY_REQUESTS_LIMIT = 20;
 var TEAM_CLIENTS_MAX = 256;
 function relayBackend(client) {
   const opts = (ctx) => ({
@@ -23987,7 +24125,13 @@ function relayBackend(client) {
     adminTeams: (q, ctx) => client.adminTeams(q, opts(ctx)),
     adminDeleteTeam: (team, confirm, ctx) => client.adminDeleteTeam(team, confirm, opts(ctx)),
     boundaries: (ctx) => on(ctx).boundaries(opts(ctx)),
-    setBoundaries: (body, ctx) => on(ctx).setBoundaries(body, opts(ctx))
+    setBoundaries: (body, ctx) => on(ctx).setBoundaries(body, opts(ctx)),
+    acceptance: (ctx) => on(ctx).acceptance(opts(ctx)),
+    setAcceptance: (version, ctx) => on(ctx).setAcceptance(version, opts(ctx)),
+    membersStatus: (ctx) => on(ctx).membersStatus(opts(ctx)),
+    myRequests: (limit, ctx) => on(ctx).myRequests(limit, opts(ctx)),
+    // One key per question sent from the page: the console never retries it (attempts: 1).
+    ask: (body, ctx) => on(ctx).createRequest({ idempotency_key: randomUUID(), kind: "question", to: body.to, question: body.question }, opts(ctx))
   };
 }
 function boundTeams(me, team) {
@@ -24022,7 +24166,12 @@ function demoBackend(account) {
     adminTeams: async (q) => account.adminTeams(q),
     adminDeleteTeam: async (team, confirm) => account.adminDeleteTeam(team, confirm),
     boundaries: async (ctx) => account.team(ctx?.team).boundaries(),
-    setBoundaries: async (body, ctx) => account.team(ctx?.team).setBoundaries(body)
+    setBoundaries: async (body, ctx) => account.team(ctx?.team).setBoundaries(body),
+    acceptance: async (ctx) => account.team(ctx?.team).acceptance(),
+    setAcceptance: async (version, ctx) => account.team(ctx?.team).setAcceptance(version),
+    membersStatus: async (ctx) => account.team(ctx?.team).membersStatus(),
+    myRequests: async (limit, ctx) => account.team(ctx?.team).myRequests(limit),
+    ask: async (body, ctx) => account.team(ctx?.team).ask(body)
   };
 }
 var ROSTER_EMAIL_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$/;
@@ -24152,6 +24301,38 @@ function checkSetBoundaries(raw) {
   if (typeof x.member_folders !== "boolean") throw new BodyError("member_folders must be true or false");
   const boundaries = { topic, github_orgs: orgs, drives, member_folders: x.member_folders };
   return { version: b.version, boundaries };
+}
+function checkAcceptance(raw) {
+  const b = object(raw);
+  onlyKeys(b, ["version"]);
+  if (!versionOk(b.version)) throw new BodyError("version must be the whole number the boundaries were shown at");
+  return b.version;
+}
+var ASK_MAX_RECIPIENTS = 64;
+var QUESTION_MAX = 8e3;
+var ASK_BODY_LIMIT = 128 * 1024;
+function checkAsk(raw) {
+  const b = object(raw);
+  onlyKeys(b, ["to", "question"]);
+  let to;
+  if (b.to === "*") to = "*";
+  else if (Array.isArray(b.to)) {
+    if (b.to.length < 1 || b.to.length > ASK_MAX_RECIPIENTS) throw new BodyError(`to must name 1 to ${ASK_MAX_RECIPIENTS} teammates, or be "*"`);
+    const seen = /* @__PURE__ */ new Set();
+    for (const m of b.to) {
+      if (typeof m !== "string" || !MEMBER_RE.test(m)) throw new BodyError("to must hold member ids");
+      if (seen.has(m)) throw new BodyError("to names a member twice");
+      seen.add(m);
+    }
+    to = [...seen];
+  } else throw new BodyError('to must be a list of teammates or "*"');
+  const q = b.question;
+  if (typeof q !== "string" || q.length === 0 || codePointLength(q) > QUESTION_MAX) {
+    throw new BodyError(`question must be 1 to ${QUESTION_MAX} characters`);
+  }
+  if (q.trim().length === 0) throw new BodyError("question must contain a character that is not white space");
+  if (hasLoneSurrogate(q)) throw new BodyError("question contains a lone surrogate");
+  return { to, question: q };
 }
 var count = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 1e6 ? v : null;
 var displayName = (v, team) => typeof v === "string" && v.trim() !== "" && [...v].length <= 60 && !NAME_FORBIDDEN_RE.test(v) ? v : team;
@@ -24311,7 +24492,8 @@ var PLACEHOLDER = `<!doctype html>
 <p>The console has not been built yet: <code>dist/console/</code> is missing. Build it from
 <code>console/</code> (it builds into <code>plugin/dist/console/</code>), then reload this page.</p>
 <p>The API is running: <code>/api/me</code>, <code>/api/directory</code>, <code>/api/activity</code>,
-<code>/api/requests/{id}</code>, <code>/api/roster</code>, <code>/api/inbox/summary</code>, <code>/api/boundaries</code> and <code>/api/join</code>, with the key from this page's
+<code>/api/requests/{id}</code>, <code>/api/roster</code>, <code>/api/inbox/summary</code>, <code>/api/boundaries</code>, <code>/api/acceptance</code>,
+<code>/api/members-status</code>, <code>/api/my-requests</code> and <code>/api/join</code>, with the key from this page's
 address in an <code>X-Console-Key</code> header.</p>
 </body>
 </html>
@@ -24474,6 +24656,8 @@ function createConsoleServer(opts) {
   function changeRoute(path) {
     if (path === "/api/roster") return { methods: ["POST"], kind: "roster", id: null };
     if (path === "/api/boundaries") return { methods: ["PUT"], kind: "boundaries", id: null };
+    if (path === "/api/acceptance") return { methods: ["PUT"], kind: "acceptance", id: null };
+    if (path === "/api/ask") return { methods: ["POST"], kind: "ask", id: null };
     let m = /^\/api\/roster\/([^/]+)$/.exec(path);
     if (m) return { methods: ["PATCH", "DELETE"], kind: "roster_one", id: m[1] };
     if (path === "/api/teams") return { methods: ["POST"], kind: "teams", id: null };
@@ -24487,7 +24671,7 @@ function createConsoleServer(opts) {
   }
   async function change(req, res, url, ctx, route2) {
     const method = req.method ?? "";
-    const reads = route2.kind === "teams" || route2.kind === "roster" || route2.kind === "boundaries" ? ["GET"] : [];
+    const reads = route2.kind === "teams" || route2.kind === "roster" || route2.kind === "boundaries" || route2.kind === "acceptance" ? ["GET"] : [];
     if (!route2.methods.includes(method)) {
       req.resume();
       return sendJson(res, 405, { error: "method_not_allowed" }, { Allow: [...reads, ...route2.methods].join(", ") });
@@ -24501,7 +24685,7 @@ function createConsoleServer(opts) {
       req.resume();
       return sendJson(res, 415, { error: "unsupported_media_type", detail: "Content-Type must be application/json" });
     }
-    const teamScoped = route2.kind === "roster" || route2.kind === "roster_one" || route2.kind === "boundaries";
+    const teamScoped = route2.kind === "roster" || route2.kind === "roster_one" || route2.kind === "boundaries" || route2.kind === "acceptance" || route2.kind === "ask";
     const extra = [...url.searchParams.keys()].filter((k) => !(teamScoped && k === "team"));
     if (extra.length > 0) {
       req.resume();
@@ -24513,7 +24697,7 @@ function createConsoleServer(opts) {
       req.resume();
       return sendJson(res, 404, { error: "not_found" });
     }
-    const limit = route2.kind === "boundaries" ? BOUNDARIES_BODY_LIMIT : ROSTER_BODY_LIMIT;
+    const limit = route2.kind === "boundaries" ? BOUNDARIES_BODY_LIMIT : route2.kind === "ask" ? ASK_BODY_LIMIT : ROSTER_BODY_LIMIT;
     let text;
     try {
       text = await readBody(req, limit);
@@ -24565,6 +24749,25 @@ function createConsoleServer(opts) {
           what = `boundaries set from version ${body.version} (team ${resolved})`;
           break;
         }
+        case "acceptance": {
+          const version = checkAcceptance(raw);
+          const resolved = await resolveTeam(req, res, url, who);
+          if (resolved === null) return;
+          team = resolved;
+          call = () => opts.backend.setAcceptance(version, { ...who, team: resolved });
+          what = `boundaries accepted at version ${version} (team ${resolved})`;
+          break;
+        }
+        case "ask": {
+          const body = checkAsk(raw);
+          const resolved = await resolveTeam(req, res, url, who);
+          if (resolved === null) return;
+          team = resolved;
+          status = 201;
+          call = () => opts.backend.ask(body, { ...who, team: resolved });
+          what = `question asked of ${body.to === "*" ? "everyone" : `${body.to.length} ${body.to.length === 1 ? "member" : "members"}`} (team ${resolved})`;
+          break;
+        }
         case "teams": {
           const body = checkCreateTeam(raw);
           const ipHash = hosted2 ? { clientIpHash: clientIpHash(hosted2.ipHashSalt, req, hosted2.proxyHops ?? 1) } : {};
@@ -24605,7 +24808,7 @@ function createConsoleServer(opts) {
       return sendJson(res, status, out);
     } catch (err) {
       if (!teamScoped) forgetTeams(viewer);
-      const aboutTeam = route2.kind === "roster" || route2.kind === "boundaries";
+      const aboutTeam = route2.kind === "roster" || route2.kind === "boundaries" || route2.kind === "acceptance" || route2.kind === "ask";
       if (team !== void 0 && aboutTeam && err instanceof RelayError && err.status === 404) return failure(res, err, viewer, team);
       return failure(res, err, viewer);
     }
@@ -24684,7 +24887,7 @@ function createConsoleServer(opts) {
       }
     }
     const own = query.filter((k) => k !== "team");
-    const known = path === "/api/join" || path === "/api/me" || path === "/api/directory" || path === "/api/roster" || path === "/api/inbox/summary" || path === "/api/boundaries";
+    const known = path === "/api/join" || path === "/api/me" || path === "/api/directory" || path === "/api/roster" || path === "/api/inbox/summary" || path === "/api/boundaries" || path === "/api/acceptance" || path === "/api/members-status" || path === "/api/my-requests";
     const requestMatch = /^\/api\/requests\/([^/]+)$/.exec(path);
     if (!known && path !== "/api/activity" && !requestMatch) return sendJson(res, 404, { error: "not_found" });
     if (requestMatch && (!REQUEST_ID_RE.test(requestMatch[1]) || own.length > 0)) return sendJson(res, 404, { error: "not_found" });
@@ -24733,6 +24936,9 @@ function createConsoleServer(opts) {
     else if (path === "/api/inbox/summary") call = () => opts.backend.inboxSummary(on);
     else if (path === "/api/roster") call = () => opts.backend.roster(on);
     else if (path === "/api/boundaries") call = () => opts.backend.boundaries(on);
+    else if (path === "/api/acceptance") call = () => opts.backend.acceptance(on);
+    else if (path === "/api/members-status") call = () => opts.backend.membersStatus(on);
+    else if (path === "/api/my-requests") call = () => opts.backend.myRequests(MY_REQUESTS_LIMIT, on);
     else if (path === "/api/activity") call = () => opts.backend.activity(q, on);
     else {
       const rid = requestMatch[1];
@@ -24741,7 +24947,8 @@ function createConsoleServer(opts) {
     try {
       return sendJson(res, 200, await call());
     } catch (err) {
-      return failure(res, err, viewer, requestMatch || path === "/api/boundaries" ? void 0 : team);
+      const newer = path === "/api/boundaries" || path === "/api/acceptance" || path === "/api/members-status" || path === "/api/my-requests";
+      return failure(res, err, viewer, requestMatch || newer ? void 0 : team);
     }
   }
   function staticFile(req, res, url) {

@@ -45,6 +45,24 @@ describe('the answering lock', () => {
     expect(readLock(path)).toMatchObject({ pid: process.pid, role: 'host' });
   });
 
+  it('M11-SPEC §1: the background answerer holds it with the role daemon, and is named as such', () => {
+    const a = tryAcquire(path, 'daemon', { pid: process.pid });
+    expect(a.ok).toBe(true);
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ pid: process.pid, role: 'daemon' });
+    const b = tryAcquire(path, 'host', { pid: process.pid + 100000, alive: (p) => p === process.pid });
+    expect(b.ok).toBe(false);
+    if (!b.ok) {
+      expect(b.holder).toMatchObject({ pid: process.pid, role: 'daemon' });
+      expect(heldBy(b.holder)).toBe(`the background answerer on this computer (pid ${process.pid})`);
+    }
+    expect(readLock(path)).toMatchObject({ role: 'daemon' });
+    // A role nobody knows is not a holder (the lock is unusable, so it is stale once old).
+    (a as Acquired).release();
+    mkdirSync(join(dir, 'team-relay'), { recursive: true });
+    writeFileSync(path, JSON.stringify({ pid: process.pid, role: 'other', started_at: '' }));
+    expect(readLock(path)).toBeNull();
+  });
+
   it('takes over a stale lock (its pid is gone)', () => {
     const dead = deadPid();
     expect(pidAlive(dead)).toBe(false);
@@ -176,6 +194,31 @@ describe('only the lock holder reads the inbox', () => {
     while (inboxReads() === 0 && Date.now() < deadline) await sleep(100);
     expect(inboxReads()).toBeGreaterThan(0);
     expect(readLock(lock)).toMatchObject({ role: 'answerer' });
+  });
+});
+
+describe('a background answerer holding the lock (M11-SPEC §1)', () => {
+  let relay: FakeRelay;
+  const open: Spawned[] = [];
+  beforeEach(async () => {
+    relay = await new FakeRelay().start();
+  });
+  afterEach(async () => {
+    while (open.length) await open.pop()!.close();
+    await relay.stop();
+  });
+
+  it('a manual answering session waits for it like for any holder', async () => {
+    const xdg = mkdtempSync(join(tmpdir(), 'team-relay-lock-xdg-'));
+    const lock = join(xdg, 'team-relay', 'answering.lock');
+    const held = tryAcquire(lock, 'daemon') as Acquired;
+    expect(held.ok).toBe(true);
+    const s = await spawnServer('channel.js', { RELAY_URL: relay.url, RELAY_TEAM: 'demo', RELAY_TOKEN: TOKEN_OF.bob!, RELAY_ROLE: 'answerer', XDG_CONFIG_HOME: xdg });
+    open.push(s);
+    await sleep(1500);
+    expect(relay.requests.filter((r) => r.path.endsWith('/streams/inbox')).length).toBe(0);
+    expect(s.stderr()).toMatch(/not reading the inbox: the background answerer on this computer \(pid \d+\) answers for you/);
+    held.release();
   });
 });
 

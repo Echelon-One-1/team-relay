@@ -396,6 +396,26 @@ var RelayClient = class _RelayClient {
   setBoundaries(body, opts) {
     return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
   }
+  /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
+  acceptance(opts) {
+    return this.call("GET", this.teamPath("me", "acceptance"), void 0, opts);
+  }
+  /** M11-SPEC §2: accept the current boundaries version (only for oneself). Sent once. */
+  setAcceptance(version, opts) {
+    return this.call("PUT", this.teamPath("me", "acceptance"), { version }, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §3: the background answerer's status (the member itself only). Sent once. */
+  putStatus(body, opts) {
+    return this.call("PUT", this.teamPath("me", "status"), body, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §3: every member's setup progress and whether they are answering now. */
+  membersStatus(opts) {
+    return this.call("GET", this.teamPath("members", "status"), void 0, opts);
+  }
+  /** M11-SPEC §4: this member's recent requests, newest first. */
+  myRequests(limit = 20, opts) {
+    return this.call("GET", this.teamPath("me", "requests") + `?limit=${limit}`, void 0, opts);
+  }
   /**
    * M10-SPEC §2a: the Desktop OAuth client members use to connect Google Drive (read-only).
    * An installed-app client is not confidential (Google's rule); it is served to members so it

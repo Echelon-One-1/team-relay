@@ -10,6 +10,16 @@
 # address, and RELAY_FORWARDED_FOR_HOPS=2 tells it the balancer adds two X-Forwarded-For entries.
 # Without PUBLIC_HOST, the run.app URL as before (ingress all).
 #
+# Either way the service runs with --no-invoker-iam-check (M11-SPEC §7): Cloud Run does not check
+# the caller's IAM, and the relay authenticates every /v1 request itself. That replaces granting
+# allUsers the invoker role, which organisations with domain-restricted sharing refuse. A stale
+# allUsers invoker binding from an earlier deploy is removed.
+#
+# PLUGIN_MARKETPLACE (M11-SPEC §5; owner/repo of the GitHub repository whose
+# .claude-plugin/marketplace.json lists the plugin) becomes RELAY_PLUGIN_MARKETPLACE: the relay
+# then serves the one-command setup at https://PUBLIC_HOST/setup. It needs PUBLIC_HOST (the script
+# sends members to the console at the same address). Unset, /setup answers 404.
+#
 # ALLOWED_DOMAINS (M10-SPEC §7.2; comma-separated lower-case domains, e.g. example.com) becomes
 # RELAY_ALLOWED_DOMAINS: the relay then refuses every Google account outside those domains, on
 # every route. Unset, any Google account can sign in and use the relay's API (create a team,
@@ -72,6 +82,30 @@ if [[ -z "$ALLOWED" ]]; then
   if [[ -n "${PUBLIC_HOST:-}" && "${CONFIRM_OPEN_RELAY:-}" != "1" ]]; then
     echo "error: with PUBLIC_HOST set, an open relay is a deliberate choice: set ALLOWED_DOMAINS," >&2
     echo "       or run again with CONFIRM_OPEN_RELAY=1 to keep it open to every Google account." >&2
+    exit 1
+  fi
+fi
+
+# M10-SPEC §5: one public host serves the relay and the console. The run.app mode still deploys,
+# but members' one-command setup and the console links of M11 need that host.
+if [[ -z "${PUBLIC_HOST:-}" ]]; then
+  echo "warning: PUBLIC_HOST is not set, so the relay is deployed at its run.app URL only. Members'" >&2
+  echo "         one-command setup and the console links of M11 need the one public host that" >&2
+  echo "         serves the relay and the console (M10-SPEC §5): run scripts/deploy-lb.sh, then" >&2
+  echo "         deploy again with PUBLIC_HOST set." >&2
+fi
+
+# M11-SPEC §5: where the setup script installs the plugin from, checked before anything is built.
+MARKETPLACE_RE='^[A-Za-z0-9]([A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$'
+MARKETPLACE="${PLUGIN_MARKETPLACE:-}"
+if [[ -n "$MARKETPLACE" ]]; then
+  if [[ ! "$MARKETPLACE" =~ $MARKETPLACE_RE || "${MARKETPLACE#*/}" == "." || "${MARKETPLACE#*/}" == ".." ]]; then
+    echo "error: PLUGIN_MARKETPLACE must be a GitHub owner/repo, such as example-org/team-relay" >&2
+    exit 1
+  fi
+  if [[ -z "${PUBLIC_HOST:-}" ]]; then
+    echo "error: PLUGIN_MARKETPLACE needs PUBLIC_HOST: the setup command sends members to the console" >&2
+    echo "       at the relay's address, which only the load balancer provides (scripts/deploy-lb.sh)" >&2
     exit 1
   fi
 fi
@@ -142,12 +176,13 @@ if [[ -z "$OAUTH_VERSION" ]]; then
 fi
 
 # Reachable without Cloud Run IAM (M5-SPEC §5): the browser has to reach the sign-in pages
-# before anyone is signed in. Every other endpoint authenticates in the app (a device
-# credential, a Google ID token or a delegate), against the team's roster.
+# before anyone is signed in, and /setup is fetched by curl with no identity. Every other
+# endpoint authenticates in the app (a device credential, a Google ID token or a delegate),
+# against the team's roster.
 #
 # Behind the load balancer the same holds: it forwards without an identity (no IAP on the
-# relay's backend), so the invoker stays allUsers, and the ingress setting is what keeps the
-# run.app URL closed from outside.
+# relay's backend), so the invoker IAM check is off (--no-invoker-iam-check, M11-SPEC §7; no
+# allUsers grant), and the ingress setting is what keeps the run.app URL closed from outside.
 #
 # --update-env-vars, never --set-env-vars. RELAY_AUDIENCE holds a comma, so the list uses
 # gcloud's alternate delimiter syntax (^;^). --set-secrets lists every secret each time, so a
@@ -163,6 +198,14 @@ else
   REMOVE_VARS+=(RELAY_ALLOWED_DOMAINS)
   DOMAINS_NOTE="any Google account"
 fi
+if [[ -n "$MARKETPLACE" ]]; then
+  ENV_VARS="${ENV_VARS};RELAY_PLUGIN_MARKETPLACE=${MARKETPLACE}"
+  SETUP_NOTE="setup from ${MARKETPLACE}"
+else
+  # Not configured: the relay answers /setup with 404.
+  REMOVE_VARS+=(RELAY_PLUGIN_MARKETPLACE)
+  SETUP_NOTE="no setup command"
+fi
 if [[ -n "$DRIVE_VERSION" ]]; then
   SECRETS="${SECRETS},/secrets/drive-oauth/client.json=${DRIVE_SECRET}:${DRIVE_VERSION}"
   ENV_VARS="${ENV_VARS};RELAY_DRIVE_CLIENT_FILE=/secrets/drive-oauth/client.json"
@@ -177,13 +220,13 @@ if [[ ${#REMOVE_VARS[@]} -gt 0 ]]; then
   REMOVE_FLAG=("--remove-env-vars=$(IFS=','; echo "${REMOVE_VARS[*]}")")
 fi
 
-echo "Deploying ${SERVICE} (${IMAGE_BY_DIGEST}, team config v${SECRET_VERSION}, oauth v${OAUTH_VERSION}, ${DRIVE_NOTE}, ${DOMAINS_NOTE}, ingress ${INGRESS})"
+echo "Deploying ${SERVICE} (${IMAGE_BY_DIGEST}, team config v${SECRET_VERSION}, oauth v${OAUTH_VERSION}, ${DRIVE_NOTE}, ${DOMAINS_NOTE}, ${SETUP_NOTE}, ingress ${INGRESS})"
 gcloud run deploy "$SERVICE" \
   --project="$PROJECT" \
   --region="$REGION" \
   --image="$IMAGE_BY_DIGEST" \
   --service-account="$RUNTIME_EMAIL" \
-  --allow-unauthenticated \
+  --no-invoker-iam-check \
   --ingress="$INGRESS" \
   --min-instances=0 --max-instances=3 --cpu=1 --memory=512Mi --timeout=60 \
   --set-secrets="$SECRETS" \
@@ -191,9 +234,23 @@ gcloud run deploy "$SERVICE" \
   --update-env-vars="$ENV_VARS" \
   --quiet
 
+# An allUsers invoker grant left by an earlier deploy (before --no-invoker-iam-check) is removed,
+# so the policy says what the service does and re-enabling the IAM check never makes it public.
+INVOKER_BINDINGS="$(gcloud run services get-iam-policy "$SERVICE" --project="$PROJECT" --region="$REGION" \
+  --flatten='bindings[].members' --format='csv[no-heading](bindings.role,bindings.members)')"
+if grep -qx 'roles/run.invoker,allUsers' <<<"$INVOKER_BINDINGS"; then
+  gcloud run services remove-iam-policy-binding "$SERVICE" --project="$PROJECT" --region="$REGION" \
+    --member=allUsers --role=roles/run.invoker --quiet >/dev/null
+  echo "   allUsers invoker grant: removed (the invoker IAM check is off instead)"
+fi
+
 echo
 echo "Deployed ${SERVICE}: ${URL}"
 if [[ -n "${PUBLIC_HOST:-}" ]]; then
   echo "   ${RUN_URL} answers nothing from outside (ingress ${INGRESS})."
 fi
-echo "Members install the plugin and run /team-relay:login (relay ${URL})."
+if [[ -n "$MARKETPLACE" ]]; then
+  echo "Members join with: curl -fsSL ${URL}/setup | bash"
+else
+  echo "Members install the plugin and run /team-relay:login (relay ${URL})."
+fi

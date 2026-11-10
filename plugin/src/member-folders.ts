@@ -1,10 +1,14 @@
 // M10-SPEC §2, §7.1: the member's own, local part of the boundaries, per team. Where their
 // clones live (`repo_roots`, searched 3 levels deep for work trees of the team's GitHub orgs),
-// folders of their own (`extra_folders`, used only when the team allows it), and the team
-// boundaries they accepted (`accepted`). The answerer reads only from what is both in the team's
-// current boundaries and in the accepted set (effectiveBoundaries): narrowing applies at once,
-// widening only once the member accepts it in /team-relay:folders. Nothing accepted: nothing is
-// answered for that team.
+// folders of their own (`extra_folders`, used only when the team allows it). The answerer reads
+// only from what is both in the team's current boundaries and in the accepted set
+// (effectiveBoundaries): narrowing applies at once, widening only once the member accepts it.
+// Nothing accepted: nothing is answered for that team.
+//
+// M11-SPEC §2: the member accepts in the browser and the relay keeps the accepted version
+// (GET me/acceptance); acceptedAtVersion turns that version into the accepted set. The
+// `accepted` entry M10 kept in this file is ignored from now on: still read without complaint
+// (a malformed one counts as absent), never used to decide what is read.
 //
 //   $XDG_CONFIG_HOME/team-relay/boundaries.local.json   (default ~/.config/team-relay/)
 //   {"teams": {"<team>": {"repo_roots": ["~/code/example-org"], "extra_folders": [],
@@ -149,7 +153,15 @@ export function parseTeamSettings(raw: unknown, env: NodeJS.ProcessEnv, team = '
   if (!isObj(raw)) throw new MemberFoldersError(`the settings for ${team} are not a JSON object`);
   onlyKeys(raw, ['repo_roots', 'extra_folders', 'accepted'], `the settings for ${team}`);
   const folders = parseMemberFolders(raw, env, `the settings for ${team}`);
-  const accepted = raw.accepted === undefined || raw.accepted === null ? null : parseAccepted(raw.accepted);
+  // M11-SPEC §2: ignored from now on, so one that does not parse is no reason to refuse the file.
+  let accepted: AcceptedBoundaries | null = null;
+  if (raw.accepted !== undefined && raw.accepted !== null) {
+    try {
+      accepted = parseAccepted(raw.accepted);
+    } catch {
+      accepted = null;
+    }
+  }
   return { ...folders, accepted };
 }
 
@@ -424,6 +436,22 @@ export function settingsNarrowedTo(
   const next: TeamSettings = { ...mine, accepted: narrowed.accepted };
   writeMemberSettings(path, withTeam(all, team, next), env);
   return { settings: next, dropped: narrowed.dropped };
+}
+
+/**
+ * M11-SPEC §2: the accepted set the relay's accepted version stands for: every item of the
+ * team's current boundaries, as accepted at that version (effectiveBoundaries then keeps only
+ * those in the boundaries since that version or earlier, M10-SPEC §7.1). Null, nothing
+ * accepted, for version 0 (never accepted), anything that is not a whole number from 1, and a
+ * version greater than the document's (an earlier team under the same id: it covers nothing).
+ */
+export function acceptedAtVersion(current: Boundaries, version: unknown, since: ItemSince): AcceptedBoundaries | null {
+  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1 || version > since.version) return null;
+  try {
+    return acceptedFrom(current, version);
+  } catch {
+    return null;
+  }
 }
 
 /** What accepting a team's boundaries (version `version`) records. */
