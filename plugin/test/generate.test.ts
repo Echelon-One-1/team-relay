@@ -12,6 +12,7 @@ function copyPlugin(): string {
   cpSync(join(PLUGIN_ROOT, 'manifest.yaml'), join(dir, 'manifest.yaml'));
   cpSync(join(PLUGIN_ROOT, '.claude-plugin'), join(dir, '.claude-plugin'), { recursive: true });
   cpSync(join(PLUGIN_ROOT, '.mcp.json'), join(dir, '.mcp.json'));
+  cpSync(join(PLUGIN_ROOT, 'hooks'), join(dir, 'hooks'), { recursive: true });
   cpSync(join(PLUGIN_ROOT, 'commands'), join(dir, 'commands'), { recursive: true });
   return dir;
 }
@@ -56,9 +57,10 @@ describe('generator', () => {
     const raw = readFileSync(join(PLUGIN_ROOT, '.mcp.json'), 'utf8');
     const mcp = JSON.parse(raw);
     expect(Object.keys(mcp.mcpServers)).toEqual(['relay']);
+    // Started through bin/run-node, never `node` from Claude Code's PATH (M11-SPEC "Simpler joining").
     expect(mcp.mcpServers.relay).toEqual({
-      command: 'node',
-      args: ['${CLAUDE_PLUGIN_ROOT}/dist/channel.js'],
+      command: '/bin/sh',
+      args: ['${CLAUDE_PLUGIN_ROOT}/bin/run-node', '${CLAUDE_PLUGIN_ROOT}/dist/channel.js'],
       env: { RELAY_ROLE: 'asker' },
     });
     expect(raw).not.toContain('user_config');

@@ -1,4 +1,4 @@
-import { CircleCheck, FolderGit2, FolderOpen, HardDrive, MessageSquare, ShieldAlert } from 'lucide-react'
+import { CircleAlert, CircleCheck, FolderGit2, FolderOpen, HardDrive, LoaderCircle, MessageSquare, ShieldAlert } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 
 import type { ChangeError } from '@/api/client'
@@ -21,21 +21,55 @@ import {
   acceptedVersion,
   boundariesSet,
   boundaryItems,
+  CHECKING,
   currentVersion,
   publicOrigin,
   SETUP_STEPS,
   setupCommand,
   setupSteps,
+  type MacCheck,
   type SetupStep,
 } from '@/lib/setup'
 import { cn } from '@/lib/utils'
-import { CopyCommand } from './copy'
+import { BigCopyCommand, CopyCommand } from './copy'
 import { Panel } from './primitives'
 
-// M11 §6: the Join page. After accepting the invitation, a member sets up their Mac with one
-// command and watches seven steps tick as the Mac reports in (members-status and the
-// acceptance, read every 5 s while the page is visible). The boundaries are accepted here, by
-// the member, for themselves. Any member can come back to it from the page tabs.
+// M11 §6 and "Simpler joining": the Setup page. Two plain steps that tick on their own (read
+// every 5 s while the page is visible): set up your Mac with one line in Terminal, and accept
+// what the team shares (the member, for themselves). Inside the first step, only what is not
+// done yet shows, each as one sentence of what to do. Below them, always: Ask the team (never a
+// step: asking is what the setup is for, and works whatever the steps say).
+
+/**
+ * The viewer's own progress, from the Mac's last report, their acceptance and the team's
+ * boundaries. Used by the Setup page, its tab and the join card.
+ */
+export function useViewerSetup(intervalMs?: number) {
+  const me = useMe()
+  const statuses = useMembersStatus(intervalMs)
+  const acceptance = useAcceptance(intervalMs)
+  const bounds = useBoundaries()
+  const member = me.data?.member ?? null
+  const entry = statuses.data?.members.find((m) => m.member === member) ?? null
+  const current = currentVersion(bounds.data, statuses.data?.boundaries_version ?? null)
+  const accepted = acceptedVersion(entry, acceptance.data)
+  const steps = setupSteps(entry, bounds.data, accepted, current)
+  return {
+    me,
+    entry,
+    statuses,
+    bounds,
+    current,
+    accepted,
+    steps,
+    done: steps.filter((s) => s.done).length,
+    loading: me.isPending || statuses.isPending,
+    /** An older relay that does not report setup progress (404). */
+    missing: statuses.error?.kind === 'not_found',
+    /** Everything the steps are worked out from has loaded at least once. */
+    known: !!me.data && !!statuses.data && !!bounds.data,
+  }
+}
 
 function NewMark() {
   return (
@@ -56,7 +90,7 @@ function Line({ icon, children }: { icon: ReactNode; children: ReactNode }) {
   )
 }
 
-/** Step 6: what the viewer accepts, with what changed since their last acceptance, and Accept. */
+/** Step 2: what the team shares, with what is new since the viewer last accepted, and Accept. */
 function AcceptBoundaries({
   bounds,
   accepted,
@@ -79,17 +113,17 @@ function AcceptBoundaries({
   return (
     <div className="flex flex-col gap-2.5 rounded-md border bg-canvas px-3 py-2.5" data-accept-boundaries={bounds.version}>
       <p className="text-[12px] text-subtle">
-        Your Mac answers from these only (version {bounds.version}).{' '}
-        {accepted > 0 && !done ? `You accepted version ${accepted}; what was added since is marked new.` : null}
+        Your Mac answers teammates from these only.{' '}
+        {accepted > 0 && !done ? 'Anything added since you last accepted is marked new.' : null}
       </p>
       <p className="text-[12.5px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]" data-topic>
         {items.topic}
       </p>
-      <ul className="flex flex-col gap-1.5" aria-label="What your Mac answers from">
+      <ul className="flex flex-col gap-1.5" aria-label="What the team shares">
         {items.orgs.map((o) => (
           <Line key={`org-${o.name}`} icon={<FolderGit2 />}>
             <span>
-              GitHub org <span className="font-mono text-[12px]">{o.name}</span>
+              GitHub: <span className="font-mono text-[12px]">{o.name}</span>
             </span>
             {o.isNew ? <NewMark /> : null}
           </Line>
@@ -108,8 +142,8 @@ function AcceptBoundaries({
         </Line>
       </ul>
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" onClick={submit} disabled={done || stale || accept.isPending}>
-          {done ? `Accepted version ${bounds.version}` : accept.isPending ? 'Accepting…' : `Accept version ${bounds.version}`}
+        <Button size="sm" onClick={submit} disabled={done || stale || accept.isPending} data-accept-version={bounds.version}>
+          {done ? 'Accepted' : accept.isPending ? 'Accepting…' : 'Accept'}
         </Button>
         {stale ? <span className="text-[12px] text-subtle">Loading the latest version…</span> : null}
       </div>
@@ -122,9 +156,32 @@ function AcceptBoundaries({
   )
 }
 
+/** What "Set up your Mac" still needs, one sentence each. */
+function OpenChecks({ checks }: { checks: MacCheck[] }) {
+  const open = checks.filter((c) => !c.done && c.id !== 'setup')
+  if (open.length === 0) return null
+  return (
+    <ul className="flex flex-col gap-1.5" aria-label="Still to do on your Mac">
+      {open.map((c) => {
+        const running = c.todo === CHECKING
+        return (
+          <li key={c.id} className="flex items-start gap-2 text-[12.5px] leading-relaxed" data-mac-check={c.id}>
+            {running ? (
+              <LoaderCircle aria-hidden className="mt-0.5 size-3.5 shrink-0 animate-spin text-subtle motion-reduce:animate-none" />
+            ) : (
+              <CircleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0 text-warn" />
+            )}
+            <span className="min-w-0 [overflow-wrap:anywhere]">{c.todo}</span>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
 function StepItem({ n, step, children }: { n: number; step: SetupStep; children?: ReactNode }) {
   return (
-    <li className="flex gap-3 py-3" data-setup-step={step.id} data-done={step.done ? 'true' : 'false'}>
+    <li className="flex gap-3 py-3.5" data-setup-step={step.id} data-done={step.done ? 'true' : 'false'}>
       {step.done ? (
         <CircleCheck aria-hidden className="mt-px size-5 shrink-0 text-ok" />
       ) : (
@@ -135,12 +192,11 @@ function StepItem({ n, step, children }: { n: number; step: SetupStep; children?
           {n}
         </span>
       )}
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-        <h3 className={cn('text-[13px] leading-5 font-semibold', step.done && 'text-subtle')}>
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <h3 className={cn('text-[13.5px] leading-5 font-semibold', step.done && 'text-subtle')}>
           {step.title}
           <span className="sr-only">{step.done ? ' (done)' : ' (to do)'}</span>
         </h3>
-        {step.done ? null : <p className="text-[12.5px] leading-relaxed text-subtle">{step.todo}</p>}
         {children}
       </div>
     </li>
@@ -148,16 +204,12 @@ function StepItem({ n, step, children }: { n: number; step: SetupStep; children?
 }
 
 export function SetupPage() {
-  const me = useMe()
   const join = useJoin()
   const nav = useNav()
-  const statuses = useMembersStatus(SETUP_INTERVAL_MS)
-  const acceptance = useAcceptance(SETUP_INTERVAL_MS)
-  const bounds = useBoundaries()
+  const v = useViewerSetup(SETUP_INTERVAL_MS)
   const refresh = useRefreshBoundaries()
+  const { statuses, bounds, steps, done, loading, missing } = v
 
-  const member = me.data?.member ?? null
-  const entry = statuses.data?.members.find((m) => m.member === member) ?? null
   const statusVersion = statuses.data?.boundaries_version ?? null
   const shownVersion = bounds.data?.version ?? null
   // members-status names a newer version than the boundaries on screen: read them again.
@@ -165,19 +217,65 @@ export function SetupPage() {
     if (statusVersion !== null && shownVersion !== null && statusVersion > shownVersion) refresh()
   }, [statusVersion, shownVersion, refresh])
 
-  const current = currentVersion(bounds.data, statusVersion)
-  const accepted = acceptedVersion(entry, acceptance.data)
-  const steps = setupSteps(entry, bounds.data, accepted, current)
-  const done = steps.filter((s) => s.done).length
   const origin = publicOrigin(window.location, join.data)
-  const loading = me.isPending || statuses.isPending
-  const missing = statuses.error?.kind === 'not_found'
+  const command = origin ? setupCommand(origin) : null
+  const allDone = !loading && done === SETUP_STEPS
+
+  const macBody = (step: SetupStep) => (
+    <>
+      {step.done ? (
+        <p className="text-[12.5px] leading-relaxed text-subtle">
+          Your Mac answers teammates in the background. To change your folders, run the setup line again.
+        </p>
+      ) : (
+        <p className="text-[12.5px] leading-relaxed text-subtle">
+          Open Terminal (press Cmd+Space, type Terminal, press Enter). Paste this line, press Enter and answer its questions.
+        </p>
+      )}
+      {command ? (
+        step.done ? (
+          <CopyCommand text={command} label="setup line" />
+        ) : (
+          <BigCopyCommand text={command} label="setup line" />
+        )
+      ) : join.isPending ? (
+        <Skeleton className="h-9 w-full" />
+      ) : (
+        <p className="text-[12.5px] text-subtle" data-no-command>
+          The setup line is on your team&apos;s page online. Ask a team owner for it.
+        </p>
+      )}
+      {missing ? (
+        <p className="text-[12.5px] text-subtle" data-setup-missing>
+          This team can&apos;t show your progress here yet, so nothing ticks.
+        </p>
+      ) : statuses.isError && !statuses.data ? (
+        <p className="text-[12.5px] text-subtle">Your progress didn&apos;t load. It is checked again in a few seconds.</p>
+      ) : (
+        <OpenChecks checks={step.checks} />
+      )}
+    </>
+  )
+
+  const acceptBody = (step: SetupStep) =>
+    bounds.isPending ? (
+      <Skeleton className="h-16 w-full" />
+    ) : boundariesSet(bounds.data) ? (
+      <AcceptBoundaries bounds={bounds.data} accepted={v.accepted} current={v.current} />
+    ) : bounds.isError && !bounds.data ? (
+      <p className="text-[12.5px] text-subtle">What the team shares didn&apos;t load. It is read again in a moment.</p>
+    ) : step.done ? null : (
+      <p className="text-[12.5px] leading-relaxed text-subtle">
+        A team owner hasn&apos;t chosen what the team shares yet. Nothing is answered until they do.
+      </p>
+    )
+
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
       <Panel
         id="setup"
-        title="Set up your Mac"
+        title="Your setup"
         aside={
           loading || missing ? null : (
             <span className="tnum text-[12px] text-subtle" data-setup-count={done}>
@@ -186,62 +284,39 @@ export function SetupPage() {
           )
         }
       >
-        <div className="flex flex-col gap-3 px-4 pt-3.5">
-          <p className="text-[12.5px] leading-relaxed text-subtle">
-            Run one command in Terminal on your Mac. It installs what is needed, signs you in and starts answering
-            teammates in the background. The steps below tick on their own as your Mac reports in.
-          </p>
-          {origin ? (
-            <CopyCommand text={setupCommand(origin)} label="setup command" />
-          ) : join.isPending ? (
-            <Skeleton className="h-8 w-full" />
-          ) : (
-            <p className="text-[12.5px] text-subtle" data-no-command>
-              The setup command is on the team&apos;s hosted console. Ask a team owner for it.
-            </p>
-          )}
-          {missing ? (
-            <p className="text-[12.5px] text-subtle" data-setup-missing>
-              This relay does not report setup progress yet, so nothing ticks here.
-            </p>
-          ) : statuses.isError && !statuses.data ? (
-            <p className="text-[12.5px] text-subtle">Your progress did not load. It is checked again in a few seconds.</p>
-          ) : null}
-        </div>
         {loading ? (
           <div className="flex flex-col gap-3 p-4" aria-label="Loading your progress">
             <Skeleton className="h-5 w-2/5" />
-            <Skeleton className="h-5 w-1/2" />
+            <Skeleton className="h-9 w-full" />
             <Skeleton className="h-5 w-1/3" />
           </div>
         ) : (
-          <ol className="divide-y divide-hairline px-4" aria-label="Setup steps">
+          <ol className="divide-y divide-hairline px-4 pb-1" aria-label="Setup steps">
             {steps.map((s, i) => (
               <StepItem key={s.id} n={i + 1} step={s}>
-                {s.id === 'boundaries' ? (
-                  bounds.isPending ? (
-                    <Skeleton className="h-16 w-full" />
-                  ) : boundariesSet(bounds.data) ? (
-                    <AcceptBoundaries bounds={bounds.data} accepted={accepted} current={current} />
-                  ) : bounds.isError && !bounds.data ? (
-                    <p className="text-[12.5px] text-subtle">The boundaries did not load. They are read again in a moment.</p>
-                  ) : null
-                ) : null}
+                {s.id === 'mac' ? macBody(s) : acceptBody(s)}
               </StepItem>
             ))}
           </ol>
         )}
-        {!loading && done === SETUP_STEPS ? (
-          <div className="mx-4 mb-4 flex flex-wrap items-center gap-3 rounded-md border border-ok/30 bg-ok-soft px-3 py-2.5" data-setup-complete>
-            <CircleCheck aria-hidden className="size-4 shrink-0 text-ok" />
-            <p className="min-w-0 flex-1 text-[13px] font-medium">You&apos;re set up. Your Mac answers teammates in the background.</p>
-            <Button size="sm" onClick={() => nav.setView('ask')}>
+        {/* Never a step: always there, and the big next thing once both steps are done. */}
+        {allDone ? (
+          <div className="m-4 flex flex-col items-start gap-3 rounded-md border border-ok/30 bg-ok-soft px-4 py-3.5 sm:flex-row sm:items-center" data-ask-cta data-setup-complete>
+            <CircleCheck aria-hidden className="size-5 shrink-0 text-ok" />
+            <p className="min-w-0 flex-1 text-[14px] font-semibold">You&apos;re all set</p>
+            <Button size="lg" onClick={() => nav.setView('ask')}>
               <MessageSquare aria-hidden />
               Ask the team
             </Button>
           </div>
         ) : (
-          <div className="h-1" />
+          <div className="m-4 flex flex-wrap items-center gap-3 rounded-md border bg-canvas px-4 py-3" data-ask-cta>
+            <MessageSquare aria-hidden className="size-4 shrink-0 text-subtle" />
+            <p className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-subtle">Ask your teammates a question at any time.</p>
+            <Button size="sm" variant="outline" onClick={() => nav.setView('ask')}>
+              Ask the team
+            </Button>
+          </div>
         )}
       </Panel>
     </div>
@@ -249,8 +324,9 @@ export function SetupPage() {
 }
 
 /**
- * M11 §6 item 6: on the team page, the boundaries changed since the viewer last accepted them
- * (or were never accepted). A link to the Join page, where they read and accept them.
+ * On the team page, once the viewer has joined: what the team shares changed since they last
+ * accepted it (or was never accepted). A link to the Setup page, where they read and accept it.
+ * Hidden while the join card shows (it says the same).
  */
 export function AcceptBanner() {
   const acceptance = useAcceptance()
@@ -262,15 +338,15 @@ export function AcceptBanner() {
   return (
     <div
       role="region"
-      aria-label="Boundaries to accept"
+      aria-label="Accept what the team shares"
       className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-warn/30 bg-warn-soft px-4 py-2.5"
       data-accept-banner={bounds.data.version}
     >
       <ShieldAlert aria-hidden className="size-4 shrink-0 text-warn" />
       <p className="min-w-0 flex-1 text-[12.5px] leading-snug">
         {first
-          ? "Accept the team's boundaries so your Mac can answer teammates."
-          : "The team's boundaries changed. Accept the new version so your Mac answers from it."}
+          ? 'Accept what the team shares, so your Mac can answer teammates.'
+          : 'What the team shares has changed. Accept it again, so your Mac answers from it.'}
       </p>
       <Button size="xs" variant="outline" onClick={() => nav.setView('join')}>
         Review and accept
@@ -280,12 +356,12 @@ export function AcceptBanner() {
 }
 
 const VIEWS: Array<{ view: ConsoleView; label: string }> = [
-  { view: 'team', label: 'Team' },
   { view: 'ask', label: 'Ask' },
+  { view: 'team', label: 'Team' },
   { view: 'join', label: 'Setup' },
 ]
 
-/** The team's pages (M11): the team view, Ask, and the Join checklist ("Setup"). */
+/** The team's pages (M11): Ask first, then the team view and Setup (the landing page stays the team's). */
 export function ViewTabs({ setup }: { setup: { done: number } | null }) {
   const nav = useNav()
   return (
@@ -319,3 +395,4 @@ export function ViewTabs({ setup }: { setup: { done: number } | null }) {
     </nav>
   )
 }
+

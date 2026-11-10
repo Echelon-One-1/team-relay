@@ -7,7 +7,7 @@ disable-model-invocation: true
 I ran `/team-relay:drive $ARGUMENTS`. It ran this command, whose output follows (`connect` opens
 Google's sign-in in my browser and waits up to 110 seconds for me to finish there):
 
-!`node "${CLAUDE_PLUGIN_ROOT}/dist/drive-cli.js" $ARGUMENTS`
+!`/bin/sh "${CLAUDE_PLUGIN_ROOT}/bin/run-node" "${CLAUDE_PLUGIN_ROOT}/dist/drive-cli.js" $ARGUMENTS`
 
 Tell me in one line what that output says. Do not run it again, and do not run anything else. The
 connection lets my answering session read the team's Google Docs, Sheets and Slides (read-only); its

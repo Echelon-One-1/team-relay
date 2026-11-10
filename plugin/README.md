@@ -45,7 +45,7 @@ Commands (`commands/*.md`, namespaced by the plugin name):
 | Command | What it does |
 |---|---|
 | `/team-relay:login` | Calls the `login` tool, which takes no arguments: signs this computer in to the configured relay (below). The relay's page lists your open team invitations (Accept, Decline) and lets you create a team (at most 3 per Google account). |
-| `/team-relay:logout` | Runs `node "${CLAUDE_PLUGIN_ROOT}/dist/logout.js"` itself (the `` !`…` `` form, when the command expands): revokes this computer's credential at its relay, then deletes it. |
+| `/team-relay:logout` | Runs `dist/logout.js` itself through `bin/run-node` (the `` !`…` `` form, when the command expands): revokes this computer's credential at its relay, then deletes it. |
 | `/team-relay:approvals` | Calls the `review_approvals` tool (no arguments): each answer or step waiting for your approval opens as a dialog (MCP elicitation), and you decide there (M8, below). |
 | `/team-relay:answering` | Optional: prints the one command that starts a manual answering session (`"${CLAUDE_PLUGIN_ROOT}/bin/answerer"`), and the settings that share folders and offer capabilities (generated from `manifest.yaml`). |
 | `/team-relay:console` | Prints the command that opens the local console (`"${CLAUDE_PLUGIN_ROOT}/bin/console" --open`). |
@@ -380,8 +380,14 @@ node dist/setup-cli.js folders                        # choose the folders that 
 node dist/setup-cli.js drive                          # when the team has shared drives
 node dist/setup-cli.js daemon install --claude <abs path of claude> --plugin team-relay@<marketplace>
 node dist/setup-cli.js daemon uninstall
-node dist/setup-cli.js status                         # your setup checklist
+node dist/setup-cli.js status [--after-setup]         # your setup checklist (--after-setup: wait for the first check-in)
 ```
+
+Claude Code starts the plugin's servers, its SessionStart hook and the `!` lines of its commands
+with `/bin/sh bin/run-node <script>`, never `node` from PATH: `bin/run-node` uses the first `node`
+in an absolute PATH entry when it is 22.12 or newer, else the newest Node.js the setup line installed in
+`~/.local/share/team-relay/node-v<version>-*`, else says in one line to paste the setup line
+again (M11-SPEC "Simpler joining" §3).
 
 `daemon install` writes `~/.config/team-relay/daemon-launch.mjs` (at each start it finds the
 plugin installed for you under exactly that `team-relay@<marketplace>` key in
@@ -598,7 +604,7 @@ is no longer open, so tool calls after it are not reported.
 | `ANSWERER_HOME` | `bin/answerer` | Where the session's configuration lives (`mcp.json`, `settings.json`, `tool-event.json`, `config/`, `state/`). Default `~/.claude-team-relay/answerer`. |
 | `ANSWERER_STATE_DIR` | answerer channel | Set by `bin/answerer` to `$ANSWERER_HOME/state`: where `active.json` is kept. |
 | `CONSOLE_PORT` | `bin/console` | Default 4317; `0` picks a free port. |
-| `JOIN_MARKETPLACE` | console server | Optional: what the join panel tells new members to `/plugin marketplace add` (a GitHub `owner/repo`, or a plain `https://` URL). |
+| `JOIN_MARKETPLACE` | console server | Optional: the marketplace source in `GET /api/join` (a GitHub `owner/repo`, or a plain `https://` URL). Consoles before "Simpler joining" (M11-SPEC) showed it in their join panel; the current console does not. |
 | `JOIN_REPO_URL` | console server | Optional: the `https://` URL of this repository; a GitHub URL becomes the marketplace source when `JOIN_MARKETPLACE` is unset. |
 | `CONSOLE_MODE` | console server | `local` (default) or `hosted` (the container only). |
 | `PORT`, `CONSOLE_PUBLIC_HOST`, `IAP_AUDIENCE` | hosted console | Listening port (default 8080), the exact public host, the IAP audience. |
@@ -684,8 +690,8 @@ it back as `X-Console-Key` on every API call. The server:
   `JOIN_MARKETPLACE` and `JOIN_REPO_URL` (`null` when unset; demo values with `--demo`);
   `default_relay` says whether the plugin's default relay is this one (else the panel's
   working-session command starts with `RELAY_URL=<relay>`; `/team-relay:login` takes no
-  relay URL). The console's
-  *Join the team* panel builds its three steps from it. Nothing in it is secret; a
+  relay URL). The current console reads only `relay_url` from it (the local console's setup
+  line, M11-SPEC "Simpler joining"); the other fields served the join panel of older consoles. Nothing in it is secret; a
   `JOIN_REPO_URL` or `JOIN_MARKETPLACE` that is not plain stops the server at startup;
 - with `--open`, opens the console without putting the key in any process's arguments
   (which other local users can list): it writes a mode-600 HTML file that redirects to the

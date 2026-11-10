@@ -1,5 +1,6 @@
-// M11 §6: the Join checklist's rules, the boundaries' "new" marks, the setup command, the
-// invite message, and reading members-status and the acceptance without trusting their shape.
+// M11 §6 and "Simpler joining": the three steps' rules (with the Mac's own checks inside the
+// first), the boundaries' "new" marks, the setup line, the invite message, and reading
+// members-status and the acceptance without trusting their shape.
 
 import { describe, expect, it } from 'vitest'
 
@@ -9,10 +10,13 @@ import {
   boundaryItems,
   currentVersion,
   inviteMessage,
+  hasJoined,
+  macChecks,
   publicOrigin,
   readAcceptance,
   readMembersStatus,
   SELF_TEST_PENDING,
+  SETUP_STEPS,
   setupCommand,
   setupCount,
   setupSteps,
@@ -58,63 +62,102 @@ const BOUNDS: TeamBoundaries = {
 }
 
 const done = (steps: ReturnType<typeof setupSteps>) => Object.fromEntries(steps.map((s) => [s.id, s.done]))
+// `b` left out: the team's boundaries (BOUNDS); passed as undefined or null: not read.
+type Read = TeamBoundaries | null | undefined
+const checks = (e: MemberStatusEntry | null, ...b: [Read?]) => Object.fromEntries(macChecks(e, b.length ? b[0] : BOUNDS).map((c) => [c.id, c.done]))
+const todo = (e: MemberStatusEntry | null, id: string, ...b: [Read?]) => macChecks(e, b.length ? b[0] : BOUNDS).find((c) => c.id === id)!.todo
 
-describe('setupSteps (M11 §6)', () => {
-  it('ticks all seven for a Mac that is set up, answering, and has accepted the current version', () => {
+describe('setupSteps: two plain steps', () => {
+  it('both done for a Mac that is set up and answering, and the current version accepted', () => {
     const steps = setupSteps(entry(status()), BOUNDS, 3, 3)
-    expect(steps.map((s) => s.id)).toEqual(['setup', 'claude', 'answering', 'folders', 'drive', 'boundaries', 'self_test'])
+    expect(steps.map((s) => [s.id, s.title])).toEqual([
+      ['mac', 'Set up your Mac'],
+      ['accept', 'Accept what the team shares'],
+    ])
+    expect(SETUP_STEPS).toBe(2)
     expect(steps.every((s) => s.done)).toBe(true)
-    expect(setupCount(entry(status()), BOUNDS, 3)).toBe(7)
+    expect(setupCount(entry(status()), BOUNDS, 3)).toBe(2)
+    expect(setupCount(entry(status(), true, 2), BOUNDS, 3)).toBe(1)
   })
 
-  it('without any status: nothing ticks but what the team does not need, and each step says what to do', () => {
+  it('joined (the join card goes): the Mac has reported once and the member has accepted once', () => {
+    expect(hasJoined(entry(null, false, 0), BOUNDS, 0)).toBe(false)
+    expect(hasJoined(null, BOUNDS, 0)).toBe(false)
+    expect(hasJoined(entry(status()), BOUNDS, 0)).toBe(false)
+    expect(hasJoined(entry(status()), BOUNDS, 3)).toBe(true)
+    // Later trouble does not undo joining: the Mac off, an older version accepted.
+    expect(hasJoined(entry(status({ drive: false }), false), BOUNDS, 2)).toBe(true)
+    // Nothing to accept yet (or not read yet): the Mac reporting is enough.
+    const none: TeamBoundaries = { team: 'demo', version: 0, boundaries: null, since: null, updated_at: null, updated_by: null }
+    expect(hasJoined(entry(status()), none, 0)).toBe(true)
+    expect(hasJoined(entry(null), none, 0)).toBe(false)
+  })
+
+  it('without any status: the only check is running the setup line', () => {
     const steps = setupSteps(entry(null, false, 0), BOUNDS, 0, 3)
-    expect(done(steps)).toEqual({ setup: false, claude: false, answering: false, folders: false, drive: false, boundaries: false, self_test: false })
-    for (const s of steps) expect(s.todo).toMatch(/\.$/)
-    expect(steps.find((s) => s.id === 'folders')!.todo).toContain('Example-Org and second-org')
-    // A team with no orgs and no drives ticks those two.
-    const plain = { ...BOUNDS, boundaries: { ...BOUNDS.boundaries!, github_orgs: [], drives: [] } }
-    expect(done(setupSteps(null, plain, 0, 3))).toMatchObject({ folders: true, drive: true, setup: false })
+    expect(done(steps)).toEqual({ mac: false, accept: false })
+    expect(steps[0]!.checks).toEqual([
+      { id: 'setup', done: false, todo: 'Paste the setup line into Terminal on your Mac, press Enter and answer its questions.' },
+    ])
+    expect(setupSteps(null, BOUNDS, 0, 3)[0]!.checks.map((c) => c.id)).toEqual(['setup'])
   })
 
-  it('each check reads its own field', () => {
-    expect(done(setupSteps(entry(status({ found: false })), BOUNDS, 3, 3)).claude).toBe(false)
-    expect(setupSteps(entry(status({ found: false })), BOUNDS, 3, 3)[1]!.todo).toMatch(/Install Claude Code/)
-    expect(setupSteps(entry(status({ signedIn: false })), BOUNDS, 3, 3)[1]!.todo).toMatch(/claude auth login/)
-    expect(done(setupSteps(entry(status(), false), BOUNDS, 3, 3)).answering).toBe(false)
-    expect(done(setupSteps(entry(status({ roots: 0 })), BOUNDS, 3, 3)).folders).toBe(false)
-    expect(done(setupSteps(entry(status({ drive: false })), BOUNDS, 3, 3)).drive).toBe(false)
-    expect(done(setupSteps(entry(status()), BOUNDS, 2, 3)).boundaries).toBe(false)
-    const failed = setupSteps(entry(status({ ok: false, reason: 'Claude Code is not signed in.' })), BOUNDS, 3, 3)
-    expect(done(failed).self_test).toBe(false)
-    expect(failed[6]!.todo).toBe('The self-test failed (Claude Code is not signed in); fix that, then run the setup command again.')
-    // Not run yet (the daemon's first status) is not a failure.
-    const pending = setupSteps(entry(status({ ok: false, reason: SELF_TEST_PENDING })), BOUNDS, 3, 3)
+  it('the Mac step needs every old check: each reads its own field, and says in one plain sentence what to do', () => {
+    expect(checks(entry(status()))).toEqual({ setup: true, claude: true, answering: true, folders: true, drive: true, self_test: true })
+    expect(checks(entry(status({ found: false }))).claude).toBe(false)
+    expect(todo(entry(status({ found: false })), 'claude')).toBe("Claude Code isn't on your Mac yet. Run the setup line again and say yes when it offers to install it.")
+    expect(todo(entry(status({ signedIn: false })), 'claude')).toBe("Claude Code isn't signed in on your Mac. Run the setup line again and sign in when it asks.")
+    expect(checks(entry(status(), false)).answering).toBe(false)
+    expect(todo(entry(status(), false), 'answering')).toBe("Your Mac isn't answering right now. Make sure it's switched on; if this stays, run the setup line again.")
+    expect(checks(entry(status({ roots: 0 }))).folders).toBe(false)
+    expect(todo(entry(status({ roots: 0 })), 'folders')).toBe(
+      "Your Mac doesn't know where your Example-Org and second-org project folders are yet. Run the setup line again and pick them.",
+    )
+    expect(checks(entry(status({ drive: false }))).drive).toBe(false)
+    expect(todo(entry(status({ drive: false })), 'drive')).toBe("Google Drive isn't connected yet. Run the setup line again and sign in to Google when it asks.")
+    for (const e of [status({ found: false }), status({ roots: 0 }), status({ drive: false })]) {
+      expect(done(setupSteps(entry(e), BOUNDS, 3, 3)).mac).toBe(false)
+    }
+    // Never the technical names.
+    const all = macChecks(entry(status({ signedIn: false, roots: 0, drive: false, ok: false, reason: null }), false), BOUNDS).map((c) => c.todo)
+    for (const t of all) expect(t).not.toMatch(/daemon|LaunchAgent|plugin|channel|\bCLI\b|\bNode|boundaries|repo root|self-test|command/i)
+  })
+
+  it('the self-test: a failure says what to do and what to show an owner; not run yet is checking, not failed', () => {
+    const failed = entry(status({ ok: false, reason: 'Claude Code is not signed in.' }))
+    expect(checks(failed).self_test).toBe(false)
+    expect(todo(failed, 'self_test')).toBe(
+      "Your Mac's last check didn't pass. Run the setup line again. If it still doesn't pass, show this to a team owner: Claude Code is not signed in.",
+    )
+    expect(todo(entry(status({ ok: false, reason: null })), 'self_test')).toBe("Your Mac's last check didn't pass. Run the setup line again.")
+    const pending = entry(status({ ok: false, reason: SELF_TEST_PENDING }))
     expect(SELF_TEST_PENDING).toBe('the self-test has not run yet')
-    expect(done(pending).self_test).toBe(false)
-    expect(pending[6]!.todo).toBe('Running the self-test now; this takes about a minute.')
+    expect(checks(pending).self_test).toBe(false)
+    expect(todo(pending, 'self_test')).toBe('Your Mac is checking that everything works. This takes about a minute.')
   })
 
-  it('boundaries not read (still loading, or failed): folders and Drive are not known, never ticked', () => {
+  it('boundaries not read (still loading, or failed): folders and Drive are not known, never done', () => {
     const bare = entry(status({ roots: 0, drive: false }))
     for (const unread of [undefined, null]) {
-      const steps = setupSteps(bare, unread, 3, 3)
-      expect(done(steps)).toMatchObject({ folders: false, drive: false })
-      expect(steps[3]!.todo).toBe("Not known yet: the team's boundaries have not loaded.")
-      expect(steps[4]!.todo).toBe("Not known yet: the team's boundaries have not loaded.")
+      expect(checks(bare, unread)).toMatchObject({ folders: false, drive: false })
+      expect(todo(bare, 'folders', unread)).toBe("We couldn't check this yet, because the team's settings haven't loaded. This page tries again in a moment.")
+      expect(todo(bare, 'drive', unread)).toBe(todo(bare, 'folders', unread))
     }
-    // Not even a Mac that reports folders and Drive ticks them while they are not known.
-    expect(done(setupSteps(entry(status()), undefined, 3, 3))).toMatchObject({ folders: false, drive: false })
+    // Not even a Mac that reports folders and Drive counts as set up while they are not known.
+    expect(checks(entry(status()), undefined)).toMatchObject({ folders: false, drive: false })
+    expect(done(setupSteps(entry(status()), undefined, 3, 3)).mac).toBe(false)
     // Read and never set: nothing to choose, nothing to connect.
     const none: TeamBoundaries = { team: 'demo', version: 0, boundaries: null, since: null, updated_at: null, updated_by: null }
-    expect(done(setupSteps(bare, none, 0, 0))).toMatchObject({ folders: true, drive: true })
+    expect(checks(bare, none)).toMatchObject({ folders: true, drive: true })
+    // A team with no orgs and no drives needs neither.
+    const plain = { ...BOUNDS, boundaries: { ...BOUNDS.boundaries!, github_orgs: [], drives: [] } }
+    expect(checks(bare, plain)).toMatchObject({ folders: true, drive: true })
   })
 
-  it('boundaries never set: step 6 waits for an owner, and cannot tick', () => {
+  it('boundaries never set: accepting cannot be done', () => {
     const none: TeamBoundaries = { team: 'demo', version: 0, boundaries: null, since: null, updated_at: null, updated_by: null }
-    const step = setupSteps(entry(status()), none, 0, 0)[5]!
-    expect(step.done).toBe(false)
-    expect(step.todo).toMatch(/An owner has not set/)
+    expect(setupSteps(entry(status()), none, 0, 0)[1]!.done).toBe(false)
+    expect(setupSteps(entry(status()), BOUNDS, 2, 3)[1]!.done).toBe(false)
   })
 
   it('the accepted version: the acceptance read wins over members-status; the current version is the newer one seen', () => {
@@ -151,7 +194,7 @@ describe('boundaryItems: what is new since the viewer accepted (M10 §7.1 since)
 })
 
 describe('the setup command and the invite message', () => {
-  const join: Join = { relay_url: 'https://relay.example.com/', team: 'demo', repo_url: null, marketplace: 'team-relay-dev', plugin: 'team-relay' }
+  const join: Join = { relay_url: 'https://relay.example.com/', team: 'demo' }
   it('hosted: the page origin; local: the relay https origin', () => {
     expect(publicOrigin({ hostname: 'team.example.com', origin: 'https://team.example.com' }, undefined)).toBe('https://team.example.com')
     expect(publicOrigin({ hostname: 'team.example.com', origin: 'http://team.example.com' }, join)).toBeNull()
@@ -161,18 +204,25 @@ describe('the setup command and the invite message', () => {
     expect(publicOrigin({ hostname: 'localhost', origin: 'http://localhost:4545' }, { ...join, relay_url: 'https://u:p@relay.example.com' })).toBeNull()
     expect(publicOrigin({ hostname: 'localhost', origin: 'http://localhost:4545' }, { ...join, relay_url: 'not a url' })).toBeNull()
   })
-  it('builds the one command and the plain-text message', () => {
+  it('builds the one line and the plain-text message: the link first, then the same three steps as the join card', () => {
     expect(setupCommand('https://team.example.com')).toBe('curl -fsSL https://team.example.com/setup | bash')
-    expect(inviteMessage('Demo\nteam', 'https://team.example.com')).toBe(
+    const message = inviteMessage('Demo\nteam', 'https://team.example.com')
+    expect(message).toBe(
       [
         "You're invited to the team Demo team on Team relay.",
         '',
-        'Console: https://team.example.com/',
-        'Setup command (run it in Terminal on your Mac): curl -fsSL https://team.example.com/setup | bash',
+        'https://team.example.com/',
         '',
-        'Open the link, accept the invitation, then follow the checklist.',
+        'Open the link and accept the invitation. Then, on your Mac:',
+        '',
+        '1. Open Terminal: press Cmd+Space, type Terminal, press Enter.',
+        '2. Paste this line and press Enter, then answer its questions:',
+        'curl -fsSL https://team.example.com/setup | bash',
+        '3. Come back to the page and click Accept.',
       ].join('\n'),
     )
+    // Plain text: no markdown.
+    expect(message).not.toMatch(/[`*>#]|\]\(/)
   })
 })
 

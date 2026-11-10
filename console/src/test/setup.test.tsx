@@ -1,10 +1,12 @@
-// M11 §6: guided joining. Accepting an invitation opens the team's Join checklist: the setup
-// command with a copy button, seven steps that tick as the viewer's Mac reports in (read every
-// 5 s while the page is visible), and the boundaries to accept, with what changed since the
-// viewer's last acceptance marked new. The team page shows a banner while the viewer has not
-// accepted the current boundaries; the Members panel shows each member's progress; an owner
-// copies an invite message after inviting someone. The console server is the dev mock
-// (src/mock/relay.ts), with every call recorded.
+// M11 §6 and "Simpler joining": guided joining. Accepting an invitation opens the team's Setup
+// page: two plain steps (set up your Mac, accept what the team shares) that tick as the viewer's
+// Mac reports in (read every 5 s while the page is visible), and below them "Ask the team",
+// always there and never a step. Inside the first,
+// only what is not done shows, one sentence each; the second lists what the team shares, with
+// what changed since the viewer's last acceptance marked new. The team page shows a banner when
+// a joined viewer has something new to accept; the Members panel shows each member's progress
+// ("set up", or n of 2); an owner copies an invite message after inviting someone. The console server is the
+// dev mock (src/mock/relay.ts), with every call recorded.
 
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -18,7 +20,7 @@ import { MockRelay, mockStatus } from '@/mock/relay'
 import { renderWithClient, setHidden } from './render'
 
 const KEY = 's3tup-s3tup-s3tup-s3tup-s3tup-s3'
-const COMMAND = 'curl -fsSL https://relay.example.com/setup | bash'
+const LINE = 'curl -fsSL https://relay.example.com/setup | bash'
 
 type Call = { method: string; path: string; team: string | null; body: unknown }
 
@@ -45,9 +47,11 @@ function server(opts: { override?: (c: Call) => Response | null; relay?: MockRel
   return { relay, calls, count: (p: string) => calls.filter((c) => c.method === 'GET' && c.path === p).length }
 }
 
-const setupPanel = () => screen.findByRole('region', { name: 'Set up your Mac' })
+const setupPanel = () => screen.findByRole('region', { name: 'Your setup' })
 const step = (id: string) => document.querySelector(`[data-setup-step="${id}"]`) as HTMLElement
 const doneOf = () => Object.fromEntries([...document.querySelectorAll('[data-setup-step]')].map((e) => [e.getAttribute('data-setup-step'), e.getAttribute('data-done') === 'true']))
+const openChecks = () => [...step('mac').querySelectorAll('[data-mac-check]')].map((e) => e.getAttribute('data-mac-check'))
+const askCta = () => document.querySelector('[data-ask-cta]') as HTMLElement
 const tab = (name: string) => screen.getByRole('navigation', { name: 'Pages' }).querySelector(`[data-view-tab="${name}"]`) as HTMLElement
 
 beforeEach(() => {
@@ -61,8 +65,8 @@ afterEach(() => {
   setHidden(false)
 })
 
-describe('the Join checklist (M11 §6)', () => {
-  it('accepting an invitation opens that team on its Join checklist', async () => {
+describe('the Setup page: two plain steps, then Ask the team', () => {
+  it('accepting an invitation opens that team on its Setup page', async () => {
     const s = server()
     const user = userEvent.setup()
     renderWithClient(<App />)
@@ -79,34 +83,45 @@ describe('the Join checklist (M11 §6)', () => {
     expect(tab('join')).toHaveAttribute('aria-current', 'page')
     await waitFor(() => expect(s.calls.some((c) => c.path === '/api/members-status' && c.team === 'ops')).toBe(true))
     // A new member: nothing has reported yet, and nothing is marked new before a first acceptance.
-    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Accept version 1' })).toBeEnabled())
-    expect(doneOf()).toEqual({ setup: false, claude: false, answering: false, folders: false, drive: false, boundaries: false, self_test: false })
-    expect(within(step('setup')).getByText('Copy the command above and run it in Terminal on your Mac.')).toBeInTheDocument()
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Accept' })).toBeEnabled())
+    expect(doneOf()).toEqual({ mac: false, accept: false })
+    expect([...panel.querySelectorAll('[data-setup-step] h3')].map((h) => h.firstChild?.textContent)).toEqual([
+      'Set up your Mac',
+      'Accept what the team shares',
+    ])
+    expect(within(step('mac')).getByText('Open Terminal (press Cmd+Space, type Terminal, press Enter). Paste this line, press Enter and answer its questions.')).toBeInTheDocument()
+    expect(within(step('mac')).getByRole('button', { name: 'Copy setup line' })).toBeInTheDocument()
+    // Nothing reported yet: no list of technical checks.
+    expect(openChecks()).toEqual([])
     expect(panel.querySelectorAll('[data-new]')).toHaveLength(0)
-    expect(within(step('boundaries')).getByText(/example-ops/)).toBeInTheDocument()
+    expect(within(step('accept')).getByText(/example-ops/)).toBeInTheDocument()
+    expect(within(askCta()).getByRole('button', { name: 'Ask the team' })).toBeInTheDocument()
   })
 
-  it('shows the setup command with a copy button, and the viewer progress', async () => {
+  it('shows the setup line with a big Copy button, only what is not done on the Mac, and the progress', async () => {
     window.history.replaceState(null, '', '/join')
     server()
     const user = userEvent.setup()
     renderWithClient(<App />)
     const panel = await setupPanel()
-    const command = await within(panel).findByText(COMMAND)
-    expect(command.closest('[data-command]')).not.toBeNull()
-    await user.click(within(panel).getByRole('button', { name: 'Copy setup command' }))
-    expect(await navigator.clipboard.readText()).toBe(COMMAND)
-    await waitFor(() => expect(within(panel).getByText('5 of 7 done')).toBeInTheDocument())
-    expect(doneOf()).toEqual({ setup: true, claude: true, answering: true, folders: true, drive: false, boundaries: false, self_test: true })
-    expect(within(step('drive')).getByText('Run the setup command again and connect Google Drive when it asks.')).toBeInTheDocument()
-    // Step 6: the boundaries, with what was added after version 1 (members' own folders) marked new.
-    const accept = within(step('boundaries'))
+    const line = await within(panel).findByText(LINE)
+    expect(line.closest('[data-command]')).not.toBeNull()
+    await user.click(within(panel).getByRole('button', { name: 'Copy setup line' }))
+    expect(await navigator.clipboard.readText()).toBe(LINE)
+    // alice's Mac: everything but Google Drive; she accepted an older version.
+    await waitFor(() => expect(within(panel).getByText('0 of 2 done')).toBeInTheDocument())
+    expect(doneOf()).toEqual({ mac: false, accept: false })
+    expect(openChecks()).toEqual(['drive'])
+    expect(within(step('mac')).getByText("Google Drive isn't connected yet. Run the setup line again and sign in to Google when it asks.")).toBeInTheDocument()
+    expect(step('mac').textContent).not.toMatch(/daemon|LaunchAgent|plugin|channel|\bCLI\b|\bNode|boundaries|self-test/i)
+    // Step 2: what the team shares, with what was added after version 1 (own folders) marked new.
+    const accept = within(step('accept'))
     expect(accept.getByText(/Example Co: the orders and payments services/)).toBeInTheDocument()
     expect(accept.getByText('example-org').closest('li')!.querySelector('[data-new]')).toBeNull()
     expect(accept.getByText('Example Team Drive').closest('li')!.querySelector('[data-new]')).toBeNull()
     expect(accept.getByText('You may add folders of your own').closest('li')!.querySelector('[data-new]')).not.toBeNull()
-    expect(accept.getByText(/You accepted version 1/)).toBeInTheDocument()
-    expect(tab('join')).toHaveTextContent('Setup5/7')
+    expect(accept.getByText(/Anything added since you last accepted is marked new/)).toBeInTheDocument()
+    expect(tab('join')).toHaveTextContent('Setup0/2')
   })
 
   it('the copy falls back to a selected text box when the clipboard refuses', async () => {
@@ -116,41 +131,42 @@ describe('the Join checklist (M11 §6)', () => {
     vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValue(new DOMException('no', 'NotAllowedError'))
     renderWithClient(<App />)
     const panel = await setupPanel()
-    await within(panel).findByText(COMMAND)
-    await user.click(within(panel).getByRole('button', { name: 'Copy setup command' }))
-    const box = await within(panel).findByRole('textbox', { name: 'setup command' })
-    expect(box).toHaveValue(COMMAND)
+    await within(panel).findByText(LINE)
+    await user.click(within(panel).getByRole('button', { name: 'Copy setup line' }))
+    const box = await within(panel).findByRole('textbox', { name: 'setup line' })
+    expect(box).toHaveValue(LINE)
     expect(box).toHaveAttribute('readonly')
     expect(document.activeElement).toBe(box)
   })
 
-  it('the viewer accepts the boundaries for themselves; step 6 ticks and the banner goes', async () => {
+  it('the viewer accepts what the team shares for themselves; step 2 ticks and the banner goes', async () => {
     const s = server()
     const user = userEvent.setup()
     renderWithClient(<App />)
-    const banner = await screen.findByRole('region', { name: 'Boundaries to accept' })
-    expect(banner).toHaveTextContent("The team's boundaries changed.")
+    const banner = await screen.findByRole('region', { name: 'Accept what the team shares' })
+    expect(banner).toHaveTextContent('What the team shares has changed.')
     await user.click(within(banner).getByRole('button', { name: 'Review and accept' }))
     const panel = await setupPanel()
     expect(window.location.pathname).toBe('/join')
-    await user.click(await within(panel).findByRole('button', { name: 'Accept version 2' }))
-    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Accepted version 2' })).toBeDisabled())
+    await user.click(await within(panel).findByRole('button', { name: 'Accept' }))
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Accepted' })).toBeDisabled())
     expect(s.calls.filter((c) => c.method === 'PUT')).toEqual([{ method: 'PUT', path: '/api/acceptance', team: 'demo', body: { version: 2 } }])
-    expect(doneOf().boundaries).toBe(true)
-    await waitFor(() => expect(within(panel).getByText('6 of 7 done')).toBeInTheDocument())
+    expect(doneOf().accept).toBe(true)
+    await waitFor(() => expect(within(panel).getByText('1 of 2 done')).toBeInTheDocument())
     await user.click(tab('team'))
     expect(window.location.pathname).toBe('/')
     await screen.findByRole('region', { name: 'Members' })
-    expect(screen.queryByRole('region', { name: 'Boundaries to accept' })).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Accept what the team shares' })).toBeNull()
   })
 
-  it('boundaries that changed meanwhile: says so, and shows the latest to accept', async () => {
+  it('what the team shares changed meanwhile: says so, and shows the latest to accept', async () => {
     window.history.replaceState(null, '', '/join')
     const s = server()
     const user = userEvent.setup()
     renderWithClient(<App />)
     const panel = await setupPanel()
-    const button = await within(panel).findByRole('button', { name: 'Accept version 2' })
+    const button = await within(panel).findByRole('button', { name: 'Accept' })
+    expect(button).toHaveAttribute('data-accept-version', '2')
     s.relay.setBoundariesAs('demo', 'bob', {
       topic: 'Example Co: payments only.',
       github_orgs: ['example-org', 'payments-org'],
@@ -158,26 +174,57 @@ describe('the Join checklist (M11 §6)', () => {
       member_folders: false,
     })
     await user.click(button)
-    expect(await within(panel).findByRole('alert')).toHaveTextContent('The boundaries changed while you were reading. Read them again below, then accept.')
-    await within(panel).findByRole('button', { name: 'Accept version 3' })
-    expect(within(step('boundaries')).getByText('payments-org').closest('li')!.querySelector('[data-new]')).not.toBeNull()
-    expect(within(step('boundaries')).getByText('No folders of your own')).toBeInTheDocument()
+    expect(await within(panel).findByRole('alert')).toHaveTextContent('What the team shares changed while you were reading. Read it again below, then click Accept.')
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Accept' })).toHaveAttribute('data-accept-version', '3'))
+    expect(within(step('accept')).getByText('payments-org').closest('li')!.querySelector('[data-new]')).not.toBeNull()
+    expect(within(step('accept')).getByText('No folders of your own')).toBeInTheDocument()
   })
 
-  it('all seven ticked: "You\'re set up", with a link to Ask', async () => {
+  it('both done: "You\'re all set", with a big button to Ask', async () => {
     window.history.replaceState(null, '', '/join')
     const s = server()
     s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true)
     const user = userEvent.setup()
     renderWithClient(<App />)
     const panel = await setupPanel()
-    await user.click(await within(panel).findByRole('button', { name: 'Accept version 2' }))
-    const done = await within(panel).findByText(/You're set up/)
-    expect(within(panel).getByText('7 of 7 done')).toBeInTheDocument()
+    await user.click(await within(panel).findByRole('button', { name: 'Accept' }))
+    const done = await within(panel).findByText("You're all set")
+    expect(within(panel).getByText('2 of 2 done')).toBeInTheDocument()
+    expect(openChecks()).toEqual([])
     await user.click(within(done.closest('[data-setup-complete]') as HTMLElement).getByRole('button', { name: 'Ask the team' }))
     expect(await screen.findByRole('region', { name: 'Ask the team' })).toBeInTheDocument()
     expect(window.location.pathname).toBe('/ask')
     expect(tab('join')).toHaveTextContent(/^Setup$/)
+  })
+
+  it('"Ask the team" is always there below the steps, never a step; asking or not changes nothing', async () => {
+    window.history.replaceState(null, '', '/join')
+    const s = server()
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await setupPanel()
+    await waitFor(() => expect(within(panel).getByText('0 of 2 done')).toBeInTheDocument())
+    expect(step('ask')).toBeNull()
+    const cta = askCta()
+    expect(panel.contains(cta)).toBe(true)
+    expect(cta.compareDocumentPosition(step('accept')) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+    expect(cta).toHaveTextContent('Ask your teammates a question at any time.')
+    expect(cta).not.toHaveAttribute('data-setup-complete')
+    // Whether the viewer has asked is not read for it.
+    expect(s.count('/api/my-requests')).toBe(0)
+    await user.click(within(cta).getByRole('button', { name: 'Ask the team' }))
+    expect(window.location.pathname).toBe('/ask')
+    expect(panel).not.toBeInTheDocument()
+  })
+
+  it('the pages: Ask first, then Team and Setup; the landing page is still the team', async () => {
+    server()
+    renderWithClient(<App />)
+    await screen.findByRole('region', { name: 'Members' })
+    const nav = screen.getByRole('navigation', { name: 'Pages' })
+    expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.getAttribute('data-view-tab'))).toEqual(['ask', 'team', 'join'])
+    expect(tab('team')).toHaveAttribute('aria-current', 'page')
+    expect(window.location.pathname).toBe('/')
   })
 
   it('a relay without guided setup (404): says so, ticks nothing, shows no banner', async () => {
@@ -185,11 +232,13 @@ describe('the Join checklist (M11 §6)', () => {
     server({ override: (c) => (c.path === '/api/members-status' || c.path === '/api/acceptance' ? json({ error: 'not_found' }, 404) : null) })
     renderWithClient(<App />)
     const panel = await setupPanel()
-    expect(await within(panel).findByText(/This relay does not report setup progress yet/)).toBeInTheDocument()
-    expect(within(panel).queryByText(/of 7 done/)).toBeNull()
+    expect(await within(panel).findByText(/This team can't show your progress here yet/)).toBeInTheDocument()
+    expect(within(panel).queryByText(/of 2 done/)).toBeNull()
+    // Asking needs no setup progress: still there.
+    expect(within(askCta()).getByRole('button', { name: 'Ask the team' })).toBeInTheDocument()
     fireEvent.click(tab('team'))
     await screen.findByRole('region', { name: 'Members' })
-    expect(screen.queryByRole('region', { name: 'Boundaries to accept' })).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Accept what the team shares' })).toBeNull()
   })
 })
 
@@ -207,13 +256,13 @@ describe('live ticks (M11 §6: every 5 s while the page is visible)', () => {
     renderWithClient(<App />)
     await flush(50)
     await flush(50)
-    expect(doneOf().drive).toBe(false)
+    expect(doneOf().mac).toBe(false)
     const before = s.count('/api/members-status')
     s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true)
     await flush(5_000)
     expect(s.count('/api/members-status')).toBeGreaterThan(before)
-    expect(doneOf().drive).toBe(true)
-    expect(screen.getByText('6 of 7 done')).toBeInTheDocument()
+    expect(doneOf().mac).toBe(true)
+    expect(screen.getByText('1 of 2 done')).toBeInTheDocument()
 
     act(() => setHidden(true))
     await flush(10)
@@ -229,22 +278,24 @@ describe('live ticks (M11 §6: every 5 s while the page is visible)', () => {
 })
 
 describe('the Members panel and the invite message (M11 §6)', () => {
-  it("shows each member's progress and whether they answer now", async () => {
+  it("shows each member's progress (set up, or n of 2) and whether they answer now", async () => {
     server()
     renderWithClient(<App />)
     const panel = await screen.findByRole('region', { name: 'Members' })
     const row = (m: string) => panel.querySelector(`[data-member="${m}"]`) as HTMLElement
     await waitFor(() => expect(row('alice').querySelector('[data-setup-progress]')).not.toBeNull())
-    expect(row('alice').querySelector('[data-setup-progress]')).toHaveTextContent('5 of 7 set up')
+    await waitFor(() => expect(row('bob').querySelector('[data-setup-progress]')).toHaveTextContent(/^set upanswering now$/))
+    expect(row('alice').querySelector('[data-setup-progress]')).toHaveTextContent('0 of 2 set up')
     expect(row('alice').querySelector('[data-setup-progress]')).toHaveAttribute('data-answering', 'true')
-    expect(row('bob').querySelector('[data-setup-progress]')).toHaveTextContent('7 of 7 set up')
-    expect(row('carol').querySelector('[data-setup-progress]')).toHaveTextContent('0 of 7 set up')
+    // Asking is not a step: carol has asked the team questions (the activity shows them) and is 0 of 2.
+    expect(row('carol').querySelector('[data-setup-progress]')).toHaveTextContent('0 of 2 set up')
     expect(row('carol').querySelector('[data-setup-progress]')).toHaveAttribute('data-answering', 'false')
+    expect(panel.textContent).not.toMatch(/of 7/)
     // An invitation has no progress yet.
     expect(row('dana').querySelector('[data-setup-progress]')).toBeNull()
   })
 
-  it('after inviting someone, an owner copies the invite message; a refused clipboard shows it to copy', async () => {
+  it('after inviting someone, an owner copies the invite message: the link, then the same three plain steps', async () => {
     server()
     const user = userEvent.setup()
     renderWithClient(<App />)
@@ -254,7 +305,8 @@ describe('the Members panel and the invite message (M11 §6)', () => {
     await user.click(within(form).getByRole('button', { name: 'Invite' }))
     await within(form).findByText(/Invited erin\. Send them the invite message/)
     const expected = inviteMessage('Demo', 'https://relay.example.com')
-    expect(expected).toContain('Open the link, accept the invitation, then follow the checklist.')
+    expect(expected.split('\n').slice(2, 5)).toEqual(['https://relay.example.com/', '', 'Open the link and accept the invitation. Then, on your Mac:'])
+    expect(expected).toContain(LINE)
     await user.click(within(form).getByRole('button', { name: 'Copy invite message' }))
     expect(await navigator.clipboard.readText()).toBe(expected)
 

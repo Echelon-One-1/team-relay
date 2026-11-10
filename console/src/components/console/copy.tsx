@@ -95,6 +95,28 @@ export function CopyCommand({ text, label }: { text: string; label: string }) {
   )
 }
 
+/**
+ * The setup line for someone who has never used Terminal: the line in a box and a big "Copy"
+ * button beside it (below it on a phone), with the fallback box when the clipboard refuses.
+ */
+export function BigCopyCommand({ text, label }: { text: string; label: string }) {
+  const { state, copy } = useCopy(text)
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-stretch" data-command={label}>
+        <pre className="min-w-0 flex-1 rounded-md border bg-muted/60 px-3 py-2 font-mono text-[12.5px] leading-[1.6] whitespace-pre-wrap text-foreground [overflow-wrap:anywhere]">
+          <code>{text}</code>
+        </pre>
+        <Button type="button" size="lg" onClick={() => void copy()} aria-label={`Copy ${label}`} data-copy={state} className="px-4 sm:h-auto">
+          {state === 'copied' ? <Check aria-hidden /> : <Copy aria-hidden />}
+          <span aria-live="polite">{state === 'copied' ? 'Copied' : 'Copy'}</span>
+        </Button>
+      </div>
+      {state === 'failed' ? <CopyFallback text={text} label={label} /> : null}
+    </div>
+  )
+}
+
 /** A button that copies a longer text (the invite message), with the fallback box below it. */
 export function CopyTextButton({ text, label, children }: { text: string; label: string; children: string }) {
   const { state, copy } = useCopy(text)

@@ -8,13 +8,17 @@
 //                                       write and load the background answerer's LaunchAgent, for
 //                                       the plugin installed under exactly that key
 //   daemon uninstall                    stop and remove it
-//   status                              your setup checklist, as the relay sees it (M11 §6)
+//   status [--after-setup]              your setup checklist, as the relay sees it (M11 §6)
 //
 // Nothing here prints a credential or token. Exit 0: done (or nothing to do); 1: it did not
 // work (the line says why); 2: usage.
+//
+// What it prints is read by members who have never used Terminal (M11-SPEC "Simpler joining"):
+// plain, short sentences that say what to do, never the names of tools or files.
 
-import { createReadStream, openSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { createReadStream, existsSync, openSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { configDir } from './answering-lock.js';
 import { SELF_TEST_PENDING, type MemberStatusEntry, type TeamBoundaries } from './boundaries-types.js';
@@ -52,7 +56,7 @@ export const HELP = [
   '  daemon install --claude <path> --plugin team-relay@<marketplace>',
   '                                   start answering teammates in the background (macOS)',
   '  daemon uninstall                 stop answering in the background',
-  '  status                           show your setup checklist',
+  '  status [--after-setup]          show your setup checklist (--after-setup: as the setup line\'s last step)',
 ].join('\n');
 
 export type SetupIO = {
@@ -78,16 +82,19 @@ export type SetupDeps = {
   keychain?: Keychain | null;
   drive?: (argv: string[], client: RelayClient, keychain: Keychain) => Promise<DriveCliOutcome>;
   clones?: (raw: string, orgs: string[]) => Promise<number>;
+  /** The Mac's folder chooser (default: osascript's `choose folder`; tests: a fake). */
+  chooseFolders?: FolderChooser;
 };
 
-const NOT_SIGNED_IN = 'Not signed in to the team relay: run `node setup-cli.js login` first.';
+export const NOT_SIGNED_IN = 'You are not signed in to your team on this Mac yet. Run the setup line again.';
+const UNREACHABLE_BOUNDARIES = 'Could not reach your team just now. Run the setup line again in a minute.';
 
 // macOS privacy protection: a LaunchAgent's node may be refused (or macOS may ask the member)
 // for folders under these, and for the Drive mount (~/Library/CloudStorage).
 const PROTECTED_DIRS = ['Documents', 'Desktop', 'Downloads', join('Library', 'Mobile Documents')];
 export const PRIVACY_FOLDERS_NOTE =
-  'macOS protects Documents, Desktop, Downloads and iCloud Drive, so the first time the background answerer reads a folder there, macOS may ask whether "node" may access it: click Allow.';
-export const PRIVACY_DRIVE_NOTE = 'The first time the background answerer reads Google Drive, macOS may ask whether "node" may access it: click Allow.';
+  'The first time your Mac answers from a folder in Documents, Desktop, Downloads or iCloud Drive, macOS may ask whether "node" may open it: click Allow.';
+export const PRIVACY_DRIVE_NOTE = 'The first time your Mac answers from Google Drive, macOS may ask whether "node" may open it: click Allow.';
 
 /** Whether `raw` (as the member wrote it) resolves to a folder macOS protects. */
 function privacyProtected(raw: string, env: NodeJS.ProcessEnv): boolean {
@@ -105,8 +112,8 @@ async function defaultConnect(env: NodeJS.ProcessEnv): Promise<{ client: RelayCl
   const a = await connectOnce(env);
   if (a.kind === 'connected') return { client: a.client, member: a.me.member, team: a.me.team };
   if (a.kind === 'not_signed_in') return { error: NOT_SIGNED_IN };
-  if (a.kind === 'refused') return { error: 'The relay refused your sign-in (signed out, expired, or no longer on the team): run `node setup-cli.js login` again.' };
-  return { error: `Could not reach the team relay: ${a.problem}.` };
+  if (a.kind === 'refused') return { error: 'Your sign-in to the team has ended (or you are no longer on the team). Run the setup line again to sign in.' };
+  return { error: `Could not reach your team just now (${a.problem}). Check your internet connection, then run the setup line again.` };
 }
 
 async function teamBoundaries(client: RelayClient): Promise<TeamBoundaries | null> {
@@ -176,8 +183,8 @@ async function login(argv: string[], d: SetupDeps): Promise<number> {
     io.print(err instanceof LoginError ? `Not signed in: ${err.message}` : `Could not start the sign-in: ${describeError(err)}`);
     return 1;
   }
-  io.print('Sign in with your work Google account in the browser tab that opened, and choose your team.');
-  io.print('If no tab opened, open this link yourself (it is for you only; do not share it):');
+  io.print('Sign in with your work Google account in the browser window that opened, and choose your team.');
+  io.print('If no window opened, open this link yourself (it is for you only; do not share it):');
   io.print(flow.url);
   try {
     const r = await flow.done;
@@ -185,54 +192,171 @@ async function login(argv: string[], d: SetupDeps): Promise<number> {
     io.print(`${connectedAs(r.stored)}.${change ? ` ${change}` : ''}`);
     return 0;
   } catch (err) {
-    io.print(`The sign-in did not complete: ${describeError(err)}`);
+    io.print(`The sign-in did not finish (${describeError(err)}).`);
     return 1;
   }
 }
 
 // -- folders ---------------------------------------------------------------------------------------
 
-async function chooseList(
-  d: SetupDeps,
-  what: { name: string; current: string[]; intro: string; count: ((raw: string) => Promise<number>) | null },
-): Promise<string[]> {
+/** What the Mac's folder chooser gave: folders, a Cancel, or no chooser here (then the member types). */
+export type ChooseResult = { kind: 'chosen'; paths: string[] } | { kind: 'cancelled' } | { kind: 'unavailable' };
+export type FolderChooser = (prompt: string) => Promise<ChooseResult>;
+
+/**
+ * The AppleScript of the chooser. It brings its window to the front first (Terminal may be behind
+ * the browser). The prompt is the run handler's argument, never part of the script text; each
+ * chosen folder is turned into a POSIX path here, each followed by a NUL (a folder name may hold a
+ * new line, never a NUL).
+ */
+export const CHOOSE_FOLDER_SCRIPT = [
+  'on run argv',
+  'activate',
+  'set chosen to choose folder with prompt (item 1 of argv) with multiple selections allowed',
+  'set out to ""',
+  'repeat with f in chosen',
+  'set out to out & (POSIX path of (f as alias)) & (character id 0)',
+  'end repeat',
+  'return out',
+  'end run',
+];
+const OSASCRIPT = '/usr/bin/osascript';
+/** A chooser left open this long closes, and the member types the folders instead. */
+export const CHOOSER_TIMEOUT_MS = 10 * 60 * 1000;
+
+export type ExecFileLike = (
+  file: string,
+  args: string[],
+  opts: { timeout: number; maxBuffer: number },
+  cb: (err: (Error & { code?: unknown; killed?: boolean }) | null, stdout: string, stderr: string) => void,
+) => void;
+
+/**
+ * The folders in osascript's output: NUL-separated, with the one new line osascript adds at the
+ * end dropped; a trailing slash dropped (but never from "/").
+ */
+export function chosenPaths(stdout: string): string[] {
+  return stdout
+    .replace(/\n$/, '')
+    .split('\0')
+    .filter((p) => p !== '')
+    .map((p) => (p.length > 1 ? p.replace(/\/+$/, '') || '/' : p));
+}
+
+const runExecFile: ExecFileLike = (f, a, o, cb) => void execFile(f, a, o, (e, out, err) => cb(e, String(out), String(err)));
+
+/**
+ * The Mac's own folder chooser: osascript, run directly (no shell), with the prompt as an
+ * argument. Cancel (AppleScript error -128) is a Cancel; any other failure (no osascript, no
+ * screen to show it on, left open past CHOOSER_TIMEOUT_MS) means the member types the folders.
+ */
+export function osascriptChooser(run: ExecFileLike = runExecFile): FolderChooser {
+  return (prompt) =>
+    new Promise((resolve) => {
+      const args = CHOOSE_FOLDER_SCRIPT.flatMap((line) => ['-e', line]);
+      args.push(prompt);
+      try {
+        run(OSASCRIPT, args, { timeout: CHOOSER_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+          if (!err) resolve({ kind: 'chosen', paths: chosenPaths(stdout) });
+          else if (/\(-128\)/.test(stderr)) resolve({ kind: 'cancelled' });
+          else resolve({ kind: 'unavailable' });
+        });
+      } catch {
+        resolve({ kind: 'unavailable' });
+      }
+    });
+}
+
+function defaultChooser(platform: NodeJS.Platform): FolderChooser {
+  if (platform !== 'darwin' || !existsSync(OSASCRIPT)) return async () => ({ kind: 'unavailable' });
+  return osascriptChooser();
+}
+
+type ListSpec = {
+  /** "Your folders for projects now:" */
+  nowTitle: string;
+  keepPrompt: string;
+  /** Asked when the member said No to keepPrompt and then cancelled the chooser. */
+  stopPrompt: string;
+  /** Said before the chooser opens. */
+  pickIntro: string;
+  /** The chooser's own prompt. */
+  prompt: string;
+  /** Said when there is no chooser and the member types the folders. */
+  typeIntro: string;
+  current: string[];
+  count: ((raw: string) => Promise<number>) | null;
+};
+
+const plural = (n: number, one: string, many: string) => `${n === 0 ? 'no' : n} ${n === 1 ? one : many}`;
+
+async function chooseList(d: SetupDeps, spec: ListSpec): Promise<string[]> {
   const { io, env } = d;
-  const describe = async (raw: string) => {
-    const resolved = expandPath(raw, env);
-    const shown = resolved && resolved !== raw ? `${raw} (${resolved})` : raw;
-    const { reason } = memberFolderProblem(raw, env);
-    if (reason) return `${shown}: not used (${reason})`;
-    if (!what.count) return shown;
-    const n = await what.count(raw);
-    return `${shown}: ${n} ${n === 1 ? 'clone' : 'clones'} found`;
+  const name = (raw: string) => {
+    const resolved = expandPath(raw, env) ?? raw;
+    return basename(resolved) || resolved;
   };
-  if (what.current.length > 0) {
-    io.print(`Your ${what.name} now:`);
-    for (const raw of what.current) io.print(`  ${await describe(raw)}`);
-    if (yes(await io.ask(`Keep these ${what.name}? [Y/n] `), true)) return what.current;
+  const describe = async (raw: string) => {
+    const { reason } = memberFolderProblem(raw, env);
+    if (reason) return `Not used: ${raw} (${reason}).`;
+    if (!spec.count) return `${name(raw)} (${expandPath(raw, env) ?? raw})`;
+    const n = await spec.count(raw);
+    return `Found ${plural(n, 'project folder', 'project folders')} in ${name(raw)}.`;
+  };
+  /** Adds `raw` to `out` when it can be used; says what happened. */
+  const add = async (raw: string, out: string[]) => {
+    const { reason } = memberFolderProblem(raw, env);
+    if (reason) {
+      io.print(`  Not used: ${raw} (${reason}).`);
+      return;
+    }
+    const target = expandPath(raw, env);
+    if (out.some((e) => e === raw || expandPath(e, env) === target)) {
+      io.print(`  ${name(raw)} is already in the list.`);
+      return;
+    }
+    if (out.length >= MAX_FOLDERS) {
+      io.print(`  At most ${MAX_FOLDERS} folders; ${name(raw)} is not added.`);
+      return;
+    }
+    out.push(raw);
+    io.print(`  ${await describe(raw)}`);
+  };
+
+  let saidNo = false;
+  if (spec.current.length > 0) {
+    io.print(spec.nowTitle);
+    for (const raw of spec.current) io.print(`  ${await describe(raw)}`);
+    if (yes(await io.ask(`${spec.keepPrompt} [Y/n] `), true)) return spec.current;
+    saidNo = true;
   }
-  io.print(what.intro);
+
+  const chooser = d.chooseFolders ?? defaultChooser(d.platform ?? process.platform);
+  io.print(spec.pickIntro);
+  const r = await chooser(spec.prompt);
+  if (r.kind === 'cancelled') {
+    // After a No, a Cancel may mean "none at all": asked, never assumed.
+    if (saidNo && yes(await io.ask(`${spec.stopPrompt} [y/N] `), false)) return [];
+    io.print(spec.current.length > 0 ? 'Nothing picked, so your folders stay as they were.' : 'Nothing picked.');
+    return spec.current;
+  }
+  if (r.kind === 'chosen') {
+    const out: string[] = [];
+    for (const raw of r.paths) await add(raw, out);
+    if (out.length === 0 && r.paths.length > 0) {
+      io.print(spec.current.length > 0 ? 'None of those can be used, so your folders stay as they were.' : 'None of those can be used.');
+      return spec.current;
+    }
+    return out;
+  }
+
+  // No chooser here (no screen, or no osascript): the member types the folders.
+  io.print(spec.typeIntro);
   const out: string[] = [];
   for (;;) {
     const line = await io.ask('> ');
     if (line === null || line.trim() === '') break;
-    const raw = line.trim();
-    const { reason } = memberFolderProblem(raw, env);
-    if (reason) {
-      io.print(`  Not used: ${raw} ${reason === 'it is not an absolute path or one starting with ~/' ? 'is not an absolute path or one starting with ~/' : `cannot be used: ${reason}`}.`);
-      continue;
-    }
-    const target = expandPath(raw, env);
-    if (out.some((e) => e === raw || expandPath(e, env) === target)) {
-      io.print('  Already in the list.');
-      continue;
-    }
-    if (out.length >= MAX_FOLDERS) {
-      io.print(`  At most ${MAX_FOLDERS}; that one is not added.`);
-      continue;
-    }
-    out.push(raw);
-    io.print(`  ${await describe(raw)}`);
+    await add(line.trim(), out);
   }
   return out;
 }
@@ -247,11 +371,11 @@ async function folders(d: SetupDeps): Promise<number> {
   const tb = await teamBoundaries(c.client);
   const url = consoleUrl(c.client.url);
   if (!tb) {
-    io.print("Your team's boundaries could not be read from the relay; try again later.");
+    io.print(UNREACHABLE_BOUNDARIES);
     return 1;
   }
   if (!tb.boundaries) {
-    io.print(`Your team has no boundaries yet, so there is nothing to choose: an owner sets them in the console (${url}). Run this again after.`);
+    io.print(`Your team has not chosen what to share yet, so there are no folders to pick. Run the setup line again once a team owner has done that (on ${url}).`);
     return 0;
   }
   const file = memberFoldersPath(env);
@@ -259,7 +383,7 @@ async function folders(d: SetupDeps): Promise<number> {
   try {
     all = readMemberSettings(file, env);
   } catch (err) {
-    io.print(`Your folders file cannot be used (${describeError(err)}): fix or remove ${file}.`);
+    io.print(`Your saved folders cannot be read (${describeError(err)}). Ask a team owner for help.`);
     return 1;
   }
   const current = teamSettings(all, c.team);
@@ -267,27 +391,36 @@ async function folders(d: SetupDeps): Promise<number> {
   const count = d.clones ?? ((raw: string, o: string[]) => clonesUnder(raw, o, env));
   let roots = current.repo_roots;
   if (orgs.length > 0) {
-    io.print(`Your team's GitHub organisations: ${orgs.join(', ')}.`);
+    const names = listWords(orgs);
+    io.print(`Your team shares projects from GitHub: ${names}.`);
     roots = await chooseList(d, {
-      name: 'repo roots',
+      nowTitle: 'The folders you picked for these projects:',
+      keepPrompt: 'Keep these folders?',
+      stopPrompt: 'Stop using project folders?',
+      pickIntro: `A window opens: pick the folders that hold your ${names} projects (hold Cmd to pick more than one), then click Choose.`,
+      prompt: `Pick the folders that hold your ${names} projects. Hold Cmd to pick more than one.`,
+      typeIntro: `Type the full path of each folder that holds your ${names} projects, one per line (~ means your home folder). Press Enter on an empty line to finish.`,
       current: current.repo_roots,
-      intro:
-        'Type the folders that hold your clones of these organisations\' repositories, one per line (~ is allowed; each is searched 3 levels deep). An empty line ends the list.',
       count: (raw) => count(raw, orgs),
     });
   } else {
-    io.print('Your team has no GitHub organisations in its boundaries, so no repo roots are needed.');
+    io.print('Your team shares no GitHub projects, so there are no project folders to pick.');
   }
   let extra = current.extra_folders;
   if (tb.boundaries.member_folders) {
+    io.print('Your team also lets you share folders of your own.');
     extra = await chooseList(d, {
-      name: 'own folders',
+      nowTitle: 'The folders of your own you picked:',
+      keepPrompt: 'Keep these folders of your own?',
+      stopPrompt: 'Stop using folders of your own?',
+      pickIntro: 'A window opens: pick any folders of your own that answers may use, or click Cancel to skip.',
+      prompt: 'Pick any folders of your own that answers may use. Hold Cmd to pick more than one, or click Cancel to skip.',
+      typeIntro: 'Type the full path of any folder of your own that answers may use, one per line. Press Enter on an empty line to finish.',
       current: current.extra_folders,
-      intro: 'Your team allows folders of your own. Type any you want answers to come from, one per line (only files git tracks are read in a repository). An empty line ends the list.',
       count: null,
     });
   } else if (current.extra_folders.length > 0) {
-    io.print('Your team does not allow folders of your own, so the ones you set earlier are not used.');
+    io.print('Your team no longer allows folders of your own, so the ones you picked earlier are not used.');
   }
   try {
     // Read again: the file may have changed while the questions were open.
@@ -298,10 +431,16 @@ async function folders(d: SetupDeps): Promise<number> {
     io.print(`Nothing was saved (${err instanceof MemberFoldersError ? err.message : describeError(err)}).`);
     return 1;
   }
-  io.print(`Saved: ${roots.length} repo ${roots.length === 1 ? 'root' : 'roots'}${tb.boundaries.member_folders ? `, ${extra.length} own ${extra.length === 1 ? 'folder' : 'folders'}` : ''}. Your background answerer uses them from its next answer.`);
+  const own = tb.boundaries.member_folders ? ` and ${plural(extra.length, 'folder', 'folders')} of your own` : '';
+  io.print(`Saved: ${plural(roots.length, 'folder', 'folders')} for projects${own}.`);
   const used = tb.boundaries.member_folders ? [...roots, ...extra] : roots;
   if (used.some((raw) => privacyProtected(raw, env))) io.print(PRIVACY_FOLDERS_NOTE);
   return 0;
+}
+
+function listWords(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? '';
+  return `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 }
 
 // -- drive -----------------------------------------------------------------------------------------
@@ -315,7 +454,7 @@ async function drive(d: SetupDeps): Promise<number> {
   }
   const tb = await teamBoundaries(c.client);
   if (!tb) {
-    io.print("Your team's boundaries could not be read from the relay; try again later.");
+    io.print(UNREACHABLE_BOUNDARIES);
     return 1;
   }
   if (!tb.boundaries || tb.boundaries.drives.length === 0) {
@@ -340,7 +479,7 @@ async function drive(d: SetupDeps): Promise<number> {
     io.print(PRIVACY_DRIVE_NOTE);
     return 0;
   }
-  io.print('Connecting Google Drive (read-only): sign in with your work Google account in the browser tab that opens.');
+  io.print('Connecting Google Drive (read only): sign in with your work Google account in the browser window that opens.');
   const run =
     d.drive ??
     ((argv: string[], client: RelayClient, kc: Keychain) =>
@@ -381,7 +520,7 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
   try {
     if (sub === 'uninstall') {
       const found = await uninstallAgent({ home, configDir: cfg, uid, ...(d.exec ? { exec: d.exec } : {}) });
-      io.print(found ? 'The background answerer is stopped and removed.' : 'The background answerer was not installed; nothing to do.');
+      io.print(found ? 'Your Mac no longer answers your team in the background.' : 'Your Mac was not answering your team in the background; nothing to do.');
       return 0;
     }
     if (!claude) {
@@ -393,7 +532,7 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
       return 2;
     }
     const xdg = env.XDG_CONFIG_HOME?.trim();
-    const r = await installAgent({
+    await installAgent({
       home,
       configDir: cfg,
       node: d.node ?? process.execPath,
@@ -404,7 +543,7 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
       ...(d.sleep ? { sleep: d.sleep } : {}),
       ...(xdg && xdg.startsWith('/') ? { xdgConfigHome: xdg } : {}),
     });
-    io.print(`The background answerer is installed and started (${r.plist}). It answers teammates while this Mac is on, without a Claude Code window.`);
+    io.print('Your Mac now answers your team in the background whenever it is on. Claude Code does not need to be open.');
     return 0;
   } catch (err) {
     io.print(err instanceof AgentError ? err.message : `That did not work: ${describeError(err)}`);
@@ -414,19 +553,29 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
 
 // -- status ----------------------------------------------------------------------------------------
 
-export type Step = { done: boolean; title: string; todo: string };
+/** One thing the Mac must have for "Set up your Mac": done, or one plain sentence of what to do. */
+export type Check = { id: 'setup' | 'claude' | 'answering' | 'folders' | 'drive' | 'self_test'; done: boolean; todo: string };
+/** M11-SPEC "Simpler joining": the two steps; `checks` are the Mac's, shown only while one is not done. */
+export type Step = { id: 'mac' | 'accept'; done: boolean; title: string; todo: string; checks: Check[] };
 
-export const SELF_TEST_RUNNING = 'Running the self-test now; this takes about a minute.';
-/** While the self-test has not run yet, status looks again this often, for at most this long. */
+export const SELF_TEST_RUNNING = 'Your Mac is checking that everything works. This takes about a minute.';
+export const WAITING_FOR_CHECK_IN = 'Waiting for your Mac to check in…';
+/**
+ * While the self-test has not run yet (or, with --after-setup, the Mac has not reported in yet),
+ * status looks again this often, for at most this long in all.
+ */
 const PENDING_POLL_MS = 5000;
 const PENDING_WAIT_MS = 90_000;
 
-const NOT_KNOWN = "Not known: your team's boundaries could not be read from the relay just now; run status again in a minute.";
+const NOT_KNOWN = "Could not check this just now, because your team's settings did not load. Run the setup line again in a minute.";
 
 /**
- * M11-SPEC §6: the seven steps, from the relay's view of this member. `orgs` and `drives`: how
- * many the team's boundaries hold (0 also when none are set), null when they could not be read;
- * "Folders chosen" and "Google Drive connected" need nothing only when that count is 0.
+ * The two steps, from the relay's view of this member (the console's Setup page shows the
+ * same; "Ask the team" is not a step, it is always there below them). "Set up your Mac" is done when every check is: the Mac has reported in, Claude Code is
+ * there and signed in, the Mac answers now, folders and Google Drive (when the team's
+ * boundaries ask for them) and the self-test. `orgs` and `drives`: how many the team's
+ * boundaries hold (0 also when none are set), null when they could not be read, which never
+ * counts as done.
  */
 export function checklist(p: {
   status: { claude?: { found?: unknown; signed_in?: unknown }; folders?: { repo_roots?: unknown }; drive?: { connected?: unknown }; self_test?: { ok?: unknown; reason?: unknown } } | null;
@@ -440,38 +589,54 @@ export function checklist(p: {
   const s = p.status;
   const reason = typeof s?.self_test?.reason === 'string' && s.self_test.reason ? s.self_test.reason : null;
   const pending = s?.self_test?.ok !== true && reason === SELF_TEST_PENDING;
+  const checks: Check[] =
+    s === null
+      ? [{ id: 'setup', done: false, todo: 'Paste the setup line into Terminal on this Mac.' }]
+      : [
+          { id: 'setup', done: true, todo: '' },
+          {
+            id: 'claude',
+            done: s.claude?.found === true && s.claude.signed_in === true,
+            todo:
+              s.claude?.found === true
+                ? 'Claude Code is not signed in on this Mac. Run the setup line again and sign in when it asks.'
+                : 'Claude Code is not on this Mac. Run the setup line again and say yes when it offers to install it.',
+          },
+          { id: 'answering', done: p.answering, todo: "Your Mac isn't answering right now. Make sure it's switched on; if this stays, run the setup line again." },
+          {
+            id: 'folders',
+            done: p.orgs !== null && (p.orgs === 0 || (typeof s.folders?.repo_roots === 'number' && s.folders.repo_roots > 0)),
+            todo: p.orgs === null ? NOT_KNOWN : 'Your project folders are not picked yet. Run the setup line again and pick them.',
+          },
+          {
+            id: 'drive',
+            done: p.drives !== null && (p.drives === 0 || s.drive?.connected === true),
+            todo: p.drives === null ? NOT_KNOWN : 'Google Drive is not connected yet. Run the setup line again and sign in to Google when it asks.',
+          },
+          {
+            id: 'self_test',
+            done: s.self_test?.ok === true,
+            todo: pending
+              ? SELF_TEST_RUNNING
+              : reason
+                ? `Your Mac's last check did not pass. Run the setup line again. If it still does not pass, show this to a team owner: ${reason}.`
+                : 'Your Mac has not checked that everything works yet. Wait a minute.',
+          },
+        ];
+  const open = checks.filter((c) => !c.done);
   return [
-    { done: s !== null, title: 'Run the setup command', todo: 'Run the setup command from the console on this Mac.' },
+    { id: 'mac', title: 'Set up your Mac', done: open.length === 0, todo: open[0]?.todo ?? '', checks },
     {
-      done: s?.claude?.found === true && s.claude.signed_in === true,
-      title: 'Claude Code found and signed in',
-      todo: 'Install Claude Code and sign in to it (claude auth login), then run the setup command again.',
-    },
-    { done: p.answering, title: 'Answering in the background', todo: 'Run the setup command again to start the background answerer, and keep this Mac on.' },
-    {
-      done: p.orgs !== null && (p.orgs === 0 || (typeof s?.folders?.repo_roots === 'number' && s.folders.repo_roots > 0)),
-      title: 'Folders chosen',
-      todo: p.orgs === null ? NOT_KNOWN : 'Choose the folders that hold your clones: node setup-cli.js folders.',
-    },
-    {
-      done: p.drives !== null && (p.drives === 0 || s?.drive?.connected === true),
-      title: 'Google Drive connected',
-      todo: p.drives === null ? NOT_KNOWN : 'Connect Google Drive: node setup-cli.js drive.',
-    },
-    {
+      id: 'accept',
+      title: 'Accept what the team shares',
       done: p.boundariesVersion > 0 && p.acceptedVersion === p.boundariesVersion,
-      title: 'Boundaries accepted',
-      todo: p.boundariesVersion > 0 ? `Open ${p.console} and press Accept.` : `Your team has no boundaries yet: an owner sets them in the console (${p.console}).`,
-    },
-    {
-      done: s?.self_test?.ok === true,
-      title: 'Self-test passed',
-      todo: pending ? SELF_TEST_RUNNING : reason ? `The self-test failed: ${reason}.` : 'Wait a minute for the background answerer to run its self-test.',
+      todo: p.boundariesVersion > 0 ? `Open ${p.console} and click Accept.` : `Your team has not chosen what to share yet. A team owner does that on ${p.console}.`,
+      checks: [],
     },
   ];
 }
 
-async function status(d: SetupDeps): Promise<number> {
+async function status(d: SetupDeps, afterSetup: boolean): Promise<number> {
   const { io, env } = d;
   const c = await (d.connect ?? (() => defaultConnect(env)))();
   if ('error' in c) {
@@ -482,41 +647,70 @@ async function status(d: SetupDeps): Promise<number> {
   try {
     [ms, acc] = await Promise.all([c.client.membersStatus({ attempts: 2, timeoutMs: 15_000 }), c.client.acceptance({ attempts: 2, timeoutMs: 15_000 })]);
   } catch (err) {
-    io.print(`The relay did not give your status (${describeError(err)}); try again later.`);
+    io.print(`Could not check with your team just now (${describeError(err)}). Run the setup line again in a minute.`);
     return 1;
   }
   const mine = (list: { members: MemberStatusEntry[] }) => list.members.find((m) => m.member === c.member);
   const pending = (e: MemberStatusEntry | undefined) => e?.status?.self_test.ok === false && e.status.self_test.reason === SELF_TEST_PENDING;
-  // Just after setup the background answerer is still running its first self-test: wait for it.
-  if (pending(mine(ms))) {
-    io.print(SELF_TEST_RUNNING);
-    const sleep = d.sleep ?? ((t: number) => new Promise<void>((r) => setTimeout(r, t)));
-    for (let waited = 0; waited < PENDING_WAIT_MS && pending(mine(ms)); ) {
-      await sleep(PENDING_POLL_MS);
-      waited += PENDING_POLL_MS;
-      try {
-        ms = await c.client.membersStatus({ attempts: 2, timeoutMs: 15_000 });
-      } catch {
-        // the last answer stands; looked at again next time
-      }
+  // Just after the setup line installed the background answerer, it has not reported in yet.
+  const notIn = (e: MemberStatusEntry | undefined) => afterSetup && !e?.status;
+  // Just after setup the background answerer is still running its first self-test: wait for it
+  // (and, after the setup line, for its first report), saying each once.
+  const said = new Set<string>();
+  const sayOnce = (line: string) => {
+    if (!said.has(line)) io.print(line);
+    said.add(line);
+  };
+  const sleep = d.sleep ?? ((t: number) => new Promise<void>((r) => setTimeout(r, t)));
+  for (let waited = 0; ; ) {
+    const e = mine(ms);
+    if (notIn(e)) sayOnce(WAITING_FOR_CHECK_IN);
+    else if (pending(e)) sayOnce(SELF_TEST_RUNNING);
+    else break;
+    if (waited >= PENDING_WAIT_MS) break;
+    await sleep(PENDING_POLL_MS);
+    waited += PENDING_POLL_MS;
+    try {
+      ms = await c.client.membersStatus({ attempts: 2, timeoutMs: 15_000 });
+    } catch {
+      // the last answer stands; looked at again next time
     }
   }
   const tb = await teamBoundaries(c.client);
   const entry = mine(ms);
+  const url = consoleUrl(c.client.url);
+  const acceptedVersion = typeof acc.version === 'number' ? acc.version : 0;
+  const boundariesVersion = typeof ms.boundaries_version === 'number' ? ms.boundaries_version : 0;
   const steps = checklist({
     status: entry?.status ?? null,
     answering: entry?.answering === true,
-    acceptedVersion: typeof acc.version === 'number' ? acc.version : 0,
-    boundariesVersion: typeof ms.boundaries_version === 'number' ? ms.boundaries_version : 0,
+    acceptedVersion,
+    boundariesVersion,
     // Not read: not known. Read with none set: nothing to choose.
     orgs: tb ? (tb.boundaries?.github_orgs.length ?? 0) : null,
     drives: tb ? (tb.boundaries?.drives.length ?? 0) : null,
-    console: consoleUrl(c.client.url),
+    console: url,
   });
   const done = steps.filter((s) => s.done).length;
-  io.print(`Setup for ${c.member} on team ${c.team}: ${done} of ${steps.length} done.`);
-  for (const s of steps) io.print(s.done ? `  [x] ${s.title}` : `  [ ] ${s.title} - ${s.todo}`);
-  if (done === steps.length) io.print(`You're set up. Ask the team in the console: ${consoleUrl(c.client.url)}`);
+  io.print(`Your setup (${c.member}, team ${c.team}): ${done} of ${steps.length} done.`);
+  for (const s of steps) {
+    if (s.done) {
+      io.print(`  [x] ${s.title}`);
+    } else if (s.checks.length > 0) {
+      io.print(`  [ ] ${s.title}`);
+      for (const ch of s.checks) if (!ch.done) io.print(`      - ${ch.todo}`);
+    } else {
+      io.print(`  [ ] ${s.title} - ${s.todo}`);
+    }
+  }
+  // Always there, never a step: asking is what the setup is for.
+  io.print(`Ask the team: ${url}/ask`);
+  if (afterSetup) {
+    // The setup line's last words: back to the browser, and Accept when there is something to accept.
+    const toAccept = boundariesVersion > 0 && acceptedVersion !== boundariesVersion;
+    io.print('');
+    io.print(`Done. Go back to the team page in your browser${toAccept ? ' and click Accept' : ''}.`);
+  }
   return 0;
 }
 
@@ -542,8 +736,9 @@ export async function runSetup(argv: string[], d: SetupDeps): Promise<number> {
     case 'daemon':
       return daemon(rest, d);
     case 'status':
-      if (rest.length > 0) break;
-      return status(d);
+      if (rest.length === 0) return status(d, false);
+      if (rest.length === 1 && rest[0] === '--after-setup') return status(d, true);
+      break;
   }
   d.io.print(HELP);
   return 2;

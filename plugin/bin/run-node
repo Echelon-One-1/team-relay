@@ -1,0 +1,86 @@
+#!/bin/sh
+# Starts the plugin's bundles (dist/*.js) with a Node.js new enough for them (22.12 or newer,
+# package.json "engines"), so the plugin does not depend on whatever `node` Claude Code's PATH
+# has: the desktop app's PATH may have none, or an old one. .mcp.json, hooks/hooks.json and the `!` lines of commands/*.md run
+#
+#   /bin/sh ${CLAUDE_PLUGIN_ROOT}/bin/run-node ${CLAUDE_PLUGIN_ROOT}/dist/<bundle>.js [args]
+#
+# It uses, in this order:
+#   1. the first `node` on PATH (absolute entries only), when it is 22.12 or newer;
+#   2. the Node.js the setup line installs privately, ~/.local/share/team-relay/node-v<x.y.z>-*/
+#      bin/node (relay/relay/static/setup.sh), the newest version there that runs;
+# else it says in one plain line what to do and exits 1. POSIX sh, builtins only.
+
+MIN_MAJOR=22
+MIN_MINOR=12
+
+# Sets VMAJ, VMIN and VPAT to the version of the node at $1 when it runs and says vMAJOR.MINOR.PATCH
+# (each at most 9 digits, so every comparison below is in range); fails otherwise. A node that
+# hangs on --version blocks here: POSIX sh has no portable timeout.
+node_version() {
+  v=$("$1" --version 2>/dev/null </dev/null) || return 1
+  v=${v#v}
+  case "$v" in *.*.*) ;; *) return 1 ;; esac
+  VMAJ=${v%%.*}
+  rest=${v#*.}
+  VMIN=${rest%%.*}
+  VPAT=${rest#*.}
+  VPAT=${VPAT%%[!0-9]*}
+  for n in "$VMAJ" "$VMIN" "$VPAT"; do
+    case "$n" in '' | *[!0-9]* | ??????????*) return 1 ;; esac
+  done
+  return 0
+}
+
+# Whether VMAJ.VMIN is new enough (a comparison that errors refuses).
+new_enough() {
+  { [ "$VMAJ" -gt "$MIN_MAJOR" ] || { [ "$VMAJ" -eq "$MIN_MAJOR" ] && [ "$VMIN" -ge "$MIN_MINOR" ]; }; } 2>/dev/null
+}
+
+# The first `node` on PATH, from absolute PATH entries only: an empty or relative entry (".",
+# "::") would run a node from whatever folder Claude Code started in, so it is skipped.
+first_path_node() {
+  rest=${PATH:-}
+  while :; do
+    case "$rest" in
+      *:*) entry=${rest%%:*}; rest=${rest#*:} ;;
+      *) entry=$rest; rest= ; last=1 ;;
+    esac
+    case "$entry" in
+      /*) if [ -f "$entry/node" ] && [ -x "$entry/node" ]; then printf '%s\n' "$entry/node"; return 0; fi ;;
+    esac
+    [ -n "${last:-}" ] && return 1
+  done
+}
+
+found=""
+path_node=$(first_path_node)
+case "$path_node" in /*) ;; *) path_node= ;; esac
+if [ -n "$path_node" ] && node_version "$path_node" && new_enough; then
+  found=$path_node
+fi
+
+if [ -z "$found" ] && [ -n "${HOME:-}" ]; then
+  bmaj=-1
+  bmin=0
+  bpat=0
+  for dir in "$HOME"/.local/share/team-relay/node-v*-*; do
+    candidate=$dir/bin/node
+    [ -x "$candidate" ] || continue
+    node_version "$candidate" && new_enough || continue
+    if { [ "$VMAJ" -gt "$bmaj" ] \
+      || { [ "$VMAJ" -eq "$bmaj" ] && [ "$VMIN" -gt "$bmin" ]; } \
+      || { [ "$VMAJ" -eq "$bmaj" ] && [ "$VMIN" -eq "$bmin" ] && [ "$VPAT" -gt "$bpat" ]; }; } 2>/dev/null; then
+      found=$candidate
+      bmaj=$VMAJ
+      bmin=$VMIN
+      bpat=$VPAT
+    fi
+  done
+fi
+
+if [ -z "$found" ]; then
+  echo "Team relay needs its helper: paste the setup line from your team page into Terminal again." >&2
+  exit 1
+fi
+exec "$found" "$@"

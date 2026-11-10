@@ -89,7 +89,13 @@ flowchart LR
 
 ## Joining a team
 
-You need [Claude Code](https://code.claude.com) 2.1.280 or newer and Node.js 22 or newer, and
+On a Mac, the simple way: open your team's page (the link in your invitation), accept the
+invitation, and follow the card "Join in 2 minutes": open Terminal, paste the one setup line
+it shows, answer its questions (it gets what it needs, Node.js included, and opens the Mac's
+own folder chooser), then click Accept on the page. The Setup page shows what is left in plain
+words. The steps below are the manual way, for developers and other systems.
+
+You need [Claude Code](https://code.claude.com) 2.1.280 or newer and Node.js 22.12 or newer, and
 the team owner must have invited your work Google account (or you create a team yourself,
 below). Then, in Claude Code:
 
@@ -98,11 +104,10 @@ below). Then, in Claude Code:
    /plugin marketplace add <github-owner>/team-relay
    /plugin install team-relay@team-relay-dev
    ```
-   `<github-owner>` is the account this repository lives under (the console's join panel
-   shows your team's). While channels are in research preview, start Claude Code with
+   `<github-owner>` is the account this repository lives under (ask your team's owner). While channels are in research preview, start Claude Code with
    `claude --dangerously-load-development-channels plugin:team-relay@team-relay-dev`
    (for a team on another relay than the plugin's default, put `RELAY_URL=https://<relay>`
-   in front; the join panel shows the full command). Teammates' answers appear only in a
+   in front). Teammates' answers appear only in a
    session started that way. The plugin is installed for your user, so your other Claude Code
    sessions have its tools too, but they never read your answers (that would lose them): they
    say so, and your answers wait for a session with the channel.

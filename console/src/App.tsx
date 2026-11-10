@@ -6,11 +6,11 @@ import { AdminPage } from '@/components/console/admin'
 import { Agents } from '@/components/console/agents'
 import { AskPage } from '@/components/console/ask'
 import { Header } from '@/components/console/header'
-import { JoinPanel } from '@/components/console/join'
+import { JoinCard, useShowJoinCard } from '@/components/console/join'
 import { Members, progressByMember } from '@/components/console/members'
 import { RequestSheet } from '@/components/console/request-sheet'
 import { ResizableRow } from '@/components/console/resizable-row'
-import { AcceptBanner, SetupPage, ViewTabs } from '@/components/console/setup'
+import { AcceptBanner, SetupPage, useViewerSetup, ViewTabs } from '@/components/console/setup'
 import { Expired, Loading, MissingKey, NotOnTeam, SessionExpired, UnreachableBanner } from '@/components/console/states'
 import { mapMembers, TeamMap } from '@/components/console/team-map'
 import { CreateTeamDialog, NoTeamPage, TeamSettings } from '@/components/console/teams'
@@ -20,7 +20,6 @@ import { NavContext, TeamContext, useNav, type ConsoleFocus, type ConsoleView, t
 import { useNow } from '@/hooks/use-now'
 import { sortedRequests } from '@/lib/activity'
 import { isOwner } from '@/lib/roster'
-import { acceptedVersion, currentVersion, setupSteps } from '@/lib/setup'
 import { effectiveRequest } from '@/lib/steps'
 import { pickTeam, rememberTeam } from '@/lib/teams'
 
@@ -55,11 +54,10 @@ export function Console() {
   // edit them), and Delete team for owners (the relay refuses a file team).
   const entry = nav.teams?.teams.find((t) => t.team === nav.team) ?? null
   // M11 §6: the viewer's own progress for the Setup tab, and everyone's for the Members panel.
+  const viewerSetup = useViewerSetup()
   const progress = useMemo(() => progressByMember(statuses.data, bounds.data), [statuses.data, bounds.data])
-  const mine = statuses.data?.members.find((m) => m.member === member) ?? null
-  const setupDone = statuses.data
-    ? setupSteps(mine, bounds.data, acceptedVersion(mine, null), currentVersion(bounds.data, statuses.data.boundaries_version)).filter((s) => s.done).length
-    : null
+  const setupDone = statuses.data ? viewerSetup.done : null
+  const joinCard = useShowJoinCard()
 
   // M6 §4 (hosted): a signed-in account the relay does not know sees this, and no data. With
   // several teams (M9 §5) it means this team is no longer theirs: their teams are read again.
@@ -87,8 +85,7 @@ export function Console() {
   function teamView() {
     return (
       <>
-        <AcceptBanner />
-        <JoinPanel owner={owner} />
+        {joinCard ? <JoinCard /> : <AcceptBanner />}
         <ResizableRow className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
           {(sized) => (
             <>

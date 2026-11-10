@@ -7,6 +7,10 @@
 // - ../.claude-plugin/marketplace.json (the repository's marketplace, when the plugin sits in
 //   the repository): this plugin's entry says `"license": "MIT"` too; nothing else changes.
 // - .mcp.json: the relay channel in asker role; it signs in with the stored credential.
+// - hooks/hooks.json: the SessionStart hook.
+//   Both start their bundle through bin/run-node (with /bin/sh, so no executable bit is
+//   needed), never `node` from PATH: Claude Code's PATH may have no node, or one too old for
+//   the bundles (M11-SPEC "Simpler joining").
 // - commands/answering.md: /team-relay:answering, which names each capability of
 //   manifest.yaml with the environment variables that offer it.
 //
@@ -20,16 +24,33 @@ import { loadManifest, type Manifest } from '../src/manifest.js';
 
 export const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+/** How every plugin process starts: /bin/sh runs bin/run-node, which picks a new-enough node. */
+export const LAUNCH_COMMAND = '/bin/sh';
+export const launchArgs = (bundle: string): string[] => ['${CLAUDE_PLUGIN_ROOT}/bin/run-node', `\${CLAUDE_PLUGIN_ROOT}/dist/${bundle}`];
+
 export function buildMcpJson(): Record<string, unknown> {
   return {
     mcpServers: {
       relay: {
-        command: 'node',
-        args: ['${CLAUDE_PLUGIN_ROOT}/dist/channel.js'],
+        command: LAUNCH_COMMAND,
+        args: launchArgs('channel.js'),
         env: {
           RELAY_ROLE: 'asker',
         },
       },
+    },
+  };
+}
+
+export function buildHooksJson(): Record<string, unknown> {
+  return {
+    hooks: {
+      SessionStart: [
+        {
+          matcher: 'startup|resume|clear|compact',
+          hooks: [{ type: 'command', command: LAUNCH_COMMAND, args: launchArgs('session-start.js'), timeout: 10 }],
+        },
+      ],
     },
   };
 }
@@ -114,6 +135,7 @@ export function render(root: string = PLUGIN_ROOT): Rendered[] {
   const out: Rendered[] = [
     { path: pluginPath, content: renderJson(withLicense(next, 'author')) },
     { path: join(root, '.mcp.json'), content: renderJson(buildMcpJson()) },
+    { path: join(root, 'hooks', 'hooks.json'), content: renderJson(buildHooksJson()) },
     { path: join(root, 'commands', 'answering.md'), content: buildAnsweringCommand(manifest) },
   ];
   const marketplacePath = join(root, '..', '.claude-plugin', 'marketplace.json');
