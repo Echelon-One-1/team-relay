@@ -6,14 +6,25 @@
 // can be watched without a relay. It masks exactly as the relay does (M2 §3.5, §7.8): a
 // non-participant sees no question, params or answer previews; a recipient sees its own
 // answer preview only; the asker sees every one.
+//
+// M11: the viewer's acceptance of the boundaries (alice accepted version 1 of `demo`'s; they
+// are at 2), every member's setup status (bob is set up, alice has not connected Drive, carol's
+// Mac has never reported), and questions asked from the console: on `demo` bob acknowledges
+// after 1 s and answers after 4 s, carol acknowledges after 2 s and does not answer; nobody
+// answers on a quiet team.
 
 import type {
+  Acceptance,
   ActivityPage,
   ActivityRecipient,
   ActivityRequest,
   Directory,
   DirectoryMember,
   InboxSummary,
+  MemberSetupStatus,
+  MemberStatusEntry,
+  MembersStatus,
+  MyRequest,
   ProgressEntry,
   RequestDetail,
   AdminTeam,
@@ -505,6 +516,28 @@ function median(xs: number[]): number | null {
   return Math.round(v * 10) / 10
 }
 
+/** What a Mac reports (M11 §3), all set unless said otherwise. Synthetic. */
+export function mockStatus(now: number, o: { found?: boolean; signedIn?: boolean; roots?: number; drive?: boolean; selfOk?: boolean; reason?: string | null }): MemberSetupStatus {
+  return {
+    daemon: { version: '0.11.0', started_at: iso(now - 3_600_000) },
+    claude: { found: o.found ?? true, signed_in: o.signedIn ?? true },
+    folders: { repo_roots: o.roots ?? 1, clones: 6, extra_folders: 0 },
+    drive: { connected: o.drive ?? true },
+    self_test: { ok: o.selfOk ?? true, at: iso(now - 600_000), reason: o.reason ?? null },
+    seen_at: iso(now - 20_000),
+  }
+}
+
+/** M11 §4: how bob and carol take a question asked from the console (synthetic). */
+const MOCK_REPLIES: Record<string, { ack: number; at: number | null; text: string }> = {
+  bob: {
+    ack: 1000,
+    at: 4000,
+    text: 'The export job is jobs/export_invoices.\nRetries are set in config/jobs.yaml: three attempts, backoff from 30 s.',
+  },
+  carol: { ack: 2000, at: null, text: '' },
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 }
@@ -543,6 +576,12 @@ export class MockRelay {
   ])
   /** M10 §1: each team's boundaries; a team not here has never had them set. */
   private bounds = new Map<string, TeamBoundaries>([['demo', structuredClone(fixtureBoundaries)]])
+  /** M11 §2: the viewer's acceptance per team; a team not here was never accepted. */
+  private accepted = new Map<string, Acceptance>([['demo', { version: 1, accepted_at: '2026-09-20T12:00:00Z' }]])
+  /** M11 §3: each member's status on `demo` (tests change them with setMemberStatus). */
+  private statuses = new Map<string, { status: MemberSetupStatus | null; answering: boolean; accepted?: number }>()
+  /** M11 §4: questions asked from the console, per team, with each recipient's full answer. */
+  private asked: Array<{ team: string; script: Script; answers: Record<string, string> }> = []
   private readonly shift: number
   private readonly now: () => number
 
@@ -555,6 +594,7 @@ export class MockRelay {
 
   private scripts(now: number): Script[] {
     const out = fixtureScripts(this.shift)
+    out.push(...this.asked.filter((a) => a.team === 'demo').map((a) => a.script))
     const current = Math.floor((now - this.startedAt) / CYCLE_MS)
     for (let k = Math.max(0, current - KEEP_CYCLES); k <= current; k++) {
       out.push(...cycleScripts(k, this.startedAt + k * CYCLE_MS))
@@ -670,7 +710,13 @@ export class MockRelay {
     const viewer = this.viewer
     const isAsker = r.asker === viewer
     if (!isAsker && !(viewer in r.recipients)) return null
-    const visible = Object.fromEntries(Object.entries(r.recipients).filter(([m]) => isAsker || m === viewer))
+    // M11 §4: the asker reads each recipient's full answer next to its preview.
+    const full = this.asked.find((a) => a.script.base.request_id === id)?.answers ?? {}
+    const visible = Object.fromEntries(
+      Object.entries(r.recipients)
+        .filter(([m]) => isAsker || m === viewer)
+        .map(([m, rr]) => [m, isAsker ? { ...rr, answer: rr.status === 'answered' ? (full[m] ?? rr.answer_preview) : null } : rr]),
+    )
     return {
       request_id: r.request_id,
       kind: r.kind,
@@ -779,6 +825,135 @@ export class MockRelay {
     const current = this.bounds.get(team)
     const version = (current?.version ?? 0) + 1
     this.bounds.set(team, { team, version, boundaries, since: nextSince(current ?? null, version, boundaries), updated_at: new Date(this.now()).toISOString(), updated_by: member })
+  }
+
+  // --- M11: acceptance, members' status, asking ------------------------------------------
+
+  /** Sets what a member's Mac last reported on `demo` (tests and the dev view). */
+  setMemberStatus(member: string, status: MemberSetupStatus | null, answering: boolean, accepted?: number): void {
+    this.statuses.set(member, { status, answering, ...(accepted !== undefined ? { accepted } : {}) })
+  }
+
+  private memberStatus(team: string): MembersStatus {
+    const bounds = this.bounds.get(team)
+    const version = bounds?.version ?? 0
+    const now = this.now()
+    const mine = this.account.teams.find((t) => t.team === team)!
+    const viewerAccepted = this.accepted.get(team)?.version ?? 0
+    if (team !== 'demo') {
+      const roster = (this.quiet.get(team) ?? []).filter((m) => m.status !== 'invited')
+      return {
+        members: roster.map((m) => ({ member: m.member, status: null, answering: false, accepted_version: m.member === mine.member ? viewerAccepted : 0 })),
+        boundaries_version: version,
+      }
+    }
+    const defaults: Record<string, { status: MemberSetupStatus | null; answering: boolean; accepted?: number }> = {
+      alice: { status: mockStatus(now, { drive: false }), answering: true },
+      bob: { status: mockStatus(now, {}), answering: true, accepted: version },
+      carol: { status: null, answering: false, accepted: 0 },
+    }
+    const members: MemberStatusEntry[] = this.rosterEntries
+      .filter((m) => m.status !== 'invited')
+      .map((m) => {
+        const s = this.statuses.get(m.member) ?? defaults[m.member] ?? { status: null, answering: false }
+        const accepted = m.member === this.viewer ? viewerAccepted : (s.accepted ?? 0)
+        return { member: m.member, status: s.status, answering: s.answering, accepted_version: accepted }
+      })
+    return { members, boundaries_version: version }
+  }
+
+  private viewerOn(team: string): string {
+    return team === 'demo' ? this.viewer : this.account.teams.find((t) => t.team === team)!.member
+  }
+
+  private teammatesOn(team: string): string[] {
+    const viewer = this.viewerOn(team)
+    const roster = team === 'demo' ? this.rosterEntries : (this.quiet.get(team) ?? [])
+    return roster.filter((m) => m.status !== 'invited' && m.member !== viewer).map((m) => m.member)
+  }
+
+  /** M11 §2-§4 for `team`, by the relay's rules. */
+  private m11(team: string, method: string, p: string, body: unknown): Response {
+    const now = this.now()
+    if (p === '/api/acceptance') {
+      if (method === 'GET') return json(this.accepted.get(team) ?? { version: 0, accepted_at: null })
+      if (method !== 'PUT') return json({ error: 'method_not_allowed' }, 405)
+      const b = (typeof body === 'object' && body !== null ? body : {}) as { version?: unknown }
+      if (!versionOk(b.version) || Object.keys(b).some((k) => k !== 'version')) return json({ error: 'bad_request', detail: 'send {"version": n}' }, 400)
+      const bounds = this.bounds.get(team)
+      if (!bounds?.boundaries) return this.refuse(409, 'not_set', 'The team has no boundaries to accept yet.')
+      if (b.version !== bounds.version) return this.refuse(409, 'version_conflict', 'The boundaries changed since you read them.')
+      const out = { version: b.version, accepted_at: iso(now) }
+      this.accepted.set(team, out)
+      return json(out)
+    }
+    if (method === 'GET' && p === '/api/members-status') return json(this.memberStatus(team))
+    if (method === 'GET' && p === '/api/my-requests') {
+      const viewer = this.viewerOn(team)
+      const docs =
+        team === 'demo'
+          ? this.state(now).map((m) => m.request)
+          : this.asked.filter((a) => a.team === team).flatMap((a) => (materialise(a.script, now)?.request ? [materialise(a.script, now)!.request] : []))
+      const requests: MyRequest[] = docs
+        .filter((d) => d.asker === viewer && d.kind === 'question')
+        .sort((a, b) => parse(b.created_at) - parse(a.created_at) || b.request_id.localeCompare(a.request_id))
+        .slice(0, 20)
+        .map((d) => ({ id: d.request_id, to: d.broadcast ? '*' : Object.keys(d.recipients), created_at: d.created_at, question_preview: [...(d.question ?? '')].slice(0, 200).join('') }))
+      return json({ requests })
+    }
+    if (p === '/api/ask') {
+      if (method !== 'POST') return json({ error: 'method_not_allowed' }, 405)
+      const b = (typeof body === 'object' && body !== null ? body : {}) as { to?: unknown; question?: unknown }
+      if (typeof b.question !== 'string' || b.question.trim() === '' || (b.to !== '*' && !Array.isArray(b.to))) {
+        return json({ error: 'bad_request', detail: 'send {"to", "question"}' }, 400)
+      }
+      const teammates = this.teammatesOn(team)
+      const to = b.to === '*' ? [...teammates].sort() : (b.to as unknown[]).map(String)
+      if (to.length === 0) return this.refuse(400, 'bad_recipients', 'You have no teammates to ask.')
+      if (to.some((m) => !teammates.includes(m))) return this.refuse(400, 'bad_recipients', "'to' names someone who is not in your team.")
+      const id = hexId(1_000_000 + this.asked.length)
+      const events: ScriptEvent[] = []
+      const answers: Record<string, string> = {}
+      if (team === 'demo') {
+        for (const m of to) {
+          const reply = MOCK_REPLIES[m]
+          if (!reply) continue
+          events.push(deliver(m, now + 500), ack(m, now + reply.ack))
+          if (reply.at !== null) {
+            events.push(answer(m, now + reply.at, reply.text.slice(0, 2000)))
+            answers[m] = reply.text
+          }
+        }
+      }
+      const created = base({ id, at: now, asker: this.viewerOn(team), to, broadcast: b.to === '*', question: b.question })
+      events.push(sweep(parse(created.ack_deadline)), sweep(parse(created.answer_deadline)))
+      this.asked.push({ team, script: { base: created, events }, answers })
+      return json({ request_id: id, recipients: to, created: true }, 201)
+    }
+    return json({ error: 'not_found' }, 404)
+  }
+
+  /** GET /api/requests/{id} of a question asked on a quiet team (the asker's view). */
+  private askedDetail(team: string, id: string): Response | null {
+    const a = this.asked.find((x) => x.team === team && x.script.base.request_id === id)
+    if (!a) return null
+    const m = materialise(a.script, this.now())
+    if (!m) return json({ error: 'not_found' }, 404)
+    const r = m.request
+    return json({
+      request_id: r.request_id,
+      kind: r.kind,
+      asker: r.asker,
+      broadcast: r.broadcast,
+      question: r.question,
+      capability: null,
+      created_at: r.created_at,
+      ack_deadline: r.ack_deadline,
+      answer_deadline: r.answer_deadline,
+      expire_at: r.expire_at,
+      recipients: Object.fromEntries(Object.entries(r.recipients).map(([k, v]) => [k, { ...v, answer: a.answers[k] ?? null }])),
+      progress: m.progress,
+    } satisfies RequestDetail)
   }
 
   // --- M9: teams ---------------------------------------------------------------------------
@@ -943,7 +1118,18 @@ export class MockRelay {
       if (typeof init?.body === 'string' && init.body !== '') body = JSON.parse(init.body)
       return this.boundariesCall(team, method, body)
     }
-    if (team !== 'demo') return this.quietTeam(team, method, p, init)
+    if (p === '/api/acceptance' || p === '/api/members-status' || p === '/api/my-requests' || p === '/api/ask') {
+      if (!this.reachable) return json({ error: 'relay_unreachable' }, 502)
+      let body: unknown = undefined
+      if (typeof init?.body === 'string' && init.body !== '') body = JSON.parse(init.body)
+      return this.m11(team, method, p, body)
+    }
+    if (team !== 'demo') {
+      const asked = /^\/api\/requests\/(rq_[0-9a-f]{32})$/.exec(p)
+      const found = asked?.[1] ? this.askedDetail(team, asked[1]) : null
+      if (found) return found
+      return this.quietTeam(team, method, p, init)
+    }
     // Answered by the console server itself, so it does not depend on the relay being reachable.
     if (p === '/api/join') return json(fixtureJoin)
     if (!this.reachable) return json({ error: 'relay_unreachable' }, 502)

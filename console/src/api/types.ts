@@ -331,6 +331,16 @@ export interface ProgressEntry {
   duration_ms?: number | null
 }
 
+/**
+ * One recipient on GET /api/requests/{id}. M11 §4: the asker also reads each recipient's
+ * `answer_preview` and full `answer` (up to 32000 characters): a teammate's text, always shown
+ * as plain text.
+ */
+export type RequestRecipient = Partial<ActivityRecipient> & {
+  status: RecipientStatus
+  answer?: string | null
+}
+
 /** GET /api/requests/{id} (M1 §3.11): the asker sees every recipient, a recipient itself. */
 export interface RequestDetail {
   request_id: string
@@ -343,6 +353,60 @@ export interface RequestDetail {
   ack_deadline: Iso
   answer_deadline: Iso
   expire_at: Iso
-  recipients: Record<string, Partial<ActivityRecipient> & { status: RecipientStatus }>
+  recipients: Record<string, RequestRecipient>
   progress: ProgressEntry[]
+}
+
+// ---------------------------------------------------------------------------------------
+// M11: guided joining and asking from the console.
+
+/** GET /api/acceptance (M11 §2): the boundaries version the viewer accepted (0: never). */
+export interface Acceptance {
+  version: number
+  accepted_at: Iso | null
+}
+
+/** What a member's background answerer last reported (M11 §3): counts and booleans only. */
+export interface MemberSetupStatus {
+  daemon: { version: string; started_at: Iso }
+  claude: { found: boolean; signed_in: boolean }
+  folders: { repo_roots: number; clones: number; extra_folders: number }
+  drive: { connected: boolean }
+  self_test: { ok: boolean; at: Iso; reason: string | null }
+  /** The relay's own time of the last report. */
+  seen_at: Iso
+}
+
+/** One member of GET /api/members-status (M11 §3). */
+export interface MemberStatusEntry {
+  member: string
+  /** Null until their Mac has reported once. */
+  status: MemberSetupStatus | null
+  /** Their answerer reported within the last 180 s. */
+  answering: boolean
+  accepted_version: number
+}
+
+export interface MembersStatus {
+  members: MemberStatusEntry[]
+  boundaries_version: number
+}
+
+/** One of GET /api/my-requests (M11 §4): the viewer's own recent requests, newest first. */
+export interface MyRequest {
+  id: string
+  to: '*' | string[]
+  created_at: Iso
+  /** The first 200 characters of the question: the viewer's own text. */
+  question_preview: string
+}
+
+export interface MyRequests {
+  requests: MyRequest[]
+}
+
+/** POST /api/ask (M11 §4): the request the relay made. */
+export interface AskResult {
+  request_id: string
+  recipients: string[]
 }

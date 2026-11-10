@@ -3,6 +3,11 @@ machine, the deadline sweep, the audit trail, presence, tool events, the activit
 the directory's stats. Store-agnostic: every atomic step is one call to a
 :class:`~relay.store.Store` primitive, and every state change is a pure function handed
 to :meth:`~relay.store.Store.mutate_request`.
+
+M11 (M11-SPEC §2-§4): a member's acceptance of the boundaries (their own only: the caller is
+always the member it is for), their background answerer's status, the team's status, a
+reply's full text kept with its request and handed to the asker only, and the asker's own
+recent questions. A delegate (``member-self``) asks questions only, never a capability.
 """
 
 from __future__ import annotations
@@ -29,6 +34,12 @@ from .jsonutil import canonical_json, content_digest, sha256_hex
 from .log import log_event
 from .manifest import ManifestError, ManifestValidator, ParamsError, find_capability
 from .manifest import validate_params as check_params
+from .member_state import (
+    acceptance_json,
+    parse_accept_body,
+    parse_status_body,
+    status_json,
+)
 from .models import CreateRequestBody, CursorBody, ProgressBody, ReplyBody, ToolEventBody
 from .roster import (
     OWNER,
@@ -42,11 +53,15 @@ from .roster import (
 )
 from .store import (
     STREAMS,
+    Acceptance,
+    AcceptanceChange,
+    AnswerEntry,
     AuditEntry,
     BeyondHead,
     BoundariesChange,
     Envelope,
     IdempotencyRecord,
+    MemberStatus,
     Mutation,
     ProgressEntry,
     Quota,
@@ -54,6 +69,7 @@ from .store import (
     RecipientState,
     RequestDoc,
     RosterEntry,
+    StatusChange,
     Store,
     StreamPage,
     TeamBoundaries,
@@ -102,6 +118,15 @@ STATS_CACHE_TTL = timedelta(seconds=10)
 # Teams are created at run time (M9-SPEC §1): the stats cache keeps at most this many.
 STATS_CACHE_SIZE = 1024
 
+
+# M11-SPEC §3: a member's status is written at most once per this long, and a member whose
+# status arrived within ANSWERING_WINDOW is answering.
+STATUS_MIN_INTERVAL = timedelta(seconds=20)
+ANSWERING_WINDOW = timedelta(seconds=180)
+# M11-SPEC §4: GET me/requests.
+MY_REQUESTS_DEFAULT = 20
+MY_REQUESTS_MAX = 50
+QUESTION_PREVIEW_CHARS = 200  # in code points
 
 # M7-SPEC §1, the inbox summary: at most this many waiting messages are read (a count at the
 # cap is reported with "more" when the stream holds later ones), and at most this many
@@ -667,6 +692,9 @@ class RelayService:
 
     async def _create_request(self, caller: Caller, raw: Any) -> tuple[int, dict[str, Any]]:
         body = parse_body(CreateRequestBody, raw)
+        if caller.delegate is not None and body.kind != "question":
+            # M11-SPEC §4: the console asks questions for its viewer, never a capability call.
+            raise ApiError(403, "forbidden", "A delegate may only ask questions.")
         self._check_timeouts(body)
         # The hash covers the validated body with the relay's defaults for the timeouts,
         # but not the capability defaults: those depend on a manifest that may change
@@ -749,6 +777,7 @@ class RelayService:
                 to=list(recipients),
                 content_sha256=body_hash,
                 content_length=len(canonical.encode("utf-8")),
+                detail="via delegate" if caller.delegate else None,
             )
         ]
         audit += [
@@ -975,6 +1004,8 @@ class RelayService:
                 state.reply_key = body.idempotency_key
                 state.reply_message_id = message_id
                 state.answer_preview = body.text[:ANSWER_PREVIEW_CHARS]  # code points
+                # M11-SPEC §4: the full text, below the request, for as long as it lives.
+                answer = AnswerEntry(member=caller.member, text=body.text, expire_at=doc.expire_at)
                 doc.next_deadline = next_deadline(doc)
                 env = Envelope(
                     id=message_id,
@@ -1006,7 +1037,13 @@ class RelayService:
                     ),
                     self._delivery_audit(env, caller.member, "envelope.deliver", now),
                 ]
-                return Mutation(result=message_id, request=doc, envelopes=[env], audit=audit)
+                return Mutation(
+                    result=message_id,
+                    request=doc,
+                    envelopes=[env],
+                    audit=audit,
+                    answers=[answer],
+                )
 
             message_id = await self._mutate(caller.team, request_id, now, fn)
             return {"status": "answered", "message_id": message_id}
@@ -1137,6 +1174,11 @@ class RelayService:
 
         is_asker = caller.member == doc.asker
         visible = {m: s for m, s in doc.recipients.items() if is_asker or m == caller.member}
+        # M11-SPEC §4: the full answers, to the asker only (a delegate reads them only for the
+        # asker it acts for: the caller is the member it names).
+        answers: dict[str, str] = {}
+        if is_asker and any(s.status == "answered" for s in visible.values()):
+            answers = await self.store.list_answers(caller.team, request_id)
         progress = [
             p
             for p in await self.store.list_progress(caller.team, request_id)
@@ -1158,6 +1200,8 @@ class RelayService:
                     "status": s.status,
                     "acked_at": format_time(s.acked_at),
                     "answered_at": format_time(s.answered_at),
+                    "answer_preview": s.answer_preview,
+                    "answer": answers.get(m) if is_asker else None,
                 }
                 for m, s in visible.items()
             },
@@ -1518,6 +1562,172 @@ class RelayService:
             return boundaries_json(caller.team, stored, self.config.allowed_domains)
 
         return await self._guarded(caller, "boundaries_set", None, work)
+
+    # M11 §2-§4: a member's own state ---------------------------------------------------
+    async def _count_own_read(self, caller: Caller, name: str, endpoint: str) -> None:
+        """One against the member's per-minute budget ``name`` for one kind of read
+        (``reads_per_minute`` each), in the store; over it ``429 rate_limited``. A read: a
+        refusal goes to stdout only, never the audit."""
+        limit = self.config.limits.reads_per_minute
+        quota = self._quota(caller.member, name, limit, self.now())
+        if await self.store.count_quota(caller.team, quota):
+            return
+        log_event(
+            "read_refused",
+            severity="WARNING",
+            team=caller.team,
+            member=caller.member,
+            endpoint=endpoint,
+            **({"delegate": caller.delegate} if caller.delegate else {}),
+        )
+        raise ApiError(429, "rate_limited", f"At most {limit} of these reads a minute.")
+
+    async def acceptance_get(self, caller: Caller) -> dict[str, Any]:
+        """M11-SPEC §2: the boundaries version the caller accepted (0: never)."""
+        await self._count_own_read(caller, "acceptance_reads", "acceptance")
+        found = await self.store.get_acceptances(caller.team, [caller.member])
+        return acceptance_json(found.get(caller.member))
+
+    async def acceptance_set(self, caller: Caller, raw: Any) -> dict[str, Any]:
+        """M11-SPEC §2: the caller accepts the team's current boundaries version, for
+        themselves only (the caller is the member; a ``member-self`` delegate's caller is its
+        viewer). The version must be the current one (``409 version_conflict``); never set:
+        ``409 not_set``. Accepting the version already accepted changes nothing. Counted
+        against the member's hourly write budget; audited with the version only."""
+
+        async def work() -> dict[str, Any]:
+            version = parse_accept_body(raw)
+            now = self.now()
+            detail = f"version {version}" + ("; via delegate" if caller.delegate else "")
+            audit = self._audit(
+                caller.team, caller.member, "boundaries_accepted", "accepted", now, detail=detail
+            )
+
+            def fn(
+                current: TeamBoundaries | None,
+                accepted: Acceptance | None,
+                entry: RosterEntry | None,
+            ) -> AcceptanceChange[Acceptance]:
+                if entry is None or not entry.active:
+                    raise not_found()  # removed meanwhile
+                if current is None:
+                    raise ApiError(409, "not_set", "This team's boundaries have not been set yet.")
+                if version != current.version:
+                    raise ApiError(
+                        409,
+                        "version_conflict",
+                        f"The boundaries are now version {current.version}; "
+                        "reload and accept what is shown.",
+                    )
+                if accepted is not None and accepted.version == version:
+                    return AcceptanceChange(result=accepted)
+                new = Acceptance(version=version, accepted_at=now)
+                return AcceptanceChange(result=new, acceptance=new, audit=[audit])
+
+            start = (
+                int(now.timestamp()) // ROSTER_QUOTA_WINDOW_SECONDS * ROSTER_QUOTA_WINDOW_SECONDS
+            )
+            quota = Quota(
+                key=f"{caller.member}.acceptance.{start}",
+                limit=self.config.limits.roster_mutations_per_hour,
+                expire_at=datetime.fromtimestamp(start + 2 * ROSTER_QUOTA_WINDOW_SECONDS, UTC),
+            )
+            try:
+                stored = await self.store.set_acceptance(caller.team, caller.member, fn, [quota])
+            except TeamGone:
+                raise not_found() from None  # M9-SPEC §1: deleted meanwhile
+            except QuotaExceeded as exc:
+                raise ApiError(
+                    429,
+                    "rate_limited",
+                    f"At most {exc.quota.limit} acceptances an hour; try again later.",
+                ) from None
+            log_event(
+                "boundaries_accepted",
+                team=caller.team,
+                member=caller.member,
+                version=stored.version,
+                via_delegate=bool(caller.delegate),
+            )
+            return acceptance_json(stored)
+
+        return await self._guarded(caller, "boundaries_accepted", None, work)
+
+    async def status_set(self, caller: Caller, raw: Any) -> dict[str, Any]:
+        """M11-SPEC §3: the caller's background answerer reports; the relay adds ``seen_at``
+        (its own clock). At most one write per member per STATUS_MIN_INTERVAL (``429``).
+        Never a delegate's (the app refuses it). Not audited: like a cursor move, it is the
+        transport's bookkeeping, and it holds counts and booleans only."""
+        status = parse_status_body(raw)
+        now = self.now()
+
+        def fn(current: MemberStatus | None, entry: RosterEntry | None) -> StatusChange[bool]:
+            if entry is None or not entry.active:
+                raise not_found()  # removed meanwhile
+            if current is not None and now < current.seen_at + STATUS_MIN_INTERVAL:
+                return StatusChange(result=False)
+            return StatusChange(result=True, status=MemberStatus(status=status, seen_at=now))
+
+        try:
+            written = await self.store.set_member_status(caller.team, caller.member, fn)
+        except TeamGone:
+            raise not_found() from None
+        if not written:
+            log_event(
+                "status_rate_limited", severity="WARNING", team=caller.team, member=caller.member
+            )
+            raise ApiError(
+                429, "rate_limited", "At most one status every 20 seconds; try again shortly."
+            )
+        return status_json(status, now)
+
+    async def members_status(self, caller: Caller) -> dict[str, Any]:
+        """M11-SPEC §3: every active member's last status (null when none), whether they are
+        answering (a status within ANSWERING_WINDOW), the boundaries version they accepted,
+        and the team's current version."""
+        await self._count_own_read(caller, "status_reads", "members_status")
+        members = list(await self._members(caller.team))
+        statuses = await self.store.get_member_statuses(caller.team, members)
+        accepted = await self.store.get_acceptances(caller.team, members)
+        current = await self.store.get_boundaries(caller.team)
+        now = self.now()
+        listed = []
+        for member in members:
+            stored = statuses.get(member)
+            acceptance = accepted.get(member)
+            listed.append(
+                {
+                    "member": member,
+                    "status": status_json(stored.status, stored.seen_at) if stored else None,
+                    "answering": stored is not None and now - stored.seen_at <= ANSWERING_WINDOW,
+                    "accepted_version": acceptance.version if acceptance else 0,
+                }
+            )
+        return {
+            "members": listed,
+            "boundaries_version": current.version if current is not None else 0,
+        }
+
+    async def my_requests(self, caller: Caller, limit_raw: str | None) -> dict[str, Any]:
+        """M11-SPEC §4: the caller's own unexpired questions, newest first, with the first
+        QUESTION_PREVIEW_CHARS code points of each; ``to`` is ``"*"`` for a broadcast."""
+        limit = _parse_int(limit_raw, "limit", 1, MY_REQUESTS_MAX)
+        await self._count_own_read(caller, "request_list_reads", "my_requests")
+        now = self.now()
+        docs = await self.store.recent_questions(
+            caller.team, caller.member, now, limit or MY_REQUESTS_DEFAULT
+        )
+        return {
+            "requests": [
+                {
+                    "id": doc.request_id,
+                    "to": "*" if doc.broadcast else list(doc.recipients),
+                    "created_at": format_time(doc.created_at),
+                    "question_preview": (doc.question or "")[:QUESTION_PREVIEW_CHARS],
+                }
+                for doc in docs
+            ]
+        }
 
     # M5 §3: device credentials ---------------------------------------------------------
     async def credentials_list(self, caller: Caller) -> dict[str, Any]:

@@ -67,7 +67,7 @@ export function buildAnsweringCommand(manifest: Manifest): string {
     '',
     '- It signs in with the same sign-in as `/team-relay:login`; no settings are needed. If I have not signed',
     '  in yet, I should run `/team-relay:login` first.',
-    '- Only one answerer runs per computer: while a channel working session answers automatically it refuses',
+    '- Only one answerer runs per computer: while a channel working session or the background answerer answers it refuses',
     '  to start (start that session with `TEAM_RELAY_AUTO_ANSWER=0` to use this one instead).',
     '- It reads none of my files by default. To let it read folders without asking, I start it with',
     '  `ANSWERER_READ_DIRS=~/src/app:~/notes` in front of the command (teammates see only the folder names).',

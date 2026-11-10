@@ -28,12 +28,13 @@ import {
   parseRelayUrl,
   relayClientFromEnv,
   type AuthMode,
-  type Connection,
   type CreateRequestBody,
   type Envelope,
   type Me,
   type StreamName,
 } from './relay-client.js';
+import { connectOnce, hostConnection } from './relay-connect.js';
+import { consoleUrl } from './console-url.js';
 import { CredentialFileError, credentialFingerprint, credentialsPath, normaliseRelayUrl, readCredential } from './credentials.js';
 import { LoginError, SUPERSEDED, connectedAs, identityChange, startLogin, type LoginFlow } from './login.js';
 import { defaultRelayUrl } from './relay-default.js';
@@ -45,7 +46,7 @@ import { answeringCommand, answersAppearNote, detectChannelSession, notChannelNo
 import { checkIntervalMs, readSummary, waitingSentence, watchInbox, whoamiFields } from './waiting.js';
 import { invitationFields } from './invitations.js';
 import { ActiveRequests, AnswerDeadlines, deadlineOf } from './active.js';
-import { AnswerHost, type HostConnection } from './answer-host.js';
+import { AnswerHost } from './answer-host.js';
 import { FOLDERS_TOOL, foldersTool } from './folders-tool.js';
 import { heldBy, lockPath, tryAcquire, type Acquired } from './answering-lock.js';
 import type { Elicit } from './approvals-review.js';
@@ -247,12 +248,13 @@ async function requestStatus(client: RelayClient, args: Record<string, unknown>)
   const bad = unknownKey(args, ['request_id']);
   if (bad) return toolError(`unknown argument: ${bad}`);
   const status = await client.getRequest(requestIdArg(args));
-  // The question and the progress text are teammate-authored (the asker's and recipients').
+  // The question, the progress text and the answers (M11-SPEC §4: each recipient's full
+  // `answer`, for the asker) are teammate-authored (the asker's and recipients').
   const labelled = neutraliseDeep(status) as Record<string, unknown>;
   // The label is set last, so nothing in the relay's answer can replace it.
   return toolJson({
     ...labelled,
-    teammate_authored_data: `${TEAMMATE_DATA_LABEL} The question and every progress text are teammate-authored.`,
+    teammate_authored_data: `${TEAMMATE_DATA_LABEL} The question and every progress text, and every answer (each recipient's answer and answer_preview), are teammate-authored.`,
   });
 }
 
@@ -284,7 +286,12 @@ async function askQuestion(client: RelayClient, args: Record<string, unknown>): 
   if (answer !== undefined) body.answer_timeout_seconds = answer;
   // One key per tool call; the client's own retries resend the same body and key.
   const res = await client.createRequest(body);
-  return toolJson({ request_id: res.request_id, recipients: res.recipients });
+  return toolJson({
+    request_id: res.request_id,
+    recipients: res.recipients,
+    // M11-SPEC §4: answers can also be followed in the browser.
+    follow_in_console: `Answers can also be followed in the team console: ${consoleUrl(client.url)} (the Ask page).`,
+  });
 }
 
 async function invokeCapability(client: RelayClient, args: Record<string, unknown>): Promise<ToolResult> {
@@ -666,41 +673,31 @@ class AskerConnection {
 
   /** One attempt; returns how long to wait before the next look. */
   private async tryConnect(fp: string | null): Promise<number> {
-    let c: Connection;
-    try {
-      c = connectionFromEnv(this.env);
-    } catch (err) {
-      this.problem = err instanceof NotConnected ? null : describeError(err);
-      this.note(err instanceof NotConnected ? 'not connected: waiting for /team-relay:login' : `not connected: ${describeError(err)}`);
-      return 2000;
-    }
-    let client: RelayClient;
-    try {
-      client = new RelayClient({ url: c.url, team: c.team, token: c.token });
-    } catch (err) {
-      this.problem = describeError(err);
-      this.note(`not connected: ${this.problem}`);
-      return 2000;
-    }
-    let me: Me;
-    try {
-      me = await client.me({ attempts: 1, timeoutMs: 15_000 });
-    } catch (err) {
-      if (err instanceof RelayError && err.status === 401 && c.mode === 'credential') {
+    const attempt = await connectOnce(this.env);
+    switch (attempt.kind) {
+      case 'not_signed_in':
+        this.problem = null;
+        this.note('not connected: waiting for /team-relay:login');
+        return 2000;
+      case 'config':
+        this.problem = attempt.problem;
+        this.note(`not connected: ${this.problem}`);
+        return 2000;
+      case 'refused':
         this.refusedAt = fp;
         this.problem = null;
         this.note(`not connected: ${SIGN_IN_AGAIN}`);
         return 2000;
-      }
-      this.problem = `the relay did not answer (${describeError(err)})`;
-      this.note(`not connected yet: ${this.problem}; trying again`);
-      return backoffDelay(this.failures++, { baseMs: 2000, maxMs: 60_000 });
+      case 'unreachable':
+        this.problem = attempt.problem;
+        this.note(`not connected yet: ${this.problem}; trying again`);
+        return backoffDelay(this.failures++, { baseMs: 2000, maxMs: 60_000 });
+      case 'wrong_team':
+        this.problem = attempt.problem;
+        this.note(`not connected: ${this.problem}`);
+        return 60_000;
     }
-    if (me.team !== client.team || !MEMBER_RE.test(me.member)) {
-      this.problem = 'the relay answered for a different team';
-      this.note(`not connected: ${this.problem}`);
-      return 60_000;
-    }
+    const { client, me, connection: c } = attempt;
     this.failures = 0;
     this.problem = null;
     const stopper = new Stopper();
@@ -946,18 +943,6 @@ export function autoAnswer(env: NodeJS.ProcessEnv): boolean {
   return (env.TEAM_RELAY_AUTO_ANSWER ?? '').trim() !== '0';
 }
 
-/** How the answerer's servers reach the relay: the same way this session does. */
-function hostConnection(c: Connection, env: NodeJS.ProcessEnv, credentialsFile: string): HostConnection {
-  return {
-    mode: c.mode,
-    url: c.url,
-    team: c.team,
-    ...(c.mode === 'credential' ? { credentialsFile } : {}),
-    ...(c.mode === 'token' ? { tokenFile: configValue(env.RELAY_TOKEN_FILE), token: configValue(env.RELAY_TOKEN) } : {}),
-    ...(c.mode === 'google' ? { gcloudAccount: configValue(env.RELAY_GCLOUD_ACCOUNT) } : {}),
-  };
-}
-
 type LoginOutcome =
   | { ok: true; member: string; team: string; email?: string | undefined; changed: string | null }
   | { ok: false; superseded: boolean; why: string };
@@ -1145,6 +1130,21 @@ async function main(): Promise<void> {
               } catch {
                 return null;
               }
+            },
+            // M11-SPEC §2: what the member accepted is the relay's, never the local file's.
+            acceptance: async () => {
+              const live = liveNow();
+              if (!live) return null;
+              try {
+                const a = await live.client.acceptance({ attempts: 1, timeoutMs: 5000 });
+                return typeof a?.version === 'number' && Number.isSafeInteger(a.version) && a.version >= 0 ? a.version : null;
+              } catch {
+                return null;
+              }
+            },
+            console: () => {
+              const live = liveNow();
+              return live ? consoleUrl(live.client.url) : null;
             },
           });
         }

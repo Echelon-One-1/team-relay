@@ -1,26 +1,27 @@
 // M10-SPEC §2, §7.1: /team-relay:folders, the `folders` tool of a working session's relay server.
 // It shows the member's local settings for the team they are signed in to (member-folders.ts):
-// repo roots, their own folders, the boundaries they accepted and what a newer version adds,
-// and what the answerer would read with them. It adds or removes a repo root or an extra
-// folder, and accepts the team's current boundaries.
+// repo roots, their own folders, the boundaries version they accepted (M11-SPEC §2: as the relay
+// holds it) and what a newer version adds, and what the answerer would read with them. It adds
+// or removes a repo root or an extra folder.
 //
-// A change is never the model's to make: every add, remove or accept opens a dialog (MCP
-// elicitation) that says exactly what changes (which folder, resolved; which orgs, drives or
-// member folders are added) and only the member's choice there changes the file. Without
-// dialogs nothing changes and nothing is accepted. So nothing a teammate writes can steer the
+// Accepting the team's boundaries is no longer done here (M11-SPEC §2): the member accepts in
+// the console, where only they can, and the `accept` action says where.
+//
+// A change is never the model's to make: every add or remove opens a dialog (MCP elicitation)
+// that says exactly what changes (which folder, resolved) and only the member's choice there
+// changes the file. Without dialogs nothing changes. So nothing a teammate writes can steer the
 // session into widening (or narrowing) what the answerer reads.
 
 import type { Elicit } from './approvals-review.js';
 import type { TeamBoundaries } from './boundaries-types.js';
 import { buildAllowedSet, quotedOwnerText, setSummary, wideningText, type GitCache } from './boundary-set.js';
 import {
-  acceptedFrom,
+  acceptedAtVersion,
   changeMemberFolders,
   effectiveBoundaries,
   memberFolderProblem,
   memberFoldersPath,
   readMemberSettings,
-  settingsNarrowedTo,
   sinceOf,
   teamSettings,
   withTeam,
@@ -36,9 +37,9 @@ export const FOLDERS_TOOL = {
   description:
     'Show or change where your automatic answerer looks when your team has boundaries (/team-relay:folders): repo roots (folders ' +
     'searched 3 levels deep for clones of the team\'s GitHub repositories; only files git tracks are read), folders of your own when ' +
-    'the team allows them, and which of the team\'s boundaries you accepted. action "show" (default) lists them and what they give; ' +
-    '"add_root", "remove_root", "add_folder" and "remove_folder" take a path (absolute or starting with ~/); "accept" accepts the ' +
-    'team\'s current boundaries. Every change asks the user in a dialog first: only the user decides there.',
+    'the team allows them, and which version of the team\'s boundaries you accepted. action "show" (default) lists them and what they give; ' +
+    '"add_root", "remove_root", "add_folder" and "remove_folder" take a path (absolute or starting with ~/); "accept" says where to ' +
+    'accept the team\'s boundaries (the team console, in the browser). Every change asks the user in a dialog first: only the user decides there.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -59,8 +60,19 @@ export type FoldersDeps = {
   team: () => string | null;
   /** The team's boundaries, when they can be read now (null: not signed in or unreachable). */
   boundaries: () => Promise<TeamBoundaries | null>;
+  /** M11-SPEC §2: the boundaries version the member accepted, from the relay (null: unknown). */
+  acceptance: () => Promise<number | null>;
+  /** M11-SPEC §2: the console, where the member accepts (null: not signed in). */
+  console: () => string | null;
   cache?: GitCache | null;
 };
+
+/** Where to accept, in one sentence. */
+function whereToAccept(url: string | null): string {
+  return url
+    ? `Accept your team's boundaries in the team console: open ${url} and press Accept on the Join or Team page. Only you can accept for yourself.`
+    : "Accept your team's boundaries in the team console (sign in first with /team-relay:login to see its address). Only you can accept for yourself.";
+}
 
 function describeFolders(v: MemberFolders, env: NodeJS.ProcessEnv) {
   const one = (raw: string) => {
@@ -86,22 +98,17 @@ function teamPart(tb: TeamBoundaries | null, otherTeam = false) {
   };
 }
 
-/** What the member accepted, and what the team's current boundaries add to it (§7.1). */
-function acceptancePart(tb: TeamBoundaries | null, t: TeamSettings) {
-  const a = t.accepted;
-  const accepted = a
-    ? {
-        version: a.version,
-        github_orgs: a.github_orgs,
-        shared_drives: a.drives.map((d) => `${quotedOwnerText(d.shared_drive, 100)} (${d.domain})`),
-        member_folders: a.member_folders,
-      }
-    : "nothing yet: teammates' questions to you are declined until you accept your team's boundaries (/team-relay:folders accept)";
+/** What the member accepted (M11-SPEC §2: the relay's version), and what the team's current boundaries add to it (§7.1). */
+function acceptancePart(tb: TeamBoundaries | null, version: number | null, url: string | null) {
+  if (version === null) return { accepted: 'unknown (the relay could not say which version you accepted)' };
+  const where = url ? `in the console (${url})` : 'in the console';
+  const accepted = version > 0 ? { version } : `nothing yet: teammates' questions to you are declined until you accept your team's boundaries ${where}`;
   if (!tb?.boundaries) return { accepted };
-  const eff = effectiveBoundaries(tb.boundaries, a, sinceOf(tb));
+  const since = sinceOf(tb);
+  const eff = effectiveBoundaries(tb.boundaries, acceptedAtVersion(tb.boundaries, version, since), since);
   return {
     accepted,
-    ...(eff.pending ? { not_accepted_yet: `version ${tb.version} adds ${wideningText(eff.pending)}: run /team-relay:folders accept` } : {}),
+    ...(eff.pending && !eff.notAccepted ? { not_accepted_yet: `version ${tb.version} adds ${wideningText(eff.pending)}: accept it ${where}` } : {}),
   };
 }
 
@@ -146,21 +153,17 @@ export async function foldersTool(args: Record<string, unknown>, deps: FoldersDe
   if (action === 'show') {
     if (args.path !== undefined) return toolError('show takes no path');
     const read = await deps.boundaries().catch(() => null);
-    // Another team's document is used for nothing: not narrowed to, not shown, not worked out.
+    // Another team's document is used for nothing: not shown, not worked out.
     const otherTeam = read !== null && read.team !== team;
     const tb = otherTeam ? null : read;
-    // §7.1: what the team dropped leaves the accepted set (no dialog: it only narrows).
-    if (tb?.boundaries) {
-      try {
-        current = settingsNarrowedTo(file, deps.env, team, tb.boundaries, sinceOf(tb)).settings;
-      } catch (err) {
-        return toolError(`your folders file cannot be used (${describeError(err)}): fix or remove ${file}`);
-      }
-    }
+    const version = tb?.boundaries ? await deps.acceptance().catch(() => null) : null;
     let gives: string | null = null;
     if (tb?.boundaries) {
-      const eff = effectiveBoundaries(tb.boundaries, current.accepted, sinceOf(tb));
-      if (eff.notAccepted) {
+      const since = sinceOf(tb);
+      const eff = effectiveBoundaries(tb.boundaries, version === null ? null : acceptedAtVersion(tb.boundaries, version, since), since);
+      if (version === null) {
+        gives = 'unknown: the relay could not say which version you accepted';
+      } else if (eff.notAccepted) {
         gives = "nothing: teammates' questions are declined until you accept your team's boundaries";
       } else {
         try {
@@ -176,15 +179,16 @@ export async function foldersTool(args: Record<string, unknown>, deps: FoldersDe
       team,
       ...describeFolders(current, deps.env),
       ...teamPart(tb, otherTeam),
-      ...acceptancePart(tb, current),
+      ...(tb?.boundaries ? acceptancePart(tb, version, deps.console()) : {}),
       ...(gives ? { answers_come_from: gives } : {}),
-      how_to_change: 'Ask to add or remove a repo root or a folder, or to accept the team\'s boundaries; each change opens a dialog where you decide.',
+      how_to_change: `Ask to add or remove a repo root or a folder; each change opens a dialog where you decide. ${whereToAccept(deps.console())}`,
     });
   }
 
   if (action === 'accept') {
+    // M11-SPEC §2: accepting is done in the browser, by the member only.
     if (args.path !== undefined) return toolError('accept takes no path');
-    return accept(deps, team, file, current);
+    return toolJson({ message: whereToAccept(deps.console()) });
   }
 
   const ops: Record<string, [FolderList, 'add' | 'remove']> = {
@@ -237,56 +241,5 @@ export async function foldersTool(args: Record<string, unknown>, deps: FoldersDe
     return toolJson({ message: `${kind === 'add' ? 'Added' : 'Removed'}. Your automatic answerer uses it from its next answer.`, ...describeFolders(again.value, deps.env) });
   } catch (err) {
     return toolError(`nothing changed (${describeError(err)})`);
-  }
-}
-
-/**
- * M10-SPEC §7.1: accept the team's current boundaries. The dialog shows exactly what accepting
- * adds to what the member accepted before (everything, the first time); the version shown is the
- * one recorded.
- */
-async function accept(deps: FoldersDeps, team: string, file: string, current: TeamSettings): Promise<ToolResult> {
-  const tb = await deps.boundaries().catch(() => null);
-  if (!tb) return toolError("Your team's boundaries cannot be read now (not signed in, or the relay could not be reached); nothing was accepted.");
-  if (tb.team !== team) return toolError('The relay answered for a different team; nothing was accepted.');
-  if (!tb.boundaries) return toolJson({ message: 'Your team has no boundaries, so there is nothing to accept.' });
-  const eff = effectiveBoundaries(tb.boundaries, current.accepted, sinceOf(tb));
-  if (!eff.notAccepted && !eff.pending) {
-    return toolJson({ message: `Nothing new to accept: everything in version ${tb.version} of your team's boundaries is already accepted.` });
-  }
-  let record: ReturnType<typeof acceptedFrom>;
-  try {
-    record = acceptedFrom(tb.boundaries, tb.version);
-  } catch (err) {
-    return toolError(`these boundaries cannot be accepted (${describeError(err)}); nothing was accepted`);
-  }
-  if (!deps.elicit) return toolError(`${NO_DIALOGS}, so nothing was accepted. Run /team-relay:folders accept in a Claude Code that offers dialogs.`);
-  const adds = wideningText(eff.pending ?? { github_orgs: [], drives: [], member_folders: false });
-  const message = eff.notAccepted
-    ? `Accept your team's boundaries (version ${tb.version})? Your automatic answerer will then answer teammates' questions on its own, without asking you, from ${adds} (for GitHub, only files git tracks in your clones under your repo roots). Reads of anything else stay denied.`
-    : `Accept what version ${tb.version} of your team's boundaries adds? Your automatic answerer will then also answer teammates' questions on its own, without asking you, from ${adds}.`;
-  let yes: boolean;
-  try {
-    yes = await decide(deps.elicit, message, 'Yes, accept', 'No, not now');
-  } catch (err) {
-    return toolError(`the dialog could not be shown (${describeError(err)}); nothing was accepted`);
-  }
-  if (!yes) return toolJson({ message: 'Not accepted; nothing changed.' });
-  try {
-    // Read again: the file may have changed while the dialog was open.
-    const fresh = readMemberSettings(file, deps.env);
-    const mine = teamSettings(fresh, team);
-    if (mine.accepted && mine.accepted.version > record.version) {
-      // Either a newer version was accepted while the dialog was open, or the stored acceptance
-      // belongs to an earlier team under this id (versions started over): ask the relay which.
-      const now = await deps.boundaries().catch(() => null);
-      const nowVersion = now && now.team === team ? now.version : null;
-      if (nowVersion === null) return toolError('nothing was accepted (the relay could not be asked which version is current); try again');
-      if (mine.accepted.version <= nowVersion) return toolJson({ message: 'A newer version was accepted meanwhile; nothing changed.' });
-    }
-    writeMemberSettings(file, withTeam(fresh, team, { ...mine, accepted: record }), deps.env);
-    return toolJson({ message: `Accepted version ${tb.version} of your team's boundaries. Your automatic answerer uses them from its next answer.` });
-  } catch (err) {
-    return toolError(`nothing was accepted (${describeError(err)})`);
   }
 }

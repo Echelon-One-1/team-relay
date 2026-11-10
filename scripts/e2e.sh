@@ -41,7 +41,7 @@
 #
 # M9 (docs/M9-SPEC.md §6, §7): with the fake OAuth launcher the team file also names a relay
 # admin (admin@example.com) and an any-team console delegate (a synthetic service account with
-# read, manage-roster and manage-teams), and test/e2e/m9.test.ts runs when the relay serves GET
+# read, manage-roster, manage-teams and member-self), and test/e2e/m9.test.ts runs when the relay serves GET
 # /v1/me/teams: a new account creates a team on the sign-in page, invites a member through the
 # console server (hosted mode in the test process, the delegate's ID token from the fake
 # Google), the member accepts on the chooser and signs in, they exchange a question; the owner
@@ -125,7 +125,7 @@ admins: ["google:admin@example.com"]
 delegates:
   - principal: "google:team-relay-console@e2e-project.iam.gserviceaccount.com"
     team: "*"
-    scope: [read, manage-roster, manage-teams]
+    scope: [read, manage-roster, manage-teams, member-self]
 limits:
   min_ack_timeout_seconds: 2
   min_answer_timeout_seconds: 2

@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from . import setup_script as setup_scripts
 from .errors import ConfigError
 
 TEAM_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
@@ -68,12 +69,15 @@ DOMAIN_RE = re.compile(rf"(?:{_LABEL}\.)+{_LABEL}")
 
 AuthMode = Literal["google", "static"]
 Role = Literal["owner", "member"]
-DelegateScope = Literal["read", "manage-roster", "manage-teams"]
+DelegateScope = Literal["read", "manage-roster", "manage-teams", "member-self"]
 SCOPE_READ = "read"
 SCOPE_MANAGE_ROSTER = "manage-roster"
 # M9-SPEC §2, §4: create a team on behalf of an email, and the admin endpoints on behalf of
 # an admin. Only for a delegate of every team (``team: "*"``).
 SCOPE_MANAGE_TEAMS = "manage-teams"
+# M11-SPEC §2, §4, §8: act as the viewer for the viewer's own acceptance of the boundaries and
+# the viewer's own questions; nothing else, and never for anyone but the viewer.
+SCOPE_MEMBER_SELF = "member-self"
 # M9-SPEC §5: a delegate for any team the on-behalf-of email belongs to.
 ANY_TEAM = "*"
 
@@ -81,6 +85,10 @@ ANY_TEAM = "*"
 MAX_ON_BEHALF_LENGTH = 320
 
 LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
+IPV4_RE = re.compile(
+    r"(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}"
+    r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+)
 
 
 def normalise_email(raw: Any) -> str | None:
@@ -205,7 +213,8 @@ class _DelegateFile(_Strict):
     # A team of the file, or "*" (M9-SPEC §5): any team the on-behalf-of email belongs to.
     team: str
     # M3-SPEC §2: `read`; M6-SPEC §3: `[read, manage-roster]`; M9-SPEC: `manage-teams` for a
-    # `team: "*"` delegate. A bare `read` is kept for the M3 files; a list must hold `read`.
+    # `team: "*"` delegate; M11-SPEC §2, §4: `member-self`. A bare `read` is kept for the M3
+    # files; a list must hold `read`. Any other value is refused at start.
     scope: Literal["read"] | list[DelegateScope]
 
 
@@ -280,7 +289,8 @@ class Delegate:
     It is never a member and never the caller: the member it names is. With ``team: "*"``
     it acts in whichever team the request names, for a member of that team (M9-SPEC §5), and
     with ``manage-teams`` it creates teams and calls the admin endpoints for the email it
-    names (M9-SPEC §2, §4)."""
+    names (M9-SPEC §2, §4). With ``member-self`` it accepts the boundaries and asks questions
+    as the member it names (M11-SPEC §2, §4)."""
 
     principal: str
     team: str
@@ -293,6 +303,10 @@ class Delegate:
     @property
     def manages_teams(self) -> bool:
         return SCOPE_MANAGE_TEAMS in self.scopes
+
+    @property
+    def acts_as_member(self) -> bool:
+        return SCOPE_MEMBER_SELF in self.scopes
 
     @property
     def any_team(self) -> bool:
@@ -565,7 +579,9 @@ def parse_public_url(raw: str, env: Mapping[str, str]) -> str:
     if parts.path not in ("", "/") or parts.query or parts.fragment or "#" in raw or "?" in raw:
         raise ConfigError("RELAY_PUBLIC_URL must be an origin: no path, query or fragment")
     netloc = host if port is None else f"{host}:{port}"
-    if ":" in host:
+    # Only a DNS name, localhost or an IPv4 address (M11-SPEC §5: the origin is written into
+    # the setup script, so nothing a shell would read as syntax may reach it).
+    if not (host in LOCAL_HOSTS or valid_domain(host) or IPV4_RE.fullmatch(host)):
         raise ConfigError("RELAY_PUBLIC_URL must use a host name or an IPv4 address")
     return f"{parts.scheme}://{netloc}"
 
@@ -673,6 +689,10 @@ class Settings:
     # M10-SPEC §5: Google's X-Forwarded-For entries in front of the relay (see
     # FORWARDED_FOR_HOPS); the per-IP limits count the left-most of them.
     forwarded_for_hops: int = 1
+    # M11-SPEC §5: RELAY_PLUGIN_MARKETPLACE (``owner/repo``) and the setup script rendered with
+    # it and ``public_url``, read once at start; None: ``GET /setup`` is 404.
+    plugin_marketplace: str | None = None
+    setup_script: str | None = None
 
     def __post_init__(self) -> None:
         if self.forwarded_for_hops not in FORWARDED_FOR_HOPS:
@@ -729,6 +749,16 @@ class Settings:
             )
         drive_path = env.get("RELAY_DRIVE_CLIENT_FILE") or None
         allowed_domains = parse_allowed_domains(env.get("RELAY_ALLOWED_DOMAINS"))
+        # M11-SPEC §5: checked whenever set; the script is served only with both set.
+        marketplace_raw = env.get("RELAY_PLUGIN_MARKETPLACE") or None
+        marketplace = (
+            setup_scripts.parse_plugin_marketplace(marketplace_raw) if marketplace_raw else None
+        )
+        script = None
+        if marketplace is not None and public_url is not None:
+            script = setup_scripts.load_setup_script(
+                setup_scripts.SETUP_SCRIPT_PATH, public_url, marketplace
+            )
         return cls(
             team_config=load_team_config(config_path, allowed_domains),
             manifest_schema=load_schema(schema_path),
@@ -738,4 +768,6 @@ class Settings:
             oauth_client=load_oauth_client(client_path) if client_path else None,
             drive_client=load_drive_client(drive_path) if drive_path else None,
             forwarded_for_hops=parse_forwarded_for_hops(hops_raw) if hops_raw is not None else 1,
+            plugin_marketplace=marketplace,
+            setup_script=script,
         )

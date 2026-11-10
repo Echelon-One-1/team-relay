@@ -1,0 +1,21 @@
+# Known gitleaks findings that are synthetic test fixtures, never real credentials: the secret
+# screen's corpus (plugin/test/secret-screen.test.ts), a fake gcloud's made-up JWT, fake relay
+# tokens, idempotency keys and quota keys in tests. Each line is one finding's fingerprint
+# (commit:file:rule:line), so only that exact finding is ignored: the same text in a new commit
+# or another file is reported again. Add a line only after checking the value is synthetic.
+17aad663eac2f5c68f977ae3a2fc5a84ffdc0d44:plugin/test/secret-screen.test.ts:generic-api-key:39
+17aad663eac2f5c68f977ae3a2fc5a84ffdc0d44:plugin/test/secret-screen.test.ts:private-key:12
+1ec9d929d9f39c4286cd198044f9cea9494983ad:plugin/test/plugin-files.test.ts:generic-api-key:70
+1ec9d929d9f39c4286cd198044f9cea9494983ad:plugin/test/relay-client.test.ts:generic-api-key:87
+34bdf2c0bb105b327864578702547ef6bcf8c582:relay/tests/test_boundaries.py:generic-api-key:180
+5568de42fbc12ef3e991f39a6ecf0a1edc363484:plugin/test/fixtures/fake-gcloud.mjs:jwt:26
+5568de42fbc12ef3e991f39a6ecf0a1edc363484:plugin/test/identity.test.ts:generic-api-key:177
+5568de42fbc12ef3e991f39a6ecf0a1edc363484:plugin/test/plugin-files.test.ts:generic-api-key:71
+5568de42fbc12ef3e991f39a6ecf0a1edc363484:plugin/test/relay-client.test.ts:generic-api-key:111
+5568de42fbc12ef3e991f39a6ecf0a1edc363484:relay/tests/test_store_contract.py:generic-api-key:563
+7f77319aee26684c66eb6156d8e7c3c6baee072f:relay/tests/test_boundaries.py:generic-api-key:188
+a536e6848abeb32f9f3793f8dbffc3a04d3994b4:relay/tests/test_store_contract.py:generic-api-key:556
+d12c51b5abfc6db5723b1a58c8fe07aef81e30f5:relay/tests/test_boundaries.py:generic-api-key:188
+edd6d51aaf26df451fd807cfe9885fe72d94a125:plugin/test/fixtures/fake-gcloud.mjs:jwt:26
+edd6d51aaf26df451fd807cfe9885fe72d94a125:plugin/test/identity.test.ts:generic-api-key:177
+edd6d51aaf26df451fd807cfe9885fe72d94a125:plugin/test/plugin-files.test.ts:generic-api-key:71

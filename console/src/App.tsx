@@ -4,20 +4,23 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Activity } from '@/components/console/activity'
 import { AdminPage } from '@/components/console/admin'
 import { Agents } from '@/components/console/agents'
+import { AskPage } from '@/components/console/ask'
 import { Header } from '@/components/console/header'
 import { JoinPanel } from '@/components/console/join'
-import { Members } from '@/components/console/members'
+import { Members, progressByMember } from '@/components/console/members'
 import { RequestSheet } from '@/components/console/request-sheet'
 import { ResizableRow } from '@/components/console/resizable-row'
+import { AcceptBanner, SetupPage, ViewTabs } from '@/components/console/setup'
 import { Expired, Loading, MissingKey, NotOnTeam, SessionExpired, UnreachableBanner } from '@/components/console/states'
 import { mapMembers, TeamMap } from '@/components/console/team-map'
 import { CreateTeamDialog, NoTeamPage, TeamSettings } from '@/components/console/teams'
 import { consoleKey, isHosted } from '@/api/key'
-import { teamsKey, useActivity, useConnection, useDirectory, useMe, useRoster, useTeams } from '@/hooks/queries'
+import { teamsKey, useActivity, useBoundaries, useConnection, useDirectory, useMe, useMembersStatus, useRoster, useTeams } from '@/hooks/queries'
 import { NavContext, TeamContext, useNav, type ConsoleFocus, type ConsoleView, type Nav } from '@/hooks/team'
 import { useNow } from '@/hooks/use-now'
 import { sortedRequests } from '@/lib/activity'
 import { isOwner } from '@/lib/roster'
+import { acceptedVersion, currentVersion, setupSteps } from '@/lib/setup'
 import { effectiveRequest } from '@/lib/steps'
 import { pickTeam, rememberTeam } from '@/lib/teams'
 
@@ -27,6 +30,8 @@ export function Console() {
   const activity = useActivity()
   const conn = useConnection()
   const roster = useRoster()
+  const statuses = useMembersStatus()
+  const bounds = useBoundaries()
   const nav = useNav()
   const qc = useQueryClient()
   const localNow = useNow()
@@ -49,6 +54,12 @@ export function Console() {
   // M9 §7.7, M10 §1: the settings of a team the viewer holds: its boundaries for everyone (owners
   // edit them), and Delete team for owners (the relay refuses a file team).
   const entry = nav.teams?.teams.find((t) => t.team === nav.team) ?? null
+  // M11 §6: the viewer's own progress for the Setup tab, and everyone's for the Members panel.
+  const progress = useMemo(() => progressByMember(statuses.data, bounds.data), [statuses.data, bounds.data])
+  const mine = statuses.data?.members.find((m) => m.member === member) ?? null
+  const setupDone = statuses.data
+    ? setupSteps(mine, bounds.data, acceptedVersion(mine, null), currentVersion(bounds.data, statuses.data.boundaries_version)).filter((s) => s.done).length
+    : null
 
   // M6 §4 (hosted): a signed-in account the relay does not know sees this, and no data. With
   // several teams (M9 §5) it means this team is no longer theirs: their teams are read again.
@@ -65,6 +76,18 @@ export function Console() {
       <Header />
       <main className="mx-auto flex max-w-[1440px] flex-col gap-4 px-3 py-4 sm:px-6 sm:py-5">
         {conn.state === 'unreachable' ? <UnreachableBanner conn={conn} /> : null}
+        <ViewTabs setup={setupDone !== null ? { done: setupDone } : null} />
+        {nav.view === 'ask' ? <AskPage /> : nav.view === 'join' ? <SetupPage /> : teamView()}
+      </main>
+      <RequestSheet req={selected} me={member} now={now} onClose={() => setOpenId(null)} />
+    </div>
+  )
+
+  // The team's page: a plain function of this render (not a component, so nothing remounts).
+  function teamView() {
+    return (
+      <>
+        <AcceptBanner />
         <JoinPanel owner={owner} />
         <ResizableRow className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
           {(sized) => (
@@ -85,7 +108,7 @@ export function Console() {
           )}
         </ResizableRow>
         {rosterMissing ? null : (
-          <Members roster={roster.data} loading={roster.isPending} failed={roster.isError} me={member} owner={owner} />
+          <Members roster={roster.data} loading={roster.isPending} failed={roster.isError} me={member} owner={owner} progress={progress} />
         )}
         <Activity requests={requests} me={member} now={now} loading={activity.isPending} onOpen={setOpenId} />
         {entry ? (
@@ -95,15 +118,18 @@ export function Console() {
             roleKnown={roster.data !== undefined || me.data !== undefined || roster.isError}
           />
         ) : null}
-      </main>
-      <RequestSheet req={selected} me={member} now={now} onClose={() => setOpenId(null)} />
-    </div>
-  )
+      </>
+    )
+  }
 }
 
-/** The view from the address: /admin is the admin page (M9 §4), anything else the team. */
+/**
+ * The view from the address: /admin is the admin page (M9 §4), /join the Join checklist and /ask
+ * the Ask page (M11), anything else the team. (/setup is the relay's setup script on the same host.)
+ */
 function viewFromLocation(): ConsoleView {
-  return /\/admin\/?$/.test(window.location.pathname) ? 'admin' : 'team'
+  const m = /\/(admin|join|ask)\/?$/.exec(window.location.pathname)
+  return m ? (m[1] as ConsoleView) : 'team'
 }
 
 function useView(): [ConsoleView, (v: ConsoleView) => void] {
@@ -117,7 +143,8 @@ function useView(): [ConsoleView, (v: ConsoleView) => void] {
     setViewState(v)
     if (viewFromLocation() === v) return
     try {
-      const target = new URL(v === 'admin' ? 'admin' : './', window.location.href)
+      // Relative to where the page is served (the local console's key stays out of the address).
+      const target = new URL(v === 'team' ? './' : v, window.location.href)
       target.search = window.location.search
       target.hash = ''
       window.history.pushState(window.history.state, '', target.pathname + target.search)
@@ -145,10 +172,10 @@ function Teams() {
   const data = teams.data
   const team = data ? pickTeam(data, chosen) : null
   const selectTeam = useCallback(
-    (t: string, focus?: ConsoleFocus) => {
+    (t: string, focus?: ConsoleFocus, next: ConsoleView = 'team') => {
       setChosen(t)
       rememberTeam(t)
-      setView('team')
+      setView(next)
       setFocusOn(focus ? { team: t, part: focus } : null)
     },
     [setView],

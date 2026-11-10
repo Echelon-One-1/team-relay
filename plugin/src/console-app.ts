@@ -22,6 +22,14 @@
 //   needs to install the plugin (relay URL, team, the repository to clone, marketplace and
 //   plugin names). Nothing secret; the same gate as the other /api routes. Hosted, it is
 //   answered only to a member of the team (M6-SPEC §7 item 6; below).
+// - M11-SPEC §2-§4 (guided joining, asking from the browser): GET /api/acceptance (the
+//   viewer's own acceptance of the boundaries), GET /api/members-status (every member's setup
+//   progress, counts and booleans only) and GET /api/my-requests (the viewer's last 20
+//   requests); PUT /api/acceptance {"version"} (the viewer accepts the current boundaries for
+//   themselves: there is no route naming another member) and POST /api/ask {"to", "question"}
+//   (a question, never a capability call; the idempotency key is made here). Both changes
+//   follow the rules above (checkAcceptance, checkAsk; ASK_BODY_LIMIT), and hosted, each is
+//   sent for the IAP-verified viewer, never for anyone the browser names.
 // - Static files from dist/console/ under a strict CSP; a placeholder page when it is absent.
 //
 // Several teams (M9-SPEC §5): every team-scoped /api/* route (me, directory, activity,
@@ -58,7 +66,7 @@
 //   the balancer appends two entries, `<client address>,<balancer address>`, so the address
 //   is the second from the right; fewer entries than that count as one shared "unknown".
 
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -96,6 +104,7 @@ import {
   versionOk,
 } from './boundaries-rule.js';
 import { normaliseRelayUrl } from './credentials.js';
+import { codePointLength, hasLoneSurrogate } from './manifest.js';
 import { defaultRelayUrl } from './relay-default.js';
 
 export const CONTENT_SECURITY_POLICY = [
@@ -183,7 +192,19 @@ export type ConsoleBackend = {
   /** M10-SPEC §1: the team's boundaries (any member), and an owner's replacement of them. */
   boundaries(ctx?: ReadContext): Promise<unknown>;
   setBoundaries(body: SetBoundariesBody, ctx?: ReadContext): Promise<unknown>;
+  /** M11-SPEC §2: the viewer's own acceptance of the boundaries, and accepting `version` for themselves. */
+  acceptance(ctx?: ReadContext): Promise<unknown>;
+  setAcceptance(version: number, ctx?: ReadContext): Promise<unknown>;
+  /** M11-SPEC §3: every member's setup progress and whether they answer now. */
+  membersStatus(ctx?: ReadContext): Promise<unknown>;
+  /** M11-SPEC §4: the viewer's own recent requests, newest first. */
+  myRequests(limit: number, ctx?: ReadContext): Promise<unknown>;
+  /** M11-SPEC §4: a question from the viewer (never a capability call). */
+  ask(body: AskBody, ctx?: ReadContext): Promise<unknown>;
 };
+
+/** How many of the viewer's requests the Ask page lists (M11-SPEC §4). */
+export const MY_REQUESTS_LIMIT = 20;
 
 /** At most this many per-team clients are kept (a hosted console serves many teams). */
 const TEAM_CLIENTS_MAX = 256;
@@ -240,6 +261,12 @@ export function relayBackend(client: RelayClient): ConsoleBackend {
     adminDeleteTeam: (team, confirm, ctx) => client.adminDeleteTeam(team, confirm, opts(ctx)),
     boundaries: (ctx) => on(ctx).boundaries(opts(ctx)),
     setBoundaries: (body, ctx) => on(ctx).setBoundaries(body, opts(ctx)),
+    acceptance: (ctx) => on(ctx).acceptance(opts(ctx)),
+    setAcceptance: (version, ctx) => on(ctx).setAcceptance(version, opts(ctx)),
+    membersStatus: (ctx) => on(ctx).membersStatus(opts(ctx)),
+    myRequests: (limit, ctx) => on(ctx).myRequests(limit, opts(ctx)),
+    // One key per question sent from the page: the console never retries it (attempts: 1).
+    ask: (body, ctx) => on(ctx).createRequest({ idempotency_key: randomUUID(), kind: 'question', to: body.to, question: body.question }, opts(ctx)),
   };
 }
 
@@ -284,6 +311,11 @@ export function demoBackend(account: DemoAccount): ConsoleBackend {
     adminDeleteTeam: async (team, confirm) => account.adminDeleteTeam(team, confirm),
     boundaries: async (ctx) => account.team(ctx?.team).boundaries(),
     setBoundaries: async (body, ctx) => account.team(ctx?.team).setBoundaries(body),
+    acceptance: async (ctx) => account.team(ctx?.team).acceptance(),
+    setAcceptance: async (version, ctx) => account.team(ctx?.team).setAcceptance(version),
+    membersStatus: async (ctx) => account.team(ctx?.team).membersStatus(),
+    myRequests: async (limit, ctx) => account.team(ctx?.team).myRequests(limit),
+    ask: async (body, ctx) => account.team(ctx?.team).ask(body),
   };
 }
 
@@ -460,6 +492,57 @@ export function checkSetBoundaries(raw: unknown): SetBoundariesBody {
   if (typeof x.member_folders !== 'boolean') throw new BodyError('member_folders must be true or false');
   const boundaries: Boundaries = { topic, github_orgs: orgs, drives, member_folders: x.member_folders };
   return { version: b.version, boundaries };
+}
+
+// ---------------------------------------------------------------------------------------
+// Accepting the boundaries and asking from the browser (M11-SPEC §2, §4), checked before
+// anything reaches the relay.
+
+/** PUT /api/acceptance: exactly {"version": <the boundaries version shown>}. */
+export function checkAcceptance(raw: unknown): number {
+  const b = object(raw);
+  onlyKeys(b, ['version']);
+  if (!versionOk(b.version)) throw new BodyError('version must be the whole number the boundaries were shown at');
+  return b.version;
+}
+
+/** POST /api/ask: who the question is for, and the question (the relay's limits, M1-SPEC §3). */
+export type AskBody = { to: '*' | string[]; question: string };
+export const ASK_MAX_RECIPIENTS = 64;
+export const QUESTION_MAX = 8000;
+/**
+ * The largest POST /api/ask body: 8000 characters outside the BMP, each sent as two \uXXXX
+ * escapes, and 64 member ids of 32 characters, fit.
+ */
+export const ASK_BODY_LIMIT = 128 * 1024;
+
+/**
+ * POST /api/ask: exactly {"to": "*" | [member ids], "question"}. A question only: no kind, no
+ * capability, no sender, no timeouts and no idempotency key (the server makes one). The
+ * question is kept as typed, 1 to 8000 characters with one that is not white space.
+ */
+export function checkAsk(raw: unknown): AskBody {
+  const b = object(raw);
+  onlyKeys(b, ['to', 'question']);
+  let to: AskBody['to'];
+  if (b.to === '*') to = '*';
+  else if (Array.isArray(b.to)) {
+    if (b.to.length < 1 || b.to.length > ASK_MAX_RECIPIENTS) throw new BodyError(`to must name 1 to ${ASK_MAX_RECIPIENTS} teammates, or be "*"`);
+    const seen = new Set<string>();
+    for (const m of b.to) {
+      if (typeof m !== 'string' || !MEMBER_RE.test(m)) throw new BodyError('to must hold member ids');
+      if (seen.has(m)) throw new BodyError('to names a member twice');
+      seen.add(m);
+    }
+    to = [...seen];
+  } else throw new BodyError('to must be a list of teammates or "*"');
+  const q = b.question;
+  if (typeof q !== 'string' || q.length === 0 || codePointLength(q) > QUESTION_MAX) {
+    throw new BodyError(`question must be 1 to ${QUESTION_MAX} characters`);
+  }
+  if (q.trim().length === 0) throw new BodyError('question must contain a character that is not white space');
+  if (hasLoneSurrogate(q)) throw new BodyError('question contains a lone surrogate');
+  return { to, question: q };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -714,7 +797,8 @@ const PLACEHOLDER = `<!doctype html>
 <p>The console has not been built yet: <code>dist/console/</code> is missing. Build it from
 <code>console/</code> (it builds into <code>plugin/dist/console/</code>), then reload this page.</p>
 <p>The API is running: <code>/api/me</code>, <code>/api/directory</code>, <code>/api/activity</code>,
-<code>/api/requests/{id}</code>, <code>/api/roster</code>, <code>/api/inbox/summary</code>, <code>/api/boundaries</code> and <code>/api/join</code>, with the key from this page's
+<code>/api/requests/{id}</code>, <code>/api/roster</code>, <code>/api/inbox/summary</code>, <code>/api/boundaries</code>, <code>/api/acceptance</code>,
+<code>/api/members-status</code>, <code>/api/my-requests</code> and <code>/api/join</code>, with the key from this page's
 address in an <code>X-Console-Key</code> header.</p>
 </body>
 </html>
@@ -952,9 +1036,15 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
   /** The routes that change something, by path: which methods each allows. */
   function changeRoute(
     path: string,
-  ): { methods: string[]; kind: 'roster' | 'roster_one' | 'boundaries' | 'teams' | 'team' | 'invitation' | 'admin_team'; id: string | null } | null {
+  ): {
+    methods: string[];
+    kind: 'roster' | 'roster_one' | 'boundaries' | 'acceptance' | 'ask' | 'teams' | 'team' | 'invitation' | 'admin_team';
+    id: string | null;
+  } | null {
     if (path === '/api/roster') return { methods: ['POST'], kind: 'roster', id: null };
     if (path === '/api/boundaries') return { methods: ['PUT'], kind: 'boundaries', id: null };
+    if (path === '/api/acceptance') return { methods: ['PUT'], kind: 'acceptance', id: null };
+    if (path === '/api/ask') return { methods: ['POST'], kind: 'ask', id: null };
     let m = /^\/api\/roster\/([^/]+)$/.exec(path);
     if (m) return { methods: ['PATCH', 'DELETE'], kind: 'roster_one', id: m[1]! };
     if (path === '/api/teams') return { methods: ['POST'], kind: 'teams', id: null };
@@ -979,7 +1069,7 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     route: NonNullable<ReturnType<typeof changeRoute>>,
   ): Promise<void> {
     const method = req.method ?? '';
-    const reads = route.kind === 'teams' || route.kind === 'roster' || route.kind === 'boundaries' ? ['GET'] : [];
+    const reads = route.kind === 'teams' || route.kind === 'roster' || route.kind === 'boundaries' || route.kind === 'acceptance' ? ['GET'] : [];
     if (!route.methods.includes(method)) {
       req.resume();
       return sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: [...reads, ...route.methods].join(', ') });
@@ -994,9 +1084,10 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
       req.resume();
       return sendJson(res, 415, { error: 'unsupported_media_type', detail: 'Content-Type must be application/json' });
     }
-    // Only a roster or boundaries change names a team (the query's `team` or X-Relay-Team);
-    // nothing else here.
-    const teamScoped = route.kind === 'roster' || route.kind === 'roster_one' || route.kind === 'boundaries';
+    // Only a roster, boundaries, acceptance or ask change names a team (the query's `team` or
+    // X-Relay-Team); nothing else here.
+    const teamScoped =
+      route.kind === 'roster' || route.kind === 'roster_one' || route.kind === 'boundaries' || route.kind === 'acceptance' || route.kind === 'ask';
     const extra = [...url.searchParams.keys()].filter((k) => !(teamScoped && k === 'team'));
     if (extra.length > 0) {
       req.resume();
@@ -1008,7 +1099,7 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
       req.resume();
       return sendJson(res, 404, { error: 'not_found' });
     }
-    const limit = route.kind === 'boundaries' ? BOUNDARIES_BODY_LIMIT : ROSTER_BODY_LIMIT;
+    const limit = route.kind === 'boundaries' ? BOUNDARIES_BODY_LIMIT : route.kind === 'ask' ? ASK_BODY_LIMIT : ROSTER_BODY_LIMIT;
     let text: string;
     try {
       text = await readBody(req, limit);
@@ -1061,6 +1152,27 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
           what = `boundaries set from version ${body.version} (team ${resolved})`;
           break;
         }
+        case 'acceptance': {
+          // M11-SPEC §2, §8: for the viewer only; the browser cannot name anyone else.
+          const version = checkAcceptance(raw);
+          const resolved = await resolveTeam(req, res, url, who);
+          if (resolved === null) return;
+          team = resolved;
+          call = () => opts.backend.setAcceptance(version, { ...who, team: resolved });
+          what = `boundaries accepted at version ${version} (team ${resolved})`;
+          break;
+        }
+        case 'ask': {
+          const body = checkAsk(raw);
+          const resolved = await resolveTeam(req, res, url, who);
+          if (resolved === null) return;
+          team = resolved;
+          status = 201;
+          call = () => opts.backend.ask(body, { ...who, team: resolved });
+          // Whom, by count; never the question.
+          what = `question asked of ${body.to === '*' ? 'everyone' : `${body.to.length} ${body.to.length === 1 ? 'member' : 'members'}`} (team ${resolved})`;
+          break;
+        }
         case 'teams': {
           const body = checkCreateTeam(raw);
           // M9-SPEC §7.6: hosted, the relay counts the viewer's address, salted and hashed.
@@ -1107,7 +1219,7 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
       // A roster change's 404 is about the member (or the team: then not_on_team, from the
       // relay's refusal of a non-member); so is a boundaries change's, which names no member.
       // An account route's 404 is the relay's own.
-      const aboutTeam = route.kind === 'roster' || route.kind === 'boundaries';
+      const aboutTeam = route.kind === 'roster' || route.kind === 'boundaries' || route.kind === 'acceptance' || route.kind === 'ask';
       if (team !== undefined && aboutTeam && err instanceof RelayError && err.status === 404) return failure(res, err, viewer, team);
       return failure(res, err, viewer);
     }
@@ -1202,7 +1314,10 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
       path === '/api/directory' ||
       path === '/api/roster' ||
       path === '/api/inbox/summary' ||
-      path === '/api/boundaries';
+      path === '/api/boundaries' ||
+      path === '/api/acceptance' ||
+      path === '/api/members-status' ||
+      path === '/api/my-requests';
     const requestMatch = /^\/api\/requests\/([^/]+)$/.exec(path);
     if (!known && path !== '/api/activity' && !requestMatch) return sendJson(res, 404, { error: 'not_found' });
     if (requestMatch && (!REQUEST_ID_RE.test(requestMatch[1]!) || own.length > 0)) return sendJson(res, 404, { error: 'not_found' });
@@ -1260,6 +1375,9 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     else if (path === '/api/inbox/summary') call = () => opts.backend.inboxSummary(on);
     else if (path === '/api/roster') call = () => opts.backend.roster(on);
     else if (path === '/api/boundaries') call = () => opts.backend.boundaries(on);
+    else if (path === '/api/acceptance') call = () => opts.backend.acceptance(on);
+    else if (path === '/api/members-status') call = () => opts.backend.membersStatus(on);
+    else if (path === '/api/my-requests') call = () => opts.backend.myRequests(MY_REQUESTS_LIMIT, on);
     else if (path === '/api/activity') call = () => opts.backend.activity(q, on);
     else {
       const rid = requestMatch![1]!;
@@ -1270,9 +1388,10 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
       return sendJson(res, 200, await call());
     } catch (err) {
       // A request's 404 is about the request; any other read's is about the team, except the
-      // boundaries': membership was just checked, so a 404 there is a relay without the route
-      // (before M10), shown as "not available", never as "not on this team".
-      return failure(res, err, viewer, requestMatch || path === '/api/boundaries' ? undefined : team);
+      // boundaries' and M11's: membership was just checked, so a 404 there is a relay without
+      // the route (before M10, M11), shown as "not available", never as "not on this team".
+      const newer = path === '/api/boundaries' || path === '/api/acceptance' || path === '/api/members-status' || path === '/api/my-requests';
+      return failure(res, err, viewer, requestMatch || newer ? undefined : team);
     }
   }
 

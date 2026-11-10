@@ -43,6 +43,19 @@ that need a transaction live in exactly one primitive each:
 - :meth:`Store.set_boundaries`: read the team, its boundaries and the actor's roster entry, run
   a pure function, count the quotas, and write the boundaries and the audit, in one
   transaction (M10-SPEC §1). The version check and the owner rule live in that function.
+- :meth:`Store.set_acceptance`: read the team, its boundaries, the member's acceptance and roster
+  entry, run a pure function, count the quotas, and write the acceptance and the audit, in one
+  transaction (M11-SPEC §2). The version check lives in that function.
+- :meth:`Store.set_member_status`: read the team, the member's status and roster entry, run a
+  pure function, and write the new status, in one transaction (M11-SPEC §3). The 20-second
+  rule lives in that function.
+
+A member's acceptance and status (M11-SPEC §2, §3) leave with the member: the roster
+transaction that removes a member deletes both; and with the team (the purge).
+
+A reply's full text (M11-SPEC §4) is an :class:`AnswerEntry` below its request, written by the
+reply's :meth:`Store.mutate_request` and expiring with the request. It is not a field of the
+request document: a broadcast's answers together could pass Firestore's 1 MiB per document.
 
 Teams (M9-SPEC §1) are ``teams/{team}`` records. A team the API created is ``seed=False``; the
 team file's teams are seed teams, and a record written before M9 (``roster_version`` only)
@@ -440,6 +453,57 @@ class BoundariesChange[T]:
     audit: list[AuditEntry] = field(default_factory=list)
 
 
+# A member's acceptance and status (M11-SPEC §2, §3) ----------------------------------------
+
+
+@dataclass(frozen=True)
+class Acceptance:
+    """``teams/{team}/acceptances/{member}``: the boundaries version the member accepted and
+    when. Only the member writes it (or a delegate acting for them). Never expires; removed
+    with the member and with the team."""
+
+    version: int
+    accepted_at: datetime
+
+
+@dataclass
+class AcceptanceChange[T]:
+    """What a :meth:`Store.set_acceptance` function asks the store to write: the member's new
+    acceptance and the audit, or nothing (``acceptance`` None)."""
+
+    result: T
+    acceptance: Acceptance | None = None
+    audit: list[AuditEntry] = field(default_factory=list)
+
+
+@dataclass
+class MemberStatus:
+    """``teams/{team}/member_status/{member}``: what the member's background answerer last
+    reported (counts, booleans and times only, as validated) and when the relay received it
+    (``seen_at``, the relay's clock). Overwritten; removed with the member and the team."""
+
+    status: dict[str, Any]
+    seen_at: datetime
+
+
+@dataclass
+class StatusChange[T]:
+    """What a :meth:`Store.set_member_status` function asks the store to write."""
+
+    result: T
+    status: MemberStatus | None = None
+
+
+@dataclass(frozen=True)
+class AnswerEntry:
+    """``teams/{team}/requests/{id}/answers/{member}``: a recipient's full reply text
+    (M11-SPEC §4), kept as long as its request (``expire_at`` is the request's)."""
+
+    member: str
+    text: str
+    expire_at: datetime
+
+
 def roster_memberships(entries: Mapping[str, RosterEntry]) -> dict[str, str]:
     """email -> member over a roster's entries, invited ones included: the account index
     says where to look (for a membership or an invitation), the roster decides which."""
@@ -619,6 +683,8 @@ class Mutation[T]:
     envelopes: list[Envelope] = field(default_factory=list)
     progress: list[ProgressEntry] = field(default_factory=list)
     audit: list[AuditEntry] = field(default_factory=list)
+    # M11-SPEC §4: full reply texts, created below the request (one per recipient, ever).
+    answers: list[AnswerEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -643,6 +709,10 @@ STREAM_SCAN_LIMIT = 1000
 # A cursor advance reads at most this many of the messages it passes, ascending, to stamp
 # their delivery times (M2-SPEC §3.2); messages beyond it in one advance stay unstamped.
 DELIVERY_SCAN_LIMIT = 100
+
+# M11-SPEC §4: recent_questions reads at most this many of the asker's questions looking for
+# unexpired ones (expired ones wait for TTL), so one listing has a bounded cost.
+RECENT_SCAN_LIMIT = 200
 
 DELIVERED_TYPES = frozenset({"question", "capability_call"})
 
@@ -733,6 +803,13 @@ type TeamCreateFn[T] = Callable[
 type TeamDeleteFn[T] = Callable[[TeamRecord | None], TeamDeletion[T]]
 # The stored boundaries (None when never set) and the actor's roster entry (None when absent).
 type BoundariesFn[T] = Callable[[TeamBoundaries | None, RosterEntry | None], BoundariesChange[T]]
+# The boundaries (None when never set), the member's acceptance and roster entry (None when
+# absent).
+type AcceptanceFn[T] = Callable[
+    [TeamBoundaries | None, Acceptance | None, RosterEntry | None], AcceptanceChange[T]
+]
+# The member's status (None when none) and roster entry (None when absent).
+type StatusFn[T] = Callable[[MemberStatus | None, RosterEntry | None], StatusChange[T]]
 
 
 class Store(Protocol):
@@ -812,6 +889,20 @@ class Store(Protocol):
         """Up to ``limit`` of the team's requests with ``updated_at == at``, by request id."""
         ...
 
+    async def list_answers(self, team: str, request_id: str) -> dict[str, str]:
+        """M11-SPEC §4: the request's full answers, member -> text (expired ones included:
+        the caller has checked the request's own expiry)."""
+        ...
+
+    async def recent_questions(
+        self, team: str, asker: str, now: datetime, limit: int
+    ) -> list[RequestDoc]:
+        """M11-SPEC §4: up to ``limit`` of ``asker``'s questions (``kind`` "question") that
+        have not expired at ``now``, newest first by ``(created_at, request_id)`` descending,
+        scanning at most RECENT_SCAN_LIMIT documents. One query on ``asker``, ``kind`` and
+        ``created_at`` (the composite index in ``firestore.indexes.json``)."""
+        ...
+
     # Streams -------------------------------------------------------------------------
     async def read_stream(
         self,
@@ -883,11 +974,12 @@ class Store(Protocol):
         When it changed something: every quota must be under its limit (else
         :class:`QuotaExceeded`, nothing written) and is counted; ``put`` entries are
         written, ``remove`` members deleted with every live credential of theirs revoked
-        (``revoked_at = now``), every live credential :func:`revocable_by_email` by a
-        ``revoke_email`` pair revoked, ``retire`` ids written, ``roster_version`` incremented
-        and the team's ``members``/``owners`` counts set, the audit written, and for a team
-        the API created (``seed`` False) every account whose membership moved
-        (:func:`membership_changes`) updated; all in one transaction."""
+        (``revoked_at = now``) and their acceptance and status deleted (M11-SPEC §2, §3),
+        every live credential :func:`revocable_by_email` by a ``revoke_email`` pair
+        revoked, ``retire`` ids written, ``roster_version`` incremented and the team's
+        ``members``/``owners`` counts set, the audit written, and for a team the API created
+        (``seed`` False) every account whose membership moved (:func:`membership_changes`)
+        updated; all in one transaction."""
         ...
 
     # Teams (M9-SPEC §1) --------------------------------------------------------------
@@ -959,6 +1051,33 @@ class Store(Protocol):
         When it returns boundaries: every quota (the team's counters) must be under its limit
         (else :class:`QuotaExceeded`, nothing written) and is counted, and the boundaries are
         written whole with the audit; one transaction."""
+        ...
+
+    # A member's acceptance and status (M11-SPEC §2, §3) ---------------------------------
+    async def get_acceptances(self, team: str, members: Sequence[str]) -> dict[str, Acceptance]:
+        """The acceptances that exist among ``members``', in one batched read."""
+        ...
+
+    async def set_acceptance[T](
+        self, team: str, member: str, fn: AcceptanceFn[T], quotas: Sequence[Quota] = ()
+    ) -> T:
+        """Read the team (a deleted one raises :class:`TeamGone`, nothing written), its
+        boundaries, ``member``'s acceptance and roster entry; run ``fn`` (pure; raising writes
+        nothing). When it returns an acceptance: every quota (the team's counters) must be
+        under its limit (else :class:`QuotaExceeded`, nothing written) and is counted, and the
+        acceptance is written whole with the audit; one transaction."""
+        ...
+
+    async def get_member_statuses(
+        self, team: str, members: Sequence[str]
+    ) -> dict[str, MemberStatus]:
+        """The statuses that exist among ``members``', in one batched read."""
+        ...
+
+    async def set_member_status[T](self, team: str, member: str, fn: StatusFn[T]) -> T:
+        """Read the team (a deleted one raises :class:`TeamGone`, nothing written),
+        ``member``'s status and roster entry; run ``fn`` (pure; raising writes nothing); write
+        the status it returns whole; one transaction."""
         ...
 
     async def get_account(self, email_sha256: str) -> AccountRecord | None: ...

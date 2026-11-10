@@ -37,6 +37,15 @@ Representation choices:
   ``{domain, shared_drive, since}`` maps, ``orgs_since`` a map of lower-case org name to the
   version it was last added in, ``member_folders_since`` likewise (M10-SPEC §7.1). Never
   expires; a team's purge removes it with every other document under the team.
+- A member's acceptance and status (M11-SPEC §2, §3): ``teams/{team}/acceptances/{member}``
+  (``{version, accepted_at}``) and ``teams/{team}/member_status/{member}`` (``{status, seen_at}``,
+  ``status`` a map of counts, booleans and time strings). Neither expires; the roster
+  transaction that removes a member deletes both, and a team's purge removes them.
+- A reply's full text (M11-SPEC §4): ``teams/{team}/requests/{id}/answers/{member}``
+  (``{member, text, expire_at}``, the request's ``expire_at``), created in the reply's
+  transaction. Kept off the request document so it stays under 1 MiB. Listing a member's
+  recent questions queries ``asker ==``, ``kind ==`` ordered by ``created_at`` descending: the
+  composite index ``requests (asker ASC, kind ASC, created_at DESC)``.
 """
 
 from __future__ import annotations
@@ -61,9 +70,12 @@ from .store import (
     MEMBER_ACTIVE,
     MEMBER_INVITED,
     PURGE_BATCH,
+    RECENT_SCAN_LIMIT,
     STREAM_SCAN_LIMIT,
     TEAM_ACTIVE,
     TEAM_DELETED,
+    Acceptance,
+    AcceptanceFn,
     AccountRecord,
     AdminAuditEntry,
     AuditEntry,
@@ -79,6 +91,7 @@ from .store import (
     LoginDoc,
     LoginFn,
     MemberDoc,
+    MemberStatus,
     MutateFn,
     ProgressEntry,
     Quota,
@@ -92,6 +105,7 @@ from .store import (
     RosterFn,
     RosterOutcome,
     RosterState,
+    StatusFn,
     StreamPage,
     TeamBoundaries,
     TeamCreateFn,
@@ -655,6 +669,18 @@ def _boundaries_from_doc(doc: dict[str, Any]) -> TeamBoundaries:
     )
 
 
+def _acceptance_from_doc(doc: dict[str, Any]) -> Acceptance:
+    accepted_at = _dt(doc["accepted_at"])
+    assert accepted_at is not None
+    return Acceptance(version=int(doc["version"]), accepted_at=accepted_at)
+
+
+def _status_from_doc(doc: dict[str, Any]) -> MemberStatus:
+    seen_at = _dt(doc["seen_at"])
+    assert seen_at is not None
+    return MemberStatus(status=dict(doc["status"]), seen_at=seen_at)
+
+
 class FirestoreStore:
     def __init__(
         self,
@@ -709,6 +735,12 @@ class FirestoreStore:
 
     def _boundaries(self, team: str):
         return self._team(team).collection("settings").document("boundaries")
+
+    def _acceptance(self, team: str, member: str):
+        return self._team(team).collection("acceptances").document(member)
+
+    def _status(self, team: str, member: str):
+        return self._team(team).collection("member_status").document(member)
 
     def _credential(self, team: str, key: str):
         return self._team(team).collection("credentials").document(key)
@@ -954,6 +986,11 @@ class FirestoreStore:
                     ref.collection("progress").document(_seq_id(entry.seq, 6)),
                     _progress_to_doc(entry),
                 )
+            for answer in mutation.answers:  # M11-SPEC §4: once per recipient (create)
+                txn.create(
+                    ref.collection("answers").document(answer.member),
+                    {"member": answer.member, "text": answer.text, "expire_at": answer.expire_at},
+                )
             self._write_audit(txn, mutation.audit)
             return mutation.result
 
@@ -993,6 +1030,44 @@ class FirestoreStore:
         )
         docs = [_request_from_doc(snap.to_dict() or {}) async for snap in query.stream()]
         return sorted(docs, key=lambda d: d.request_id)
+
+    async def list_answers(self, team: str, request_id: str) -> dict[str, str]:
+        query = self._request(team, request_id).collection("answers")
+        found: dict[str, str] = {}
+        async for snap in query.stream():
+            doc = snap.to_dict() or {}
+            found[snap.id] = doc["text"]
+        return found
+
+    async def recent_questions(
+        self, team: str, asker: str, now: datetime, limit: int
+    ) -> list[RequestDoc]:
+        base = (
+            self._team(team)
+            .collection("requests")
+            .where(filter=FieldFilter("asker", "==", asker))
+            .where(filter=FieldFilter("kind", "==", "question"))
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .order_by(FieldPath.document_id(), direction=firestore.Query.DESCENDING)
+        )
+        found: list[RequestDoc] = []
+        scanned = 0
+        last: Any = None
+        while len(found) < limit and scanned < RECENT_SCAN_LIMIT:
+            page = min(max(limit, 20), RECENT_SCAN_LIMIT - scanned)
+            query = base.start_after(last) if last is not None else base
+            snaps = [snap async for snap in query.limit(page).stream()]
+            for snap in snaps:
+                doc = _request_from_doc(snap.to_dict() or {})
+                if now < doc.expire_at:
+                    found.append(doc)
+                    if len(found) == limit:
+                        break
+            scanned += len(snaps)
+            if len(snaps) < page:
+                break
+            last = snaps[-1]
+        return found
 
     # Streams ------------------------------------------------------------------------------
     async def read_stream(
@@ -1214,6 +1289,9 @@ class FirestoreStore:
                 txn.update(self._credential(team, key), {"revoked": True, "revoked_at": now})
             for member in change.remove:
                 txn.delete(self._roster_col(team).document(member))
+                # M11-SPEC §2, §3: the member's acceptance and status leave with them.
+                txn.delete(self._acceptance(team, member))
+                txn.delete(self._status(team, member))
             for entry in change.put:
                 txn.set(self._roster_col(team).document(entry.member), _roster_to_doc(entry))
             for tomb in change.retire:
@@ -1499,6 +1577,82 @@ class FirestoreStore:
             self._write_quotas(txn, team, quotas, counts)
             txn.set(self._boundaries(team), _boundaries_to_doc(change.boundaries))
             self._write_audit(txn, change.audit)
+            return change.result
+
+        return await self._run(body)
+
+    # A member's acceptance and status (M11-SPEC §2, §3) -----------------------------------
+    async def _read_live_team(self, txn: AsyncTransaction, team: str) -> None:
+        snap = await self._team(team).get(transaction=txn)
+        if snap.exists and (snap.to_dict() or {}).get("status") == TEAM_DELETED:
+            raise TeamGone(team)
+
+    async def get_acceptances(self, team: str, members: Sequence[str]) -> dict[str, Acceptance]:
+        if not members:
+            return {}
+        found: dict[str, Acceptance] = {}
+        async for snap in self._db().get_all([self._acceptance(team, m) for m in members]):
+            if snap.exists:
+                found[snap.id] = _acceptance_from_doc(snap.to_dict() or {})
+        return {m: found[m] for m in members if m in found}
+
+    async def set_acceptance[T](
+        self, team: str, member: str, fn: AcceptanceFn[T], quotas: Sequence[Quota] = ()
+    ) -> T:
+        async def body(txn: AsyncTransaction) -> T:
+            await self._read_live_team(txn, team)
+            snap = await self._boundaries(team).get(transaction=txn)
+            accepted_snap = await self._acceptance(team, member).get(transaction=txn)
+            entry_snap = await self._roster_col(team).document(member).get(transaction=txn)
+            current = _boundaries_from_doc(snap.to_dict() or {}) if snap.exists else None
+            accepted = (
+                _acceptance_from_doc(accepted_snap.to_dict() or {})
+                if accepted_snap.exists
+                else None
+            )
+            entry = _roster_from_doc(entry_snap.to_dict() or {}) if entry_snap.exists else None
+            change = fn(current, accepted, entry)
+            if change.acceptance is None:
+                return change.result
+            counts = await self._read_quotas(txn, team, quotas)  # raising writes nothing
+            # All reads are done; writes from here on.
+            self._write_quotas(txn, team, quotas, counts)
+            txn.set(
+                self._acceptance(team, member),
+                {
+                    "version": change.acceptance.version,
+                    "accepted_at": change.acceptance.accepted_at,
+                },
+            )
+            self._write_audit(txn, change.audit)
+            return change.result
+
+        return await self._run(body)
+
+    async def get_member_statuses(
+        self, team: str, members: Sequence[str]
+    ) -> dict[str, MemberStatus]:
+        if not members:
+            return {}
+        found: dict[str, MemberStatus] = {}
+        async for snap in self._db().get_all([self._status(team, m) for m in members]):
+            if snap.exists:
+                found[snap.id] = _status_from_doc(snap.to_dict() or {})
+        return {m: found[m] for m in members if m in found}
+
+    async def set_member_status[T](self, team: str, member: str, fn: StatusFn[T]) -> T:
+        async def body(txn: AsyncTransaction) -> T:
+            await self._read_live_team(txn, team)
+            snap = await self._status(team, member).get(transaction=txn)
+            entry_snap = await self._roster_col(team).document(member).get(transaction=txn)
+            current = _status_from_doc(snap.to_dict() or {}) if snap.exists else None
+            entry = _roster_from_doc(entry_snap.to_dict() or {}) if entry_snap.exists else None
+            change = fn(current, entry)
+            if change.status is not None:
+                txn.set(
+                    self._status(team, member),
+                    {"status": change.status.status, "seen_at": change.status.seen_at},
+                )
             return change.result
 
         return await self._run(body)

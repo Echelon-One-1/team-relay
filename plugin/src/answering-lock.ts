@@ -1,7 +1,8 @@
 // One answerer per machine (M8-SPEC §1): whoever holds `~/.config/team-relay/answering.lock`
 // (XDG_CONFIG_HOME when it is absolute) is the only process that reads the member's `inbox`
-// stream. The host (a channel working session's server) and a manual answering session
-// (bin/answerer's channel server) take the same lock, so the two never both consume it.
+// stream. The host (a channel working session's server), a manual answering session
+// (bin/answerer's channel server) and the background answerer (M11-SPEC §1, dist/daemon.js) take
+// the same lock, so no two of them ever both consume it.
 //
 // The lock is an exclusively created file (O_CREAT|O_EXCL, mode 600) holding the holder's pid,
 // role and start time as JSON. It is stale when that pid is gone. Breaking a stale lock goes
@@ -24,7 +25,7 @@ const WRITING_GRACE_MS = 5_000;
 /** A breaker file older than this was left by a process that died mid-break. */
 const BREAKER_STALE_MS = 10_000;
 
-export type LockRole = 'host' | 'answerer';
+export type LockRole = 'host' | 'answerer' | 'daemon';
 export type LockInfo = { pid: number; role: LockRole; started_at: string };
 export type Held = { ok: false; holder: LockInfo | null };
 export type Acquired = { ok: true; path: string; release: () => void };
@@ -55,7 +56,7 @@ function parseInfo(raw: string): LockInfo | null {
   try {
     const v = JSON.parse(raw) as Partial<LockInfo>;
     if (typeof v.pid !== 'number' || !Number.isInteger(v.pid) || v.pid <= 0) return null;
-    if (v.role !== 'host' && v.role !== 'answerer') return null;
+    if (v.role !== 'host' && v.role !== 'answerer' && v.role !== 'daemon') return null;
     return { pid: v.pid, role: v.role, started_at: typeof v.started_at === 'string' ? v.started_at : '' };
   } catch {
     return null;
@@ -193,7 +194,7 @@ export function tryAcquire(
 /** Said when the lock is held: who answers instead. */
 export function heldBy(holder: LockInfo | null): string {
   if (!holder) return 'another answering session on this computer';
-  return holder.role === 'host'
-    ? `a channel working session on this computer (pid ${holder.pid})`
-    : `a manual answering session on this computer (pid ${holder.pid})`;
+  if (holder.role === 'host') return `a channel working session on this computer (pid ${holder.pid})`;
+  if (holder.role === 'daemon') return `the background answerer on this computer (pid ${holder.pid})`;
+  return `a manual answering session on this computer (pid ${holder.pid})`;
 }

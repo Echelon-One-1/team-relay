@@ -8,6 +8,8 @@
 #   the relay's run.app URL from here -> not 200 (ingress: load balancer only)
 #   the console at / without sign-in  -> 302 (IAP sends the browser to Google's sign-in)
 #   http://PUBLIC_HOST/v1/health      -> 301 (to https)
+#   /setup without sign-in            -> 200 from the relay with PLUGIN_MARKETPLACE set, else 404
+#                                        (M11-SPEC §5; never the console's IAP redirect)
 # The token lives in a variable for the one curl and is never printed.
 set -euo pipefail
 
@@ -45,5 +47,8 @@ if [[ -n "${PUBLIC_HOST:-}" ]]; then
   if [[ "$direct" != "200" ]]; then echo "ok    run.app from outside: $direct"; else echo "FAIL  run.app from outside: 200"; fail=1; fi
   check "console without sign-in" 302 "$(curl -s -o /dev/null -w '%{http_code}' "$URL/")"
   check "http to https" 301 "$(curl -s -o /dev/null -w '%{http_code}' "http://${PUBLIC_HOST}/v1/health")"
+  want_setup=404
+  if [[ -n "${PLUGIN_MARKETPLACE:-}" ]]; then want_setup=200; fi
+  check "/setup" "$want_setup" "$(curl -s -o /dev/null -w '%{http_code}' "$URL/setup")"
 fi
 exit "$fail"

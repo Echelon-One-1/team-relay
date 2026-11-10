@@ -26,7 +26,7 @@ function parseInfo(raw) {
   try {
     const v = JSON.parse(raw);
     if (typeof v.pid !== "number" || !Number.isInteger(v.pid) || v.pid <= 0) return null;
-    if (v.role !== "host" && v.role !== "answerer") return null;
+    if (v.role !== "host" && v.role !== "answerer" && v.role !== "daemon") return null;
     return { pid: v.pid, role: v.role, started_at: typeof v.started_at === "string" ? v.started_at : "" };
   } catch {
     return null;

@@ -315,6 +315,9 @@ async def test_ack_transitions_and_is_idempotent(client, memory_store):
         "status": "acked",
         "acked_at": "2026-09-23T12:00:00.000Z",
         "answered_at": None,
+        # M11-SPEC §4: the preview and, for the asker, the full answer; none yet.
+        "answer_preview": None,
+        "answer": None,
     }
     doc = await memory_store.get_request("demo", rid)
     assert doc.next_deadline == doc.answer_deadline
@@ -377,6 +380,8 @@ async def test_reply_delivers_one_answer_to_the_asker(client, clock):
         "status": "answered",
         "acked_at": "2026-09-23T12:00:05.000Z",
         "answered_at": "2026-09-23T12:00:05.000Z",
+        "answer_preview": "It is in the bucket.",
+        "answer": "It is in the bucket.",
     }
 
 

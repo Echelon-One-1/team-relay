@@ -1,6 +1,8 @@
 import { consoleKey, isHosted } from './key'
 import type {
+  Acceptance,
   ActivityPage,
+  AskResult,
   AdminTeamsPage,
   ApprovalsSummary,
   Boundaries,
@@ -8,6 +10,8 @@ import type {
   InboxSummary,
   Join,
   Me,
+  MembersStatus,
+  MyRequests,
   RequestDetail,
   Roster,
   RosterRole,
@@ -18,10 +22,11 @@ import type {
 // Every call goes to the console server's proxy: locally (M2 §4.4) with the key in
 // X-Console-Key; hosted behind IAP (M3 §4) without a key, with the IAP session cookie. A call
 // about one team names it in X-Relay-Team (M9 §5), and the console server checks the viewer is
-// on it. The only writes are an owner's roster changes (M6 §3), an owner's boundaries (M10 §1)
-// and the account's own (M9: create a team, answer an invitation, delete a team, an admin's
-// delete): a same-origin JSON POST, PUT, PATCH or DELETE, which the browser marks
-// Sec-Fetch-Site: same-origin. Nothing can be sent, acked or replied.
+// on it. The only writes are an owner's roster changes (M6 §3), an owner's boundaries (M10 §1),
+// the account's own (M9: create a team, answer an invitation, delete a team, an admin's
+// delete), and the viewer's own acceptance of the boundaries and questions (M11 §2, §4): a
+// same-origin JSON POST, PUT, PATCH or DELETE, which the browser marks Sec-Fetch-Site:
+// same-origin. Nothing can be acked or replied, and no capability can be called.
 
 export type Transport = (path: string, init: RequestInit) => Promise<Response>
 
@@ -375,6 +380,14 @@ export const api = {
     return getJson<AdminTeamsPage>(`api/admin/teams?${q.toString()}`)
   },
   adminDeleteTeam: (team: string, confirm: string) => sendChange<unknown>('DELETE', `api/admin/teams/${seg(team)}`, { confirm }),
+  /** M11 §2: the boundaries version the viewer accepted, and accepting the one shown (for themselves only). */
+  acceptance: (team?: string | null) => getJson<Acceptance>('api/acceptance', team),
+  setAcceptance: (version: number, team?: string | null) => sendChange<Acceptance>('PUT', 'api/acceptance', { version }, team),
+  /** M11 §3: every member's setup progress. */
+  membersStatus: (team?: string | null) => getJson<MembersStatus>('api/members-status', team),
+  /** M11 §4: the viewer's last 20 requests, and a new question. */
+  myRequests: (team?: string | null) => getJson<MyRequests>('api/my-requests', team),
+  ask: (to: '*' | string[], question: string, team?: string | null) => sendChange<AskResult>('POST', 'api/ask', { to, question }, team),
   activity: (since: string | null, limit = 200, team?: string | null) => {
     const q = new URLSearchParams({ limit: String(limit) })
     if (since !== null) q.set('since', since)

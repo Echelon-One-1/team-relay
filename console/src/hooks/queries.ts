@@ -1,14 +1,19 @@
 import { QueryClient, useMutation, useQuery, useQueryClient, type Query } from '@tanstack/react-query'
+import { useCallback } from 'react'
 
 import { ApiError, ChangeError, api } from '@/api/client'
 import type {
+  Acceptance,
   AdminTeamsPage,
+  AskResult,
   ApprovalsSummary,
   Boundaries,
   Directory,
   InboxSummary,
   Join,
   Me,
+  MembersStatus,
+  MyRequests,
   RequestDetail,
   Roster,
   RosterRole,
@@ -16,6 +21,8 @@ import type {
   Teams,
 } from '@/api/types'
 import { emptyActivity, pollActivity, PollError, type ActivityState } from '@/lib/activity'
+import { askPollMs, readMyRequests } from '@/lib/ask'
+import { readAcceptance, readMembersStatus } from '@/lib/setup'
 import { readTeams } from '@/lib/teams'
 import { useTeam } from './team'
 
@@ -207,6 +214,13 @@ export function useBoundaries() {
   })
 }
 
+/** Reads the boundaries again (M11 §6: members-status says a newer version exists). */
+export function useRefreshBoundaries() {
+  const qc = useQueryClient()
+  const team = useTeam()
+  return useCallback(() => void qc.invalidateQueries({ queryKey: boundariesKey(team) }), [qc, team])
+}
+
 /**
  * M10 §1: an owner's change, sent once from the version it was read at. The answer becomes the
  * boundaries on screen; after a refusal they are read again (a 409 means someone else saved first).
@@ -223,6 +237,113 @@ export function useSetBoundaries() {
     },
     onError: () => {
       void qc.invalidateQueries({ queryKey: boundariesKey(team) })
+    },
+  })
+}
+
+// ---------------------------------------------------------------------------------------
+// M11: setup progress, accepting the boundaries, and asking from the console.
+
+/** The Join page's live ticks (M11 §6): members-status and acceptance, every 5 s while visible. */
+export const SETUP_INTERVAL_MS = 5_000
+/** Elsewhere (the Members panel, the banner, the Ask page's dots): every 30 s. */
+export const STATUS_INTERVAL_MS = 30_000
+export const MY_REQUESTS_INTERVAL_MS = 30_000
+export const acceptanceKey = (team: string | null) => ['acceptance', team] as const
+export const membersStatusKey = (team: string | null) => ['members-status', team] as const
+export const myRequestsKey = (team: string | null) => ['my-requests', team] as const
+
+/** An answer that is not the shape asked for is a failure, never data. */
+function shaped<T>(v: T | null): T {
+  if (v === null) throw new ApiError('failed', null, 'Not the answer asked for')
+  return v
+}
+
+/** A read a relay before M11 does not have: a 404 is not asked again. */
+function newerRead<T>(name: string, ms: number) {
+  return (query: Query<T, ApiError, T, readonly unknown[]>): number | false =>
+    query.state.error?.kind === 'not_found' ? false : whileVisible<T>(name, ms)(query)
+}
+
+/** GET /api/acceptance: the boundaries version the viewer accepted (0: never). */
+export function useAcceptance(intervalMs: number = STATUS_INTERVAL_MS) {
+  const team = useTeam()
+  return useQuery<Acceptance, ApiError>({
+    queryKey: acceptanceKey(team),
+    queryFn: () => tracked('acceptance', async () => shaped(readAcceptance((await api.acceptance(team)).data))),
+    refetchInterval: newerRead<Acceptance>('acceptance', intervalMs),
+  })
+}
+
+/** GET /api/members-status: every member's setup progress and whether they answer now. */
+export function useMembersStatus(intervalMs: number = STATUS_INTERVAL_MS) {
+  const team = useTeam()
+  return useQuery<MembersStatus, ApiError>({
+    queryKey: membersStatusKey(team),
+    queryFn: () => tracked('members-status', async () => shaped(readMembersStatus((await api.membersStatus(team)).data))),
+    refetchInterval: newerRead<MembersStatus>('members-status', intervalMs),
+  })
+}
+
+/**
+ * M11 §2: the viewer accepts the version they were shown, sent once. A refusal (409: the
+ * boundaries changed meanwhile) reads the boundaries and the acceptance again.
+ */
+export function useSetAcceptance() {
+  const qc = useQueryClient()
+  const team = useTeam()
+  return useMutation<Acceptance, ChangeError, { version: number }>({
+    mutationFn: (c) => api.setAcceptance(c.version, team),
+    retry: false,
+    onSuccess: (out) => {
+      if (out && typeof out === 'object' && typeof out.version === 'number') qc.setQueryData(acceptanceKey(team), out)
+      else void qc.invalidateQueries({ queryKey: acceptanceKey(team) })
+      void qc.invalidateQueries({ queryKey: membersStatusKey(team) })
+    },
+    onError: () => {
+      void qc.invalidateQueries({ queryKey: boundariesKey(team) })
+      void qc.invalidateQueries({ queryKey: acceptanceKey(team) })
+    },
+  })
+}
+
+/** GET /api/my-requests: the viewer's last 20 questions, every 30 s and after each one sent. */
+export function useMyRequests() {
+  const team = useTeam()
+  return useQuery<MyRequests, ApiError>({
+    queryKey: myRequestsKey(team),
+    queryFn: () => tracked('my-requests', async () => shaped(readMyRequests((await api.myRequests(team)).data))),
+    refetchInterval: newerRead<MyRequests>('my-requests', MY_REQUESTS_INTERVAL_MS),
+  })
+}
+
+/** M11 §4: a question, sent once; the list is read again after it. */
+export function useAsk() {
+  const qc = useQueryClient()
+  const team = useTeam()
+  return useMutation<AskResult, ChangeError, { to: '*' | string[]; question: string }>({
+    mutationFn: (c) => api.ask(c.to, c.question, team),
+    retry: false,
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: myRequestsKey(team) })
+    },
+  })
+}
+
+/**
+ * One of the viewer's questions on the Ask page: every 3 s while it is open, every 30 s while
+ * closed and someone has yet to answer or run out of time (lib/ask.ts); an expired one (404)
+ * is not asked again.
+ */
+export function useAskDetail(id: string, open: boolean) {
+  const team = useTeam()
+  return useQuery<RequestDetail, ApiError>({
+    queryKey: ['request', team, id],
+    queryFn: () => tracked('ask-detail', async () => (await api.request(id, team)).data),
+    refetchInterval: (query) => {
+      if (query.state.error?.kind === 'not_found') return false
+      const ms = askPollMs(query.state.data, open)
+      return ms === false ? false : whileVisible<RequestDetail>('ask-detail', ms)(query)
     },
   })
 }

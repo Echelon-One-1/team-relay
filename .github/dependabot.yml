@@ -1,0 +1,64 @@
+# Weekly dependency updates. Minor and patch updates arrive as one grouped PR per ecosystem and
+# directory; each major update gets its own PR. Security updates open as soon as an advisory lands.
+# New releases wait out a cooldown first, so a compromised release is usually pulled before we see
+# it. Every Dependabot PR goes through the same review and required checks as any other.
+#
+# Not covered here, so upgraded by hand: the gitleaks binary CI downloads (version and hash in
+# ci.yml), the Firestore emulator image (digest in scripts/emulator.sh) and the relay's base image
+# (digest in relay/Dockerfile).
+#
+# Node majors of @types/node are not proposed: they follow the Node line the plugin targets
+# (engines, the esbuild target and CI's node-version change together in one reviewed PR).
+
+version: 2
+
+updates:
+  - package-ecosystem: npm  # pnpm-lock.yaml
+    directory: /plugin
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: '@types/node'
+        update-types: [version-update:semver-major]
+    groups:
+      plugin-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm  # pnpm-lock.yaml
+    directory: /console
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: '@types/node'
+        update-types: [version-update:semver-major]
+    groups:
+      console-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip  # pyproject.toml
+    directory: /relay
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      relay-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]

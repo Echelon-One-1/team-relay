@@ -15,18 +15,25 @@
 // servers and binds the permission prompt tool, then fails at its first API request. A flag,
 // settings or MCP problem shows up as a different error. (A Claude Code signed in to a cloud
 // provider does not use ANTHROPIC_BASE_URL; there --offline makes a real call.)
+//
+// The same preparation and run (prepareDryRun, executeDryRun) are the background answerer's
+// self-test (M11-SPEC §3, daemon.ts): the boundary-mode child, against a host that denies every
+// tool, with a relay address that leads nowhere.
 
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
-import { planRun, draftReasons, type HostConnection } from './answer-host.js';
-import { runChild, type WorkItem } from './headless.js';
+import { planRun, draftReasons, type HostConnection, type RunPlan } from './answer-host.js';
+import { runChild, type ChildRun, type WorkItem } from './headless.js';
 import { HostSocket } from './host-socket.js';
 import { MEMBER_RE, connectionFromEnv } from './relay-client.js';
-import { scopeFolder } from './scope.js';
+import { scopeFolder, type Scope } from './scope.js';
 import { isPlainObject } from './tool-util.js';
 
 const USAGE = 'usage: answer-dry-run.js [--question TEXT] [--run [--offline]]';
+
+/** A relay address nothing answers on: a dry run never reaches a relay. */
+export const NOWHERE_RELAY: HostConnection = { mode: 'token', url: 'http://127.0.0.1:9', team: 'demo', token: 'dry-run-token' };
 
 function shellQuote(a: string): string {
   return /^[A-Za-z0-9_./:=@%+,-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`;
@@ -56,10 +63,127 @@ async function closedPort(): Promise<number> {
   return port;
 }
 
+export type DryRunInput = {
+  env: NodeJS.ProcessEnv;
+  question: string;
+  /** The folder the question is asked in (the scope folder in folder mode). */
+  cwd: string;
+  connection: HostConnection;
+  member: string;
+  claudeBin: string;
+  /** Where the bundles are (dist/). */
+  dist: string;
+  node?: string;
+  /** Boundary mode (M10-SPEC §3): the child the background answerer runs. */
+  boundaries?: { teamName: string; topic: string };
+  /** False offers the child no capability server. */
+  capabilities?: boolean;
+};
+
+export type PreparedDryRun = { plan: RunPlan; scope: Scope; socket: HostSocket; runDir: string };
+
+/** Everything one dry run needs, written as the host writes it for a real run. */
+export function prepareDryRun(i: DryRunInput): PreparedDryRun {
+  const scope = scopeFolder(i.cwd, i.env);
+  const socket = new HostSocket();
+  const runDir = mkdtempSync(join(socket.dir, 'run-'));
+  const item: WorkItem = {
+    request_id: `rq_${'0'.repeat(32)}`,
+    from: 'teammate',
+    kind: 'question',
+    question: i.question,
+    answer_deadline: Date.now() + 15 * 60_000,
+  };
+  try {
+    const plan = planRun({
+      item,
+      runDir,
+      socket: { path: socket.path, dir: socket.dir },
+      scope,
+      env: i.env,
+      connection: i.connection,
+      member: i.member,
+      dist: i.dist,
+      node: i.node ?? process.execPath,
+      claudeBin: i.claudeBin,
+      ...(i.boundaries ? { boundaries: i.boundaries } : {}),
+      ...(i.capabilities === false ? { capabilities: false } : {}),
+    });
+    return { plan, scope, socket, runDir };
+  } catch (err) {
+    void socket.close();
+    throw err;
+  }
+}
+
+/** Remove what prepareDryRun made (the socket's private directory holds the run's). */
+export async function disposeDryRun(p: PreparedDryRun): Promise<void> {
+  await p.socket.close().catch(() => {});
+  rmSync(p.runDir, { recursive: true, force: true });
+  rmSync(p.socket.dir, { recursive: true, force: true });
+}
+
+/**
+ * Run the prepared child against a host that records each tool call, denies every permission
+ * request, reads nothing and sends nothing. `offline`: no model call (see the header).
+ */
+export async function executeDryRun(
+  p: PreparedDryRun,
+  o: { offline: boolean; limitMs?: number; signal?: AbortSignal },
+): Promise<{ result: ChildRun; calls: string[] }> {
+  const { plan, socket } = p;
+  await socket.listen();
+  const calls: string[] = [];
+  socket.setRun(plan.token, async (method, params) => {
+    const q = isPlainObject(params) ? params : {};
+    if (method === 'permission') {
+      calls.push(`permission ${String(q.tool_name)} ${JSON.stringify(q.input).slice(0, 300)} -> denied (dry run)`);
+      return { allow: false, message: 'Dry run: every permission request is denied.' };
+    }
+    if (method === 'request_approval') {
+      calls.push(`request_approval ${JSON.stringify(q.reason)}`);
+      return { ok: true, message: 'Noted (dry run).' };
+    }
+    if (method === 'list_files' || method === 'search_files' || method === 'read_google_file') {
+      calls.push(`${method} -> refused (dry run)`);
+      return { ok: false, message: 'Dry run: nothing can be read.' };
+    }
+    if (method === 'reply') {
+      const text = typeof q.text === 'string' ? q.text : '';
+      const data = isPlainObject(q.data) ? q.data : null;
+      const reasons = draftReasons({
+        needsApproval: q.needs_approval === true,
+        reason: typeof q.reason === 'string' ? q.reason : null,
+        requested: null,
+        approvalDuringRun: calls.some((c) => c.startsWith('permission')),
+        text,
+        data,
+      });
+      calls.push(`reply ${JSON.stringify(text.slice(0, 500))} -> ${reasons.length ? `would wait for approval: ${reasons.join('; ')}` : 'would be sent automatically'} (nothing sent: dry run)`);
+      return { ok: true, message: 'Dry run: nothing was sent.' };
+    }
+    if (method === 'trail') return { ok: true };
+    throw new Error(`unknown method ${method}`);
+  });
+  const runEnv = { ...plan.env };
+  if (o.offline) runEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await closedPort()}`;
+  const result = await runChild({
+    bin: plan.bin,
+    args: plan.args,
+    cwd: plan.cwd,
+    env: runEnv,
+    stdin: plan.stdin,
+    limitMs: o.limitMs ?? 5 * 60_000,
+    ...(o.signal ? { signal: o.signal } : {}),
+  });
+  socket.clearRun();
+  return { result, calls };
+}
+
 async function main(): Promise<void> {
   const opts = parse(process.argv.slice(2));
   const env = { ...process.env };
-  let connection: HostConnection = { mode: 'token', url: 'http://127.0.0.1:9', team: 'demo', token: 'dry-run-token' };
+  let connection: HostConnection = NOWHERE_RELAY;
   let member = 'member';
   try {
     const c = connectionFromEnv(env);
@@ -68,18 +192,9 @@ async function main(): Promise<void> {
   } catch {
     // not signed in: a placeholder relay (nothing is sent anyway)
   }
-  const scope = scopeFolder(process.cwd(), env);
-  const socket = new HostSocket();
-  const runDir = mkdtempSync(join(socket.dir, 'run-'));
-  const item: WorkItem = {
-    request_id: `rq_${'0'.repeat(32)}`,
-    from: 'teammate',
-    kind: 'question',
-    question: opts.question,
-    answer_deadline: Date.now() + 15 * 60_000,
-  };
   const claudeBin = env.TEAM_RELAY_CLAUDE_BIN?.trim() || 'claude';
-  const plan = planRun({ item, runDir, socket: { path: socket.path, dir: socket.dir }, scope, env, connection, member, dist: import.meta.dirname, node: process.execPath, claudeBin });
+  const prepared = prepareDryRun({ env, question: opts.question, cwd: process.cwd(), connection, member, claudeBin, dist: import.meta.dirname });
+  const { plan, scope } = prepared;
   const redact = (text: string) => text.split(plan.token).join('<per-run token>');
   const out = (line = '') => process.stdout.write(`${line}\n`);
   out(`scope folder: ${scope.path}`);
@@ -93,44 +208,12 @@ async function main(): Promise<void> {
   out(`mcp.json:\n${redact(readFileSync(plan.files.mcpConfig, 'utf8'))}`);
   out(`environment kept: ${Object.keys(plan.env).sort().join(' ')}`);
   if (!opts.run) {
-    await socket.close();
+    await disposeDryRun(prepared);
     return;
   }
-
-  await socket.listen();
-  const calls: string[] = [];
-  socket.setRun(plan.token, async (method, params) => {
-    const p = isPlainObject(params) ? params : {};
-    if (method === 'permission') {
-      calls.push(`permission ${String(p.tool_name)} ${JSON.stringify(p.input).slice(0, 300)} -> denied (dry run)`);
-      return { allow: false, message: 'Dry run: every permission request is denied.' };
-    }
-    if (method === 'request_approval') {
-      calls.push(`request_approval ${JSON.stringify(p.reason)}`);
-      return { ok: true, message: 'Noted (dry run).' };
-    }
-    if (method === 'reply') {
-      const text = typeof p.text === 'string' ? p.text : '';
-      const data = isPlainObject(p.data) ? p.data : null;
-      const reasons = draftReasons({
-        needsApproval: p.needs_approval === true,
-        reason: typeof p.reason === 'string' ? p.reason : null,
-        requested: null,
-        approvalDuringRun: calls.some((c) => c.startsWith('permission')),
-        text,
-        data,
-      });
-      calls.push(`reply ${JSON.stringify(text.slice(0, 500))} -> ${reasons.length ? `would wait for approval: ${reasons.join('; ')}` : 'would be sent automatically'} (nothing sent: dry run)`);
-      return { ok: true, message: 'Dry run: nothing was sent.' };
-    }
-    throw new Error(`unknown method ${method}`);
-  });
-  const runEnv = { ...plan.env };
-  if (opts.offline) runEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await closedPort()}`;
   out(opts.offline ? 'running offline (no model call)…' : 'running (this makes a model call)…');
-  const result = await runChild({ bin: plan.bin, args: plan.args, cwd: plan.cwd, env: runEnv, stdin: plan.stdin, limitMs: 5 * 60_000 });
-  await socket.close();
-  rmSync(runDir, { recursive: true, force: true });
+  const { result, calls } = await executeDryRun(prepared, { offline: opts.offline });
+  await disposeDryRun(prepared);
   out(`exit: ${result.code ?? result.signal}${result.timedOut ? ' (timed out)' : ''}`);
   for (const c of calls) out(`tool call: ${c}`);
   if (result.result) {
@@ -143,7 +226,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  process.stderr.write(`answer-dry-run: ${err instanceof Error ? err.message : 'failed'}\n`);
-  process.exit(1);
-});
+if (process.argv[1] && /answer-dry-run\.[jt]s$/.test(process.argv[1])) {
+  main().catch((err: unknown) => {
+    process.stderr.write(`answer-dry-run: ${err instanceof Error ? err.message : 'failed'}\n`);
+    process.exit(1);
+  });
+}

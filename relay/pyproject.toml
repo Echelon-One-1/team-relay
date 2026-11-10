@@ -38,6 +38,10 @@ dev = [
 [tool.setuptools]
 packages = ["relay"]
 
+# M11-SPEC §5: the setup script GET /setup serves ships inside the package.
+[tool.setuptools.package-data]
+relay = ["static/*.sh"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

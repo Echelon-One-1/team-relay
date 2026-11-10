@@ -2,7 +2,8 @@
 # One address for the relay and the hosted console (docs/M10-SPEC.md §5): a global external
 # Application Load Balancer on a reserved static IP with a Google-managed certificate for
 # PUBLIC_HOST, two serverless NEGs (relay, console), and:
-#   https://PUBLIC_HOST/v1/*, /healthz  -> the relay   (no IAP: the relay signs people in itself)
+#   https://PUBLIC_HOST/v1/*, /healthz, /setup -> the relay (no IAP: the relay signs people in
+#                                         itself; /setup is the public setup script, M11-SPEC §5)
 #   https://PUBLIC_HOST/ (everything else) -> the console (IAP, custom OAuth client, IAP_ACCESS)
 #   http://PUBLIC_HOST/*                 -> a redirect to https
 #   any other Host (the bare IP, ...)    -> a redirect to https://PUBLIC_HOST
@@ -93,10 +94,13 @@ echo "project=${PROJECT} region=${REGION} host=${PUBLIC_HOST}"
 echo
 
 ENABLED="$(gcloud services list --enabled --project="$PROJECT" --format='value(config.name)')"
-if ! grep -qx compute.googleapis.com <<<"$ENABLED"; then
-  echo "error: compute.googleapis.com is not enabled; run scripts/gcp-bootstrap.sh" >&2
-  exit 1
-fi
+# compute: everything below; cloudresourcemanager: the IAP access step (M11-SPEC §7).
+for api in compute.googleapis.com cloudresourcemanager.googleapis.com; do
+  if ! grep -qx "$api" <<<"$ENABLED"; then
+    echo "error: ${api} is not enabled; run scripts/gcp-bootstrap.sh" >&2
+    exit 1
+  fi
+done
 
 # ------------------------------------------------------------- 1. address
 echo "1. address"
@@ -279,7 +283,7 @@ cat > "$MAP_DIR/${URL_MAP}.json" <<JSON
   "pathMatchers": [{
     "name": "team-relay",
     "defaultService": "${BACKEND_URL_PREFIX}/${CONSOLE_BACKEND}",
-    "pathRules": [{"paths": ["/v1/*", "/healthz"], "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"}]
+    "pathRules": [{"paths": ["/v1/*", "/healthz", "/setup"], "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"}]
   }]
 }
 JSON
