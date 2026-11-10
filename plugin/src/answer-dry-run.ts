@@ -13,8 +13,11 @@
 // --offline points the run's Anthropic API at a closed local port (ANTHROPIC_BASE_URL), so it
 // makes no model call: Claude Code still parses every flag, loads the settings, starts both MCP
 // servers and binds the permission prompt tool, then fails at its first API request. A flag,
-// settings or MCP problem shows up as a different error. (A Claude Code signed in to a cloud
-// provider does not use ANTHROPIC_BASE_URL; there --offline makes a real call.)
+// settings or MCP problem shows up as a different error. It also turns off Claude Code's retries
+// (CLAUDE_CODE_MAX_RETRIES=0) and caps a request at 5 s (API_TIMEOUT_MS): with its default
+// retries a refused connection takes about three minutes to fail, with these about a second.
+// (A Claude Code signed in to a cloud provider does not use ANTHROPIC_BASE_URL; there --offline
+// makes a real call.)
 //
 // The same preparation and run (prepareDryRun, executeDryRun) are the background answerer's
 // self-test (M11-SPEC §3, daemon.ts): the boundary-mode child, against a host that denies every
@@ -61,6 +64,11 @@ async function closedPort(): Promise<number> {
   const port = (s.address() as { port: number }).port;
   await new Promise<void>((r) => s.close(() => r()));
   return port;
+}
+
+/** What an offline run adds to the child's environment (see the header); nothing else changes. */
+export function offlineEnv(port: number): Record<string, string> {
+  return { ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, CLAUDE_CODE_MAX_RETRIES: '0', API_TIMEOUT_MS: '5000' };
 }
 
 export type DryRunInput = {
@@ -166,7 +174,7 @@ export async function executeDryRun(
     throw new Error(`unknown method ${method}`);
   });
   const runEnv = { ...plan.env };
-  if (o.offline) runEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await closedPort()}`;
+  if (o.offline) Object.assign(runEnv, offlineEnv(await closedPort()));
   const result = await runChild({
     bin: plan.bin,
     args: plan.args,

@@ -23,7 +23,8 @@ RELAY_URL_PLACEHOLDER = "__RELAY_URL__"
 MARKETPLACE_PLACEHOLDER = "__MARKETPLACE__"
 # GitHub's limits: an owner 1-39 letters, digits and '-'; a repository 1-100 of those, '.'
 # and '_'.
-MARKETPLACE_RE = re.compile(r"[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}")
+# The same rule as scripts/deploy.sh and setup.sh: an owner not starting with -, a repo not . or ..
+MARKETPLACE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}")
 # An https origin as parse_public_url returns it: lower-case DNS characters (or an IPv4
 # address) and an optional port; no path, no trailing slash.
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"

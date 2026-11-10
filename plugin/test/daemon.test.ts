@@ -9,7 +9,9 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AnswerHost, NOT_SET_UP_REPLY, NO_CAPABILITY_REPLY, type HostOptions } from '../src/answer-host.js';
+import { NOWHERE_RELAY, disposeDryRun, executeDryRun, prepareDryRun } from '../src/answer-dry-run.js';
 import { DaemonLog, claudeBinFrom, daemonLogPath, pluginVersion, runDaemon, selfTest, type HostLike, type SelfTestResult } from '../src/daemon-core.js';
+import { memberFoldersPath, writeMemberSettings } from '../src/member-folders.js';
 import { RelayClient } from '../src/relay-client.js';
 import { FakeRelay, TOKEN_OF } from './helpers/fake-relay.js';
 import { DIST, FIXTURES, sleep, waitFor } from './helpers/mcp.js';
@@ -84,6 +86,30 @@ process.exit(1);`);
     expect(await selfTest({ env: env(bin), dist: DIST, now, limitMs: 30_000 })).toEqual({ ok: true, at: '2026-11-10T10:00:00.000Z', reason: null });
   });
 
+  it('the offline child gets no retries and a 5 s API timeout, so a refused connection ends in seconds, not minutes', async () => {
+    // As Claude Code does: with retries left it keeps retrying the closed port (here: no result).
+    const bin = script('claude-retries', `if (process.argv[2] === 'auth') process.exit(0);
+const e = process.env;
+if (e.CLAUDE_CODE_MAX_RETRIES !== '0' || e.API_TIMEOUT_MS !== '5000' || !/^http:\\/\\/127\\.0\\.0\\.1:\\d+$/.test(e.ANTHROPIC_BASE_URL ?? '')) process.exit(7);
+process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: true, result: 'API Error: Connection error.' }));
+process.exit(1);`);
+    expect(await selfTest({ env: env(bin), dist: DIST, now, limitMs: 30_000 })).toEqual({ ok: true, at: '2026-11-10T10:00:00.000Z', reason: null });
+  });
+
+  it('a run that is not offline keeps the API settings as they are', async () => {
+    const seen = join(tmp, 'seen.json');
+    const bin = script('claude-env', `const e = process.env;
+require('node:fs').writeFileSync(${JSON.stringify(seen)}, JSON.stringify([e.CLAUDE_CODE_MAX_RETRIES ?? null, e.API_TIMEOUT_MS ?? null, e.ANTHROPIC_BASE_URL ?? null]));
+process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok' }));`);
+    const prepared = prepareDryRun({ env: env(bin), question: 'q', cwd: tmp, connection: NOWHERE_RELAY, member: 'member', claudeBin: bin, dist: DIST, boundaries: { teamName: 'T', topic: 'T.' }, capabilities: false });
+    try {
+      await executeDryRun(prepared, { offline: false, limitMs: 30_000 });
+    } finally {
+      await disposeDryRun(prepared);
+    }
+    expect(JSON.parse(readFileSync(seen, 'utf8'))).toEqual([null, null, null]);
+  });
+
   it('fails, saying why: not found, not signed in, or the answerer did not start', async () => {
     expect(await selfTest({ env: env(join(tmp, 'missing')), dist: DIST, now })).toMatchObject({ ok: false, reason: expect.stringContaining('Claude Code was not found') });
     const out = script('claude-out', `process.exit(process.argv[2] === 'auth' ? 1 : 0)`);
@@ -93,6 +119,15 @@ process.stderr.write('error: unknown option');
 process.exit(2);`);
     const r = await selfTest({ env: env(broken), dist: DIST, now, limitMs: 30_000 });
     expect(r).toEqual({ ok: false, at: '2026-11-10T10:00:00.000Z', reason: 'the answerer did not start (exit 2; no result)' });
+  });
+
+  it('a reason sent to the relay is a fixed sentence: error text (which can hold paths) stays in detail, for the local log', async () => {
+    const bin = script('claude-ok', `process.exit(0)`);
+    // A dist/ with no child entry, under a temp path: the reason never names it.
+    const r = await selfTest({ env: env(bin), dist: join(tmp, 'no-such-dist'), now, limitMs: 30_000 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^the (answerer|self-test) /);
+    expect(r.reason).not.toContain(tmp);
   });
 
   it('the plugin version comes from plugin.json beside dist/', () => {
@@ -275,6 +310,58 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     ac.abort();
     expect(await done).toBe('stopped');
     expect(Date.now() - t).toBeLessThan(2000);
+  });
+
+  it('connects and reports while the first self-test is still running ("has not run yet"), then reports its result', async () => {
+    const { hosts, make } = fakeHosts();
+    let finish!: (r: SelfTestResult) => void;
+    const ac = new AbortController();
+    const done = runDaemon({
+      env: env(),
+      log: (l) => logs.push(l),
+      dist: DIST,
+      version: '1',
+      signal: ac.signal,
+      makeHost: make,
+      selfTest: () => new Promise<SelfTestResult>((r) => (finish = r)),
+      facts,
+      intervals,
+    });
+    await waitFor(() => relay.memberStatus.get('bob'), 5_000, 'a status before the self-test ends');
+    expect(relay.memberStatus.get('bob')).toMatchObject({ self_test: { ok: false, reason: 'the self-test has not run yet' } });
+    expect(hosts[0]?.started).toBe(1);
+    finish(PASSED);
+    await waitFor(() => (relay.memberStatus.get('bob') as { self_test?: { ok?: boolean } }).self_test?.ok === true, 10_000, 'the self-test result in the status');
+    ac.abort();
+    expect(await done).toBe('stopped');
+  });
+
+  it('a folder macOS refuses (EPERM) is logged by kind and folder name only, and counted; other errors are not', async () => {
+    relay.setBoundaries({ topic: 'T', github_orgs: ['example-org'], drives: [{ domain: 'example.com', shared_drive: 'Team Drive' }], member_folders: true });
+    for (const d of ['Documents/code', 'work/repos', 'Desktop/notes']) mkdirSync(join(tmp, d), { recursive: true });
+    const e = env();
+    writeMemberSettings(memberFoldersPath(e), { teams: { demo: { repo_roots: ['~/Documents/code', '~/work/repos'], extra_folders: ['~/Desktop/notes'], accepted: null } } }, e);
+    const probed: string[] = [];
+    const refuse = (code: string, p: string) => Object.assign(new Error(`${code}: operation not permitted, scandir '${p}'`), { code });
+    const canRead = async (p: string) => {
+      probed.push(p);
+      if (p.endsWith('code') || p.endsWith('CloudStorage') || p.endsWith('notes')) throw refuse('EPERM', p);
+      throw refuse('ENOENT', p);
+    };
+    const { make } = fakeHosts();
+    const ac = new AbortController();
+    const done = runDaemon({ env: e, log: (l) => logs.push(l), dist: DIST, version: '1', signal: ac.signal, makeHost: make, selfTest: async () => PASSED, facts: { ...facts, canRead }, intervals: { ...intervals, factsMs: 100 } });
+    await waitFor(() => logs.filter((l) => l.includes('repo root "code"')).length >= 2, 10_000, 'two refusals of the same root');
+    ac.abort();
+    await done;
+    const refused = logs.filter((l) => l.startsWith('macOS refused'));
+    expect(refused).toContain('macOS refused the background answerer access to a repo root "code" (EPERM, 1 time so far): allow "node" when macOS asks, or in System Settings > Privacy & Security');
+    expect(refused.some((l) => l.includes('repo root "code" (EPERM, 2 times so far)'))).toBe(true);
+    expect(refused.some((l) => l.startsWith('macOS refused the background answerer access to the Google Drive folder (EPERM, 1 time'))).toBe(true);
+    expect(refused.some((l) => l.startsWith('macOS refused the background answerer access to a folder of your own "notes" (EPERM, 1 time'))).toBe(true);
+    expect(refused.some((l) => l.includes('repos'))).toBe(false);
+    for (const l of logs) expect(l).not.toContain(tmp);
+    expect(probed).toContain(join(tmp, 'Library', 'CloudStorage'));
   });
 
   it('the self-test runs at start, then on its interval', async () => {

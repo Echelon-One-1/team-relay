@@ -12,7 +12,7 @@ import type { Keychain } from '../src/google-drive.js';
 import type { LoginOptions } from '../src/login.js';
 import { memberFoldersPath, readTeamSettings } from '../src/member-folders.js';
 import { RelayClient } from '../src/relay-client.js';
-import { HELP, checklist, runSetup, type SetupDeps } from '../src/setup-cli.js';
+import { HELP, PRIVACY_DRIVE_NOTE, PRIVACY_FOLDERS_NOTE, checklist, runSetup, type SetupDeps } from '../src/setup-cli.js';
 import { FakeRelay, TOKEN_OF } from './helpers/fake-relay.js';
 
 let relay: FakeRelay;
@@ -183,6 +183,21 @@ describe('folders (M11-SPEC §5)', () => {
     expect(settings()).toMatchObject({ repo_roots: ['~/work/notes'], extra_folders: [] });
   });
 
+  it('a folder in Documents, Desktop, Downloads or iCloud Drive: it says macOS may ask to allow "node", once', async () => {
+    relay.setBoundaries(ORGS);
+    for (const d of ['Documents/code', 'Library/Mobile Documents/notes']) mkdirSync(join(home, d), { recursive: true });
+    const t = term(['~/Documents/code', '', join(home, 'Library', 'Mobile Documents', 'notes'), '']);
+    expect(await runSetup(['folders'], deps(t, { clones: async () => 1 }))).toBe(0);
+    const note = PRIVACY_FOLDERS_NOTE;
+    expect(note).toContain('"node"');
+    expect(note).toContain('click Allow');
+    expect(t.out.filter((l) => l === note)).toHaveLength(1);
+    // Elsewhere: not said.
+    const t2 = term(['n', '~/code/org', '', 'n', '']);
+    expect(await runSetup(['folders'], deps(t2, { clones: async () => 1 }))).toBe(0);
+    expect(t2.out).not.toContain(note);
+  });
+
   it('own folders are asked for only when the team allows them', async () => {
     relay.setBoundaries({ ...ORGS, member_folders: false });
     const t = term(['~/code/org', '']);
@@ -208,35 +223,45 @@ describe('drive (M11-SPEC §5)', () => {
     let ran: string[] | null = null;
     const drive = async (argv: string[]) => ((ran = argv), { exitCode: 0, line: 'Google Drive connected as someone@example.com (read-only).' });
     expect(await runSetup(['drive'], deps(t1, { platform: 'darwin', keychain: keychain('someone@example.com'), drive }))).toBe(0);
-    expect(t1.text()).toBe('Google Drive is already connected as someone@example.com.');
+    expect(t1.out).toEqual(['Google Drive is already connected as someone@example.com.', PRIVACY_DRIVE_NOTE]);
     expect(ran).toBeNull();
     const t2 = term();
     expect(await runSetup(['drive'], deps(t2, { platform: 'darwin', keychain: keychain(null), drive }))).toBe(0);
     expect(ran).toEqual(['connect']);
-    expect(t2.out.at(-1)).toBe('Google Drive connected as someone@example.com (read-only).');
+    expect(t2.out.slice(-2)).toEqual(['Google Drive connected as someone@example.com (read-only).', PRIVACY_DRIVE_NOTE]);
+    expect(PRIVACY_DRIVE_NOTE).toMatch(/Google Drive.*"node".*click Allow\.$/);
   });
 });
 
 describe('daemon install and uninstall (M11-SPEC §5)', () => {
+  const KEY = 'team-relay@market';
   let claude: string;
   let calls: string[][];
-  const exec: Exec = async (_file, args) => (calls.push(args), { code: args[0] === 'bootout' ? 3 : 0, stdout: '', stderr: '' });
+  // launchctl: bootout says not loaded, print says gone (113), bootstrap works.
+  const exec: Exec = async (_file, args) => (calls.push(args), { code: args[0] === 'bootout' ? 3 : args[0] === 'print' ? 113 : 0, stdout: '', stderr: '' });
+  const sleep = async () => {};
   beforeEach(() => {
     claude = join(tmp, 'claude');
     writeFileSync(claude, '#!/bin/sh\n');
     chmodSync(claude, 0o755);
     calls = [];
+    const plugin = join(tmp, 'plugin');
+    mkdirSync(join(plugin, 'dist'), { recursive: true });
+    writeFileSync(join(plugin, 'dist', 'daemon.js'), '');
+    mkdirSync(join(home, '.claude', 'plugins'), { recursive: true });
+    writeFileSync(join(home, '.claude', 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins: { [KEY]: [{ scope: 'user', installPath: plugin }] } }));
   });
 
-  it('installs the LaunchAgent for this user and starts it', async () => {
+  it('installs the LaunchAgent for this user, for the plugin installed under the key given, and starts it', async () => {
     const t = term();
-    expect(await runSetup(['daemon', 'install', '--claude', claude], deps(t, { platform: 'darwin', uid: 501, exec, node: process.execPath }))).toBe(0);
+    expect(await runSetup(['daemon', 'install', '--claude', claude, '--plugin', KEY], deps(t, { platform: 'darwin', uid: 501, exec, sleep, node: process.execPath }))).toBe(0);
     const plist = join(home, 'Library', 'LaunchAgents', 'com.team-relay.answerer.plist');
     expect(readFileSync(plist, 'utf8')).toContain(`<key>TEAM_RELAY_CLAUDE_BIN</key><string>${claude}</string>`);
     expect(readFileSync(plist, 'utf8')).toContain(`<key>XDG_CONFIG_HOME</key><string>${xdg}</string>`);
-    expect(existsSync(join(xdg, 'team-relay', 'daemon-launch.mjs'))).toBe(true);
+    expect(readFileSync(join(xdg, 'team-relay', 'daemon-launch.mjs'), 'utf8')).toContain(`const KEY = "${KEY}";`);
     expect(calls).toEqual([
       ['bootout', 'gui/501/com.team-relay.answerer'],
+      ['print', 'gui/501/com.team-relay.answerer'],
       ['bootstrap', 'gui/501', plist],
     ]);
     expect(t.text()).toContain('The background answerer is installed and started');
@@ -246,16 +271,22 @@ describe('daemon install and uninstall (M11-SPEC §5)', () => {
     expect(existsSync(plist)).toBe(false);
   });
 
-  it('needs --claude with an executable absolute path, and macOS', async () => {
+  it('needs --claude with an executable absolute path, --plugin with a key that is installed, and macOS', async () => {
     const t1 = term();
-    expect(await runSetup(['daemon', 'install'], deps(t1, { platform: 'darwin', uid: 501, exec }))).toBe(2);
+    expect(await runSetup(['daemon', 'install', '--plugin', KEY], deps(t1, { platform: 'darwin', uid: 501, exec, sleep }))).toBe(2);
     expect(t1.text()).toBe('daemon install needs --claude <the absolute path of claude>.');
+    const t1b = term();
+    expect(await runSetup(['daemon', 'install', '--claude', claude], deps(t1b, { platform: 'darwin', uid: 501, exec, sleep }))).toBe(2);
+    expect(t1b.text()).toBe('daemon install needs --plugin team-relay@<marketplace name>, the plugin as the setup command installed it.');
     const t2 = term();
-    expect(await runSetup(['daemon', 'install', '--claude', 'claude'], deps(t2, { platform: 'darwin', uid: 501, exec }))).toBe(1);
+    expect(await runSetup(['daemon', 'install', '--claude', 'claude', '--plugin', KEY], deps(t2, { platform: 'darwin', uid: 501, exec, sleep }))).toBe(1);
     expect(t2.text()).toBe('--claude claude cannot be used: it is not an absolute path');
     const t3 = term();
-    expect(await runSetup(['daemon', 'install', '--claude', claude], deps(t3, { platform: 'linux', uid: 501, exec }))).toBe(1);
+    expect(await runSetup(['daemon', 'install', '--claude', claude, '--plugin', KEY], deps(t3, { platform: 'linux', uid: 501, exec, sleep }))).toBe(1);
     expect(t3.text()).toBe('The background answerer runs on macOS only.');
+    const t4 = term();
+    expect(await runSetup(['daemon', 'install', '--claude', claude, '--plugin', 'team-relay@other'], deps(t4, { platform: 'darwin', uid: 501, exec, sleep }))).toBe(1);
+    expect(t4.text()).toContain('team-relay@other is not installed for this user');
     expect(calls).toEqual([]);
   });
 });
@@ -277,6 +308,11 @@ describe('status: the Join checklist (M11-SPEC §6)', () => {
     // No orgs and no drives: those steps need nothing.
     const bare = checklist({ status: { ...full, folders: { repo_roots: 0 }, drive: { connected: false } }, answering: true, acceptedVersion: 1, boundariesVersion: 1, orgs: 0, drives: 0, console: 'x' });
     expect(bare.map((s) => s.done)).toEqual([true, true, true, true, true, true, true]);
+    // Boundaries that could not be read: those two steps are not known, so never ticked.
+    const unknown = checklist({ status: { ...full, folders: { repo_roots: 0 }, drive: { connected: false } }, answering: true, acceptedVersion: 1, boundariesVersion: 1, orgs: null, drives: null, console: 'x' });
+    expect(unknown.map((s) => s.done)).toEqual([true, true, true, false, false, true, true]);
+    expect(unknown[3]!.todo).toBe("Not known: your team's boundaries could not be read from the relay just now; run status again in a minute.");
+    expect(unknown[4]!.todo).toBe(unknown[3]!.todo);
     const failed = checklist({ status: { ...full, self_test: { ok: false, reason: 'Claude Code is not signed in' } }, answering: true, acceptedVersion: 1, boundariesVersion: 1, orgs: 0, drives: 0, console: 'x' });
     expect(failed[6]).toMatchObject({ done: false, todo: 'The self-test failed: Claude Code is not signed in.' });
   });
@@ -302,5 +338,23 @@ describe('status: the Join checklist (M11-SPEC §6)', () => {
     await runSetup(['status'], deps(t2));
     expect(t2.out[0]).toBe('Setup for bob on team demo: 7 of 7 done.');
     expect(t2.out.at(-1)).toBe(`You're set up. Ask the team in the console: ${relay.url}`);
+  });
+
+  it('when the boundaries cannot be read, folders and Drive are shown as not known, never ticked', async () => {
+    relay.memberStatus.set('bob', { daemon: { version: '1', started_at: '2026-11-10T10:00:00.000Z' }, ...full, folders: { repo_roots: 0, clones: 0, extra_folders: 0 }, drive: { connected: false }, seen_at: new Date().toISOString() });
+    relay.acceptances.set('bob', 1);
+    relay.setBoundaries({ topic: 'T', github_orgs: [], drives: [], member_folders: false });
+    const unreadable = (): ReturnType<typeof bob> => {
+      const b = bob();
+      b.client.boundaries = async () => {
+        throw new Error('relay down');
+      };
+      return b;
+    };
+    const t = term();
+    expect(await runSetup(['status'], deps(t, { connect: async () => unreadable() }))).toBe(0);
+    expect(t.out[0]).toBe('Setup for bob on team demo: 5 of 7 done.');
+    expect(t.out[4]).toMatch(/^ {2}\[ \] Folders chosen - Not known: /);
+    expect(t.out[5]).toMatch(/^ {2}\[ \] Google Drive connected - Not known: /);
   });
 });

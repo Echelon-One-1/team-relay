@@ -89,6 +89,21 @@ describe('setupSteps (M11 §6)', () => {
     expect(failed[6]!.todo).toBe('The self-test failed (Claude Code is not signed in); fix that, then run the setup command again.')
   })
 
+  it('boundaries not read (still loading, or failed): folders and Drive are not known, never ticked', () => {
+    const bare = entry(status({ roots: 0, drive: false }))
+    for (const unread of [undefined, null]) {
+      const steps = setupSteps(bare, unread, 3, 3)
+      expect(done(steps)).toMatchObject({ folders: false, drive: false })
+      expect(steps[3]!.todo).toBe("Not known yet: the team's boundaries have not loaded.")
+      expect(steps[4]!.todo).toBe("Not known yet: the team's boundaries have not loaded.")
+    }
+    // Not even a Mac that reports folders and Drive ticks them while they are not known.
+    expect(done(setupSteps(entry(status()), undefined, 3, 3))).toMatchObject({ folders: false, drive: false })
+    // Read and never set: nothing to choose, nothing to connect.
+    const none: TeamBoundaries = { team: 'demo', version: 0, boundaries: null, since: null, updated_at: null, updated_by: null }
+    expect(done(setupSteps(bare, none, 0, 0))).toMatchObject({ folders: true, drive: true })
+  })
+
   it('boundaries never set: step 6 waits for an owner, and cannot tick', () => {
     const none: TeamBoundaries = { team: 'demo', version: 0, boundaries: null, since: null, updated_at: null, updated_by: null }
     const step = setupSteps(entry(status()), none, 0, 0)[5]!

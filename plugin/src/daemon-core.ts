@@ -13,16 +13,22 @@
 //   question or answer); a 429 is only logged.
 // - Self-test at start and every 6 h: `claude auth status` succeeds, and the M10 boundary-mode
 //   child starts with the real flags against a local host that denies every tool, offline, with
-//   a relay address that leads nowhere (answer-dry-run.ts): no relay traffic, no question.
+//   a relay address that leads nowhere (answer-dry-run.ts): no relay traffic, no question. The
+//   first one runs beside connecting, so the first status goes out at once ("has not run yet").
 // - Updates: once a minute it reads where the plugin is installed; when that changed it lets the
 //   current answer finish, releases the lock and returns 'updated' (dist/daemon.js exits 0 and
 //   launchd starts the new version).
+// - macOS privacy protection: each time the facts are recounted it lists each repo root (and own
+//   folder, and the Drive mount when the team has drives); one that macOS refuses (EPERM) is
+//   logged with its kind, its folder name only and how often so far. The status says nothing
+//   of it (the relay takes the status schema exactly).
 // - The log (DaemonLog) holds ids, counts and reasons, never a question, answer or file content.
 
 import { execFile } from 'node:child_process';
 import { accessSync, appendFileSync, chmodSync, constants, lstatSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { AnswerHost, type HostOptions } from './answer-host.js';
 import { NOWHERE_RELAY, disposeDryRun, executeDryRun, prepareDryRun } from './answer-dry-run.js';
 import type { MemberStatusBody } from './boundaries-types.js';
@@ -30,7 +36,7 @@ import { validBoundaries } from './boundary-set.js';
 import { countClones } from './clones.js';
 import { credentialFingerprint, credentialsPath } from './credentials.js';
 import { defaultKeychain } from './google-drive.js';
-import { memberFoldersPath, readTeamSettings } from './member-folders.js';
+import { expandPath, memberFoldersPath, readTeamSettings } from './member-folders.js';
 import { backoffDelay, RelayError, type RelayClient } from './relay-client.js';
 import { connectOnce, hostConnection, type ConnectAttempt } from './relay-connect.js';
 import { describeError } from './tool-util.js';
@@ -144,7 +150,11 @@ export async function claudeSignedIn(bin: string, env: NodeJS.ProcessEnv, run: R
   return (await run(bin, ['auth', 'status'], { env, timeoutMs: 30_000 })).code === 0;
 }
 
-export type SelfTestResult = { ok: boolean; at: string; reason: string | null };
+/**
+ * `reason` goes to the relay, where teammates see it (M11-SPEC §3, §8): a fixed sentence, never
+ * error text (which can carry paths). `detail` is the error text, for the local log only.
+ */
+export type SelfTestResult = { ok: boolean; at: string; reason: string | null; detail?: string };
 
 const SELF_TEST_QUESTION = 'Self-test of the background answerer: reply with the single word ok.';
 
@@ -184,7 +194,7 @@ export async function selfTest(o: {
       capabilities: false,
     });
   } catch (err) {
-    return { ok: false, at, reason: reason(`the answerer could not be prepared (${describeError(err)})`) };
+    return { ok: false, at, reason: 'the answerer could not be prepared', detail: describeError(err) };
   }
   try {
     const { result } = await executeDryRun(prepared, { offline: true, limitMs: o.limitMs ?? 120_000, ...(o.signal ? { signal: o.signal } : {}) });
@@ -193,7 +203,7 @@ export async function selfTest(o: {
     if (result.code === null && result.signal === null) return { ok: false, at, reason: 'the answerer could not be started' };
     return { ok: false, at, reason: `the answerer did not start (exit ${result.code ?? result.signal}; no result)` };
   } catch (err) {
-    return { ok: false, at, reason: reason(`the self-test failed (${describeError(err)})`) };
+    return { ok: false, at, reason: 'the self-test failed', detail: describeError(err) };
   } finally {
     await disposeDryRun(prepared);
   }
@@ -208,6 +218,8 @@ export type Facts = {
   claudeSignedIn: (bin: string) => Promise<boolean>;
   driveConnected: () => Promise<boolean>;
   clones: (roots: string[], orgs: string[]) => Promise<number>;
+  /** Lists a folder (resolves when it can be read); a refusal by macOS throws EPERM. */
+  canRead: (path: string) => Promise<unknown>;
 };
 
 export type DaemonOptions = {
@@ -242,6 +254,7 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
       return kc ? (await kc.account()) !== null : false;
     },
     clones: (roots, orgs) => countClones(roots, orgs, env),
+    canRead: (path) => readdir(path),
     ...o.facts,
   };
   const makeHost = o.makeHost ?? ((h: HostOptions) => new AnswerHost(h));
@@ -291,10 +304,10 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
       try {
         test = await runSelfTest(signal);
       } catch (err) {
-        test = { ok: false, at: new Date(now()).toISOString(), reason: reason(`the self-test could not run (${describeError(err)})`) };
+        test = { ok: false, at: new Date(now()).toISOString(), reason: 'the self-test could not run', detail: describeError(err) };
       }
       test = { ...test, reason: test.reason === null ? null : reason(test.reason) };
-      log(test.ok ? 'self-test passed' : `self-test failed: ${test.reason ?? 'no reason'}`);
+      log(test.ok ? 'self-test passed' : `self-test failed: ${test.reason ?? 'no reason'}${test.detail ? ` (${test.detail.slice(0, 500)})` : ''}`);
     })().finally(() => {
       testing = null;
     });
@@ -308,24 +321,54 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
   let clones = 0;
   let factsAt = Number.NEGATIVE_INFINITY;
   let factsKey = '';
-  const refreshFacts = async (client: RelayClient | null, folders: { repo_roots: string[] }) => {
+  // macOS privacy refusals so far, by what was refused (for the log only).
+  const refusals = new Map<string, number>();
+  const checkReadable = async (targets: Array<{ what: string; path: string }>) => {
+    for (const t of targets) {
+      try {
+        await facts.canRead(t.path);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException | null)?.code !== 'EPERM') continue;
+        const n = (refusals.get(t.what) ?? 0) + 1;
+        refusals.set(t.what, n);
+        log(`macOS refused the background answerer access to ${t.what} (EPERM, ${n} ${n === 1 ? 'time' : 'times'} so far): allow "node" when macOS asks, or in System Settings > Privacy & Security`);
+      }
+    }
+  };
+  const refreshFacts = async (client: RelayClient | null, folders: { repo_roots: string[]; extra_folders: string[] }) => {
     const bin = claudeBinFrom(env);
     let orgs: string[] = [];
+    let drives = 0;
+    let ownFolders = false;
     if (client) {
       try {
         const tb = await client.boundaries({ attempts: 1, timeoutMs: 15_000, signal });
-        if (validBoundaries(tb) && tb.boundaries) orgs = tb.boundaries.github_orgs;
+        if (validBoundaries(tb) && tb.boundaries) {
+          orgs = tb.boundaries.github_orgs;
+          drives = tb.boundaries.drives.length;
+          ownFolders = tb.boundaries.member_folders;
+        }
       } catch {
         // the clone count waits for the next look
       }
     }
-    const key = JSON.stringify([folders.repo_roots, orgs]);
+    const key = JSON.stringify([folders.repo_roots, folders.extra_folders, orgs, drives, ownFolders]);
     if (now() - factsAt < iv.factsMs && key === factsKey) return;
     factsAt = now();
     factsKey = key;
     signedIn = bin ? await facts.claudeSignedIn(bin).catch(() => false) : false;
     driveConnected = await facts.driveConnected().catch(() => false);
     clones = await facts.clones(folders.repo_roots, orgs).catch(() => 0);
+    // Only the folder's own name is ever logged, never the path to it.
+    const named = (what: string, raw: string) => {
+      const path = expandPath(raw, env);
+      return path ? [{ what: `${what} ${JSON.stringify(basename(path).slice(0, 80))}`, path }] : [];
+    };
+    await checkReadable([
+      ...(orgs.length > 0 ? folders.repo_roots.flatMap((r) => named('a repo root', r)) : []),
+      ...(ownFolders ? folders.extra_folders.flatMap((r) => named('a folder of your own', r)) : []),
+      ...(drives > 0 ? [{ what: 'the Google Drive folder', path: join(env.HOME?.trim() || homedir(), 'Library', 'CloudStorage') }] : []),
+    ]);
   };
 
   const folders = (team: string) => {
@@ -450,7 +493,9 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
   };
 
   try {
-    await doSelfTest();
+    // The first self-test runs beside connecting (it can take a while): until it ends the status
+    // says it has not run yet.
+    void doSelfTest();
     let refusedAt: string | null | undefined;
     let failures = 0;
     let said = '';

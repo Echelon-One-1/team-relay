@@ -81,6 +81,7 @@ def template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "example-org/team-relay",
         "a/b",
         "A1-b/repo.name_with-dots",
+        "owner/.dotfile",
         "o" * 39 + "/" + "r" * 100,
     ],
 )
@@ -105,6 +106,9 @@ def test_a_marketplace_is_owner_slash_repo(raw: str):
         "owner/repo\n",
         "https://github.com/owner/repo",
         "owner/répo",
+        "-owner/repo",
+        "owner/.",
+        "owner/..",
     ],
 )
 def test_a_malformed_marketplace_is_refused(raw: str):

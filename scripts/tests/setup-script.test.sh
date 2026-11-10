@@ -64,7 +64,8 @@ case "\$1" in
   *)
     shift
     IFS= read -r input || input=""
-    printf 'setup-cli %s <%s>\n' "\$*" "\$input" >>"$C/log" ;;
+    printf 'setup-cli %s <%s>\n' "\$*" "\$input" >>"$C/log"
+    if [ "\$1" = drive ] && [ -f "$C/state/drive-fails" ]; then echo "drive stub: did not connect"; exit 1; fi ;;
 esac
 EOF
   fi
@@ -88,8 +89,12 @@ case "\$*" in
     if [ -f "$C/state/installed" ]; then echo '[{"id":"team-relay@team-relay-dev"}]'; else echo '[]'; fi ;;
   "plugin install team-relay@team-relay-dev")
     : >"$C/state/installed"
-    printf '{"version":2,"plugins":{"team-relay@team-relay-dev":[{"scope":"user","installPath":"%s"}]}}' "$C/plugin" \
-      >"$C/home/.claude/plugins/installed_plugins.json" ;;
+    if [ -f "$C/state/installed-json" ]; then
+      /bin/cp "$C/state/installed-json" "$C/home/.claude/plugins/installed_plugins.json"
+    else
+      printf '{"version":2,"plugins":{"team-relay@team-relay-dev":[{"scope":"user","installPath":"%s"}]}}' "$C/plugin" \
+        >"$C/home/.claude/plugins/installed_plugins.json"
+    fi ;;
   "plugin update team-relay@team-relay-dev") ;;
   *) echo "claude stub: unexpected call: \$*" >&2; exit 3 ;;
 esac
@@ -181,7 +186,7 @@ new_case no-claude-yes "" no-claude
 printf 'y\n' >"$C/tty"
 run_case "$FILLED"
 if [[ "$STATUS" -eq 0 && "$LOG" == *"curl -fsSL https://claude.ai/install.sh"* \
-    && "$LOG" == *"setup-cli daemon install --claude $C/home/.local/bin/claude <y>"* ]]; then
+    && "$LOG" == *"setup-cli daemon install --claude $C/home/.local/bin/claude --plugin team-relay@team-relay-dev <y>"* ]]; then
   ok "claude missing, answer yes: official installer, then found in ~/.local/bin"
 else
   not_ok "claude missing, answer yes: official installer, then found in ~/.local/bin" "status=$STATUS
@@ -203,8 +208,8 @@ claude plugin list --json <>
 claude plugin install team-relay@team-relay-dev <>
 setup-cli login --relay ${RELAY} <TTY-MARK>
 setup-cli folders <TTY-MARK>
+setup-cli daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
 setup-cli drive <TTY-MARK>
-setup-cli daemon install --claude $C/bin/claude <TTY-MARK>
 setup-cli status <TTY-MARK>"
 if [[ "$STATUS" -eq 0 && "$LOG" == "$want_first" ]]; then
   ok "first run: signs in, adds the marketplace, installs, then runs setup-cli in order"
@@ -233,8 +238,8 @@ claude plugin list --json <>
 claude plugin update team-relay@team-relay-dev <>
 setup-cli login --relay ${RELAY} <TTY-MARK>
 setup-cli folders <TTY-MARK>
+setup-cli daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
 setup-cli drive <TTY-MARK>
-setup-cli daemon install --claude $C/bin/claude <TTY-MARK>
 setup-cli status <TTY-MARK>"
 if [[ "$STATUS" -eq 0 && "$LOG" == "$want_again" ]]; then
   ok "re-run: no new sign-in, refreshes the marketplace, updates the plugin"
@@ -252,6 +257,32 @@ new_case no-setup-cli
 rm "$C/plugin/dist/setup-cli.js"
 run_case "$FILLED"
 expect_stopped "plugin without setup-cli.js: stops with a clear message" "setup tool was not found"
+
+# ---------------------------------------------------------------- one rule for the plugin's place
+# Only the user-scope entry under exactly team-relay@<the marketplace it installed from>.
+new_case other-marketplace
+mkdir -p "$C/other/dist"
+: >"$C/other/dist/setup-cli.js"
+printf '{"version":2,"plugins":{"team-relay@team-relay-dev":[{"scope":"project","installPath":"%s"}],"team-relay@other":[{"scope":"user","installPath":"%s"}]}}' \
+  "$C/plugin" "$C/other" >"$C/state/installed-json"
+run_case "$FILLED"
+expect_stopped "only a project-scope install under its key: stops (never another scope or marketplace)" "setup tool was not found"
+check "only a project-scope install under its key: no setup-cli run" log_lacks "setup-cli"
+
+# ---------------------------------------------------------------- Drive does not stop the setup
+new_case drive-fails
+: >"$C/state/drive-fails"
+run_case "$FILLED"
+if [[ "$STATUS" -eq 0 && "$LOG" == *"setup-cli daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
+setup-cli drive <TTY-MARK>
+setup-cli status <TTY-MARK>" && "$OUT" == *"Google Drive is not connected yet"* && "$OUT" == *"run the same setup command again"* ]]; then
+  ok "a failed Drive step: the answerer is already installed, it says how to retry, and setup goes on to the status"
+else
+  not_ok "a failed Drive step: the answerer is already installed, it says how to retry, and setup goes on to the status" "status=$STATUS
+$OUT
+--- log
+$LOG"
+fi
 
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
 [[ "$failed" -eq 0 ]]

@@ -4,7 +4,9 @@
 //   login [--relay <url>]               the browser sign-in of M5 (skipped when signed in to that relay)
 //   folders                             choose the folders that hold your clones (asks on the terminal)
 //   drive                               connect Google Drive when the team has drives (M10 §2a)
-//   daemon install --claude <path>      write and load the background answerer's LaunchAgent
+//   daemon install --claude <path> --plugin team-relay@<marketplace>
+//                                       write and load the background answerer's LaunchAgent, for
+//                                       the plugin installed under exactly that key
 //   daemon uninstall                    stop and remove it
 //   status                              your setup checklist, as the relay sees it (M11 §6)
 //
@@ -12,6 +14,7 @@
 // work (the line says why); 2: usage.
 
 import { createReadStream, openSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { configDir } from './answering-lock.js';
 import type { TeamBoundaries } from './boundaries-types.js';
@@ -46,7 +49,8 @@ export const HELP = [
   '  login [--relay <url>]            sign in to the team relay in your browser',
   '  folders                          choose the folders that hold your clones of the team\'s repositories',
   '  drive                            connect Google Drive, when your team has shared drives',
-  '  daemon install --claude <path>   start answering teammates in the background (macOS)',
+  '  daemon install --claude <path> --plugin team-relay@<marketplace>',
+  '                                   start answering teammates in the background (macOS)',
   '  daemon uninstall                 stop answering in the background',
   '  status                           show your setup checklist',
 ].join('\n');
@@ -66,6 +70,8 @@ export type SetupDeps = {
   node?: string;
   /** Runs launchctl (tests: a fake). */
   exec?: Exec;
+  /** Waits between launchctl calls (tests: a fake). */
+  sleep?: (ms: number) => Promise<void>;
   startLogin?: (o: LoginOptions) => Promise<LoginFlow>;
   /** The relay client for the signed-in member (default: connectOnce). */
   connect?: () => Promise<{ client: RelayClient; member: string; team: string } | { error: string }>;
@@ -75,6 +81,25 @@ export type SetupDeps = {
 };
 
 const NOT_SIGNED_IN = 'Not signed in to the team relay: run `node setup-cli.js login` first.';
+
+// macOS privacy protection: a LaunchAgent's node may be refused (or macOS may ask the member)
+// for folders under these, and for the Drive mount (~/Library/CloudStorage).
+const PROTECTED_DIRS = ['Documents', 'Desktop', 'Downloads', join('Library', 'Mobile Documents')];
+export const PRIVACY_FOLDERS_NOTE =
+  'macOS protects Documents, Desktop, Downloads and iCloud Drive, so the first time the background answerer reads a folder there, macOS may ask whether "node" may access it: click Allow.';
+export const PRIVACY_DRIVE_NOTE = 'The first time the background answerer reads Google Drive, macOS may ask whether "node" may access it: click Allow.';
+
+/** Whether `raw` (as the member wrote it) resolves to a folder macOS protects. */
+function privacyProtected(raw: string, env: NodeJS.ProcessEnv): boolean {
+  const path = memberFolderProblem(raw, env).path ?? expandPath(raw, env);
+  if (!path) return false;
+  const home = homeDir(env);
+  const p = path.toLowerCase();
+  return PROTECTED_DIRS.some((d) => {
+    const dir = join(home, d).toLowerCase();
+    return p === dir || p.startsWith(`${dir}/`);
+  });
+}
 
 async function defaultConnect(env: NodeJS.ProcessEnv): Promise<{ client: RelayClient; member: string; team: string } | { error: string }> {
   const a = await connectOnce(env);
@@ -274,6 +299,8 @@ async function folders(d: SetupDeps): Promise<number> {
     return 1;
   }
   io.print(`Saved: ${roots.length} repo ${roots.length === 1 ? 'root' : 'roots'}${tb.boundaries.member_folders ? `, ${extra.length} own ${extra.length === 1 ? 'folder' : 'folders'}` : ''}. Your background answerer uses them from its next answer.`);
+  const used = tb.boundaries.member_folders ? [...roots, ...extra] : roots;
+  if (used.some((raw) => privacyProtected(raw, env))) io.print(PRIVACY_FOLDERS_NOTE);
   return 0;
 }
 
@@ -310,6 +337,7 @@ async function drive(d: SetupDeps): Promise<number> {
   }
   if (account) {
     io.print(`Google Drive is already connected as ${account}.`);
+    io.print(PRIVACY_DRIVE_NOTE);
     return 0;
   }
   io.print('Connecting Google Drive (read-only): sign in with your work Google account in the browser tab that opens.');
@@ -319,6 +347,7 @@ async function drive(d: SetupDeps): Promise<number> {
       runDriveCli(argv, { platform, keychain: kc, relay: () => ({ driveClient: () => client.driveClient(), boundaries: () => client.boundaries() }), log: (l) => io.print(`  ${l}`) }));
   const r = await run(['connect'], c.client, keychain);
   io.print(r.line);
+  if (r.exitCode === 0) io.print(PRIVACY_DRIVE_NOTE);
   return r.exitCode;
 }
 
@@ -333,8 +362,10 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
     return 2;
   }
   let claude: string | undefined;
+  let plugin: string | undefined;
   for (let i = 1; i < argv.length; i++) {
     if (sub === 'install' && argv[i] === '--claude' && argv[i + 1] !== undefined && claude === undefined) claude = argv[++i];
+    else if (sub === 'install' && argv[i] === '--plugin' && argv[i + 1] !== undefined && plugin === undefined) plugin = argv[++i];
     else {
       io.print(HELP);
       return 2;
@@ -357,6 +388,10 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
       io.print('daemon install needs --claude <the absolute path of claude>.');
       return 2;
     }
+    if (!plugin) {
+      io.print('daemon install needs --plugin team-relay@<marketplace name>, the plugin as the setup command installed it.');
+      return 2;
+    }
     const xdg = env.XDG_CONFIG_HOME?.trim();
     const r = await installAgent({
       home,
@@ -364,7 +399,9 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
       node: d.node ?? process.execPath,
       claude,
       uid,
+      pluginKey: plugin,
       ...(d.exec ? { exec: d.exec } : {}),
+      ...(d.sleep ? { sleep: d.sleep } : {}),
       ...(xdg && xdg.startsWith('/') ? { xdgConfigHome: xdg } : {}),
     });
     io.print(`The background answerer is installed and started (${r.plist}). It answers teammates while this Mac is on, without a Claude Code window.`);
@@ -379,14 +416,20 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
 
 export type Step = { done: boolean; title: string; todo: string };
 
-/** M11-SPEC §6: the seven steps, from the relay's view of this member. */
+const NOT_KNOWN = "Not known: your team's boundaries could not be read from the relay just now; run status again in a minute.";
+
+/**
+ * M11-SPEC §6: the seven steps, from the relay's view of this member. `orgs` and `drives`: how
+ * many the team's boundaries hold (0 also when none are set), null when they could not be read;
+ * "Folders chosen" and "Google Drive connected" need nothing only when that count is 0.
+ */
 export function checklist(p: {
   status: { claude?: { found?: unknown; signed_in?: unknown }; folders?: { repo_roots?: unknown }; drive?: { connected?: unknown }; self_test?: { ok?: unknown; reason?: unknown } } | null;
   answering: boolean;
   acceptedVersion: number;
   boundariesVersion: number;
-  orgs: number;
-  drives: number;
+  orgs: number | null;
+  drives: number | null;
   console: string;
 }): Step[] {
   const s = p.status;
@@ -400,11 +443,15 @@ export function checklist(p: {
     },
     { done: p.answering, title: 'Answering in the background', todo: 'Run the setup command again to start the background answerer, and keep this Mac on.' },
     {
-      done: p.orgs === 0 || (typeof s?.folders?.repo_roots === 'number' && s.folders.repo_roots > 0),
+      done: p.orgs !== null && (p.orgs === 0 || (typeof s?.folders?.repo_roots === 'number' && s.folders.repo_roots > 0)),
       title: 'Folders chosen',
-      todo: 'Choose the folders that hold your clones: node setup-cli.js folders.',
+      todo: p.orgs === null ? NOT_KNOWN : 'Choose the folders that hold your clones: node setup-cli.js folders.',
     },
-    { done: p.drives === 0 || s?.drive?.connected === true, title: 'Google Drive connected', todo: 'Connect Google Drive: node setup-cli.js drive.' },
+    {
+      done: p.drives !== null && (p.drives === 0 || s?.drive?.connected === true),
+      title: 'Google Drive connected',
+      todo: p.drives === null ? NOT_KNOWN : 'Connect Google Drive: node setup-cli.js drive.',
+    },
     {
       done: p.boundariesVersion > 0 && p.acceptedVersion === p.boundariesVersion,
       title: 'Boundaries accepted',
@@ -439,8 +486,9 @@ async function status(d: SetupDeps): Promise<number> {
     answering: entry?.answering === true,
     acceptedVersion: typeof acc.version === 'number' ? acc.version : 0,
     boundariesVersion: typeof ms.boundaries_version === 'number' ? ms.boundaries_version : 0,
-    orgs: tb?.boundaries?.github_orgs.length ?? 0,
-    drives: tb?.boundaries?.drives.length ?? 0,
+    // Not read: not known. Read with none set: nothing to choose.
+    orgs: tb ? (tb.boundaries?.github_orgs.length ?? 0) : null,
+    drives: tb ? (tb.boundaries?.drives.length ?? 0) : null,
     console: consoleUrl(c.client.url),
   });
   const done = steps.filter((s) => s.done).length;

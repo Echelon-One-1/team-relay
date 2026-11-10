@@ -92,18 +92,24 @@ process.exit(Array.isArray(list) && list.some((p) => p && p.id === process.argv[
 ' "$1"
 }
 
+# Where the plugin is installed: the first user-scope entry with an absolute installPath under
+# exactly $1 (team-relay@<marketplace name>) in installed_plugins.json, never another scope or
+# marketplace. The background answerer's launcher uses the same rule (plugin/src/daemon-launch.ts).
 install_path() {  # $1: plugin id
   "$NODE" -e '
 const fs = require("fs");
+const path = require("path");
 const id = process.argv[1];
-let entries = [];
+if (!/^team-relay@[A-Za-z0-9._-]{1,100}$/.test(id)) process.exit(0);
+let list = [];
 try {
   const j = JSON.parse(fs.readFileSync(process.env.HOME + "/.claude/plugins/installed_plugins.json", "utf8"));
-  entries = (j && j.plugins && j.plugins[id]) || [];
+  if (j && j.plugins && typeof j.plugins === "object" && Object.prototype.hasOwnProperty.call(j.plugins, id)) list = j.plugins[id];
 } catch {}
-if (!Array.isArray(entries)) entries = [entries];
-const pick = entries.find((e) => e && e.scope === "user") || entries[0];
-if (pick && typeof pick.installPath === "string") process.stdout.write(pick.installPath);
+const pick = Array.isArray(list)
+  ? list.find((e) => e && typeof e === "object" && e.scope === "user" && typeof e.installPath === "string" && path.isAbsolute(e.installPath))
+  : undefined;
+if (pick) process.stdout.write(pick.installPath);
 ' "$1" </dev/null 2>/dev/null || true
 }
 
@@ -118,7 +124,7 @@ main() {
   if [[ ! "$RELAY_URL" =~ ^https://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:[0-9]{1,5})?$ ]]; then
     stop "The relay address in this script does not look right. Ask your team's owner for the setup command."
   fi
-  if [[ ! "$MARKETPLACE" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$ ]]; then
+  if [[ ! "$MARKETPLACE" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$ || "${MARKETPLACE#*/}" == "." || "${MARKETPLACE#*/}" == ".." ]]; then
     stop "The plugin source in this script does not look right. Ask your team's owner for the setup command."
   fi
 
@@ -214,13 +220,17 @@ process.exit(s && s.loggedIn === true ? 0 : 1);
   fi
   local setup_cli="$plugin_dir/dist/setup-cli.js"
 
-  # ---------------------------------------------------------------- 4. sign-in, folders, Drive, background answering
+  # ---------------------------------------------------------------- 4. sign-in, folders, background answering, Drive
   step "4/5 Connecting you to the team"
   "$NODE" "$setup_cli" login --relay "$RELAY_URL" <"$TTY" || stop "Signing in to the team did not finish."
   "$NODE" "$setup_cli" folders <"$TTY" || stop "Choosing your folders did not finish."
-  "$NODE" "$setup_cli" drive <"$TTY" || stop "Connecting Google Drive did not finish."
-  "$NODE" "$setup_cli" daemon install --claude "$CLAUDE" <"$TTY" \
+  "$NODE" "$setup_cli" daemon install --claude "$CLAUDE" --plugin "$plugin_id" <"$TTY" \
     || stop "Starting the background answerer did not finish."
+  # Drive last: a cancelled or failed Drive sign-in leaves everything else working.
+  if ! "$NODE" "$setup_cli" drive <"$TTY"; then
+    say ""
+    say "Google Drive is not connected yet; the rest of the setup goes on. To connect Drive later, run the same setup command again."
+  fi
 
   # ---------------------------------------------------------------- 5. where things stand
   step "5/5 Checking everything"

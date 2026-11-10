@@ -377,16 +377,21 @@ holds its steps, and each can be run again:
 ```
 node dist/setup-cli.js login [--relay <url>]          # skipped when already signed in to that relay
 node dist/setup-cli.js folders                        # choose the folders that hold your clones
+node dist/setup-cli.js daemon install --claude <abs path of claude> --plugin team-relay@<marketplace>
 node dist/setup-cli.js drive                          # when the team has shared drives
-node dist/setup-cli.js daemon install --claude <abs path of claude>
 node dist/setup-cli.js daemon uninstall
 node dist/setup-cli.js status                         # your setup checklist
 ```
 
-`daemon install` writes `~/.config/team-relay/daemon-launch.mjs` (it finds the installed plugin
-in `~/.claude/plugins/installed_plugins.json` and starts its `dist/daemon.js`) and the per-user
-LaunchAgent `~/Library/LaunchAgents/com.team-relay.answerer.plist`, then loads it. Files are
-readable by you only.
+`daemon install` writes `~/.config/team-relay/daemon-launch.mjs` (at each start it finds the
+plugin installed for you under exactly that `team-relay@<marketplace>` key in
+`~/.claude/plugins/installed_plugins.json` and starts its `dist/daemon.js`) and the per-user
+LaunchAgent `~/Library/LaunchAgents/com.team-relay.answerer.plist`, then loads it. It refuses
+when nothing is installed under that key. Files are readable by you only.
+
+The first time the background answerer reads a folder in Documents, Desktop, Downloads, iCloud
+Drive or Google Drive, macOS may ask whether "node" may access it: click Allow. A refusal is
+written to the log.
 
 The background answerer:
 
@@ -397,7 +402,7 @@ The background answerer:
   computer does not read your inbox while it runs;
 - reports to the relay every minute only counts and yes/no facts (signed in, folders and
   clones found, Drive connected, self-test result), never a path, question or answer;
-- runs a self-test at start and every 6 hours, with no network;
+- runs a self-test at start and every 6 hours, with no network (the first one beside connecting);
 - writes `~/Library/Logs/team-relay/daemon.log` (yours only, 5 MB, one older file kept) with
   events and request ids, never question or answer text;
 - finishes its current answer and restarts when the plugin is updated; stops within 15 s of

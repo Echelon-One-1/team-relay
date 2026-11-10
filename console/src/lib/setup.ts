@@ -32,15 +32,20 @@ export function boundariesSet(bounds: TeamBoundaries | null | undefined): bounds
   return !!bounds && bounds.version > 0 && bounds.boundaries !== null
 }
 
+const NOT_KNOWN = "Not known yet: the team's boundaries have not loaded."
+
 /**
- * The seven steps of M11 §6, in order. `bounds` null: not known (or never set); a team with no
- * GitHub orgs ticks "Folders chosen", one with no drives "Google Drive connected".
+ * The seven steps of M11 §6, in order. `bounds` null or undefined: not read (loading, or the
+ * read failed), so "Folders chosen" and "Google Drive connected" are not known and never tick.
+ * Read: a team with no GitHub orgs (or no boundaries set) ticks "Folders chosen", one with no
+ * drives "Google Drive connected".
  */
 export function setupSteps(entry: MemberStatusEntry | null, bounds: TeamBoundaries | null | undefined, accepted: number, current: number): SetupStep[] {
   const s = entry?.status ?? null
   const b = boundariesSet(bounds) ? bounds.boundaries : null
-  const noOrgs = !b || b.github_orgs.length === 0
-  const noDrives = !b || b.drives.length === 0
+  const read = !!bounds
+  const noOrgs = read && (!b || b.github_orgs.length === 0)
+  const noDrives = read && (!b || b.drives.length === 0)
   const claudeOk = !!s && s.claude.found && s.claude.signed_in
   let claudeTodo = 'Runs once the setup command has started on your Mac.'
   if (s && !s.claude.found) claudeTodo = 'Install Claude Code, then run the setup command again.'
@@ -60,14 +65,16 @@ export function setupSteps(entry: MemberStatusEntry | null, bounds: TeamBoundari
     {
       id: 'folders',
       title: 'Folders chosen',
-      done: noOrgs || (!!s && s.folders.repo_roots > 0),
-      todo: `Run the setup command again and give the folders that hold your clones of ${b ? listWords(b.github_orgs) : "the team's GitHub orgs"}.`,
+      done: read && (noOrgs || (!!s && s.folders.repo_roots > 0)),
+      todo: read
+        ? `Run the setup command again and give the folders that hold your clones of ${b ? listWords(b.github_orgs) : "the team's GitHub orgs"}.`
+        : NOT_KNOWN,
     },
     {
       id: 'drive',
       title: 'Google Drive connected',
-      done: noDrives || (!!s && s.drive.connected),
-      todo: 'Run the setup command again and connect Google Drive when it asks.',
+      done: read && (noDrives || (!!s && s.drive.connected)),
+      todo: read ? 'Run the setup command again and connect Google Drive when it asks.' : NOT_KNOWN,
     },
     {
       id: 'boundaries',

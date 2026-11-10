@@ -86,6 +86,15 @@ if [[ -z "$ALLOWED" ]]; then
   fi
 fi
 
+# M10-SPEC §5: one public host serves the relay and the console. The run.app mode still deploys,
+# but members' one-command setup and the console links of M11 need that host.
+if [[ -z "${PUBLIC_HOST:-}" ]]; then
+  echo "warning: PUBLIC_HOST is not set, so the relay is deployed at its run.app URL only. Members'" >&2
+  echo "         one-command setup and the console links of M11 need the one public host that" >&2
+  echo "         serves the relay and the console (M10-SPEC §5): run scripts/deploy-lb.sh, then" >&2
+  echo "         deploy again with PUBLIC_HOST set." >&2
+fi
+
 # M11-SPEC §5: where the setup script installs the plugin from, checked before anything is built.
 MARKETPLACE_RE='^[A-Za-z0-9]([A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$'
 MARKETPLACE="${PLUGIN_MARKETPLACE:-}"

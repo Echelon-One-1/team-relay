@@ -36,9 +36,14 @@ without a Claude session around it:
 - Every 60 s it sends its status (§3). It writes ids, counts and reasons to
   `~/Library/Logs/team-relay/daemon.log` (mode 600, rotated at 5 MB, one old file kept), never a
   question, answer or file content.
-- Once a minute it checks the installed plugin path (§5). When it has changed (the plugin was
-  updated), the daemon finishes the current run, releases the lock and exits 0; launchd starts
-  the new version.
+- Once a minute it checks the installed plugin path (§5), under the key the launcher hands it
+  (`TEAM_RELAY_PLUGIN_KEY`). When it has changed (the plugin was updated), the daemon finishes
+  the current run, releases the lock and exits 0; launchd starts the new version.
+- macOS privacy protection may refuse a LaunchAgent's `node` folders under `~/Documents`,
+  `~/Desktop`, `~/Downloads`, `~/Library/Mobile Documents` and `~/Library/CloudStorage` (or ask
+  the member first). When it recounts its facts (§3) the daemon lists each repo root, own folder
+  and, for a team with drives, the Drive mount; an EPERM is logged with the kind of folder, its
+  own name only and how many times so far. The status schema does not change.
 - SIGTERM: stop taking work, end the running child, release the lock, exit within 15 s.
 - Desktop notifications as M8 (`TEAM_RELAY_DESKTOP_NOTIFY=0` turns them off).
 
@@ -76,7 +81,11 @@ when the member leaves the roster.
   "boundaries_version": int}`. `answering` is `seen_at` within the last 180 s.
 - `self_test` is the daemon's check at start and every 6 h: `claude auth status` succeeds and the
   M10 child starts with the real flags against a local host that denies every tool (as
-  `answer-dry-run --run`), with no relay traffic and no question content.
+  `answer-dry-run --run --offline`: the API at a closed local port, `CLAUDE_CODE_MAX_RETRIES=0`
+  and `API_TIMEOUT_MS=5000`, so the refused request fails in about a second instead of
+  minutes of retries), with no relay traffic and no question content. The first one runs beside
+  connecting; until it ends the status says `{ok: false, reason: "the self-test has not run yet"}`.
+  `reason` is a fixed sentence (error text, which can hold paths, stays in the local log).
 
 ## 4. Asking from the console (relay + console)
 
@@ -111,26 +120,44 @@ The script (bash 3.2, `set -euo pipefail`, macOS only, never `sudo`, re-runnable
 3. `claude plugin marketplace add __MARKETPLACE__` (skipped when present), then
    `claude plugin install team-relay@<marketplace name>`, or `claude plugin update` when installed.
 4. Finds the install path in `~/.claude/plugins/installed_plugins.json` and from there runs
-   `node <path>/dist/setup-cli.js` for the rest:
+   `node <path>/dist/setup-cli.js` for the rest. One rule finds the plugin everywhere (here, the
+   install check, the launcher, the daemon's update check): the first user-scope entry with an
+   absolute `installPath` under exactly the key it installed, `team-relay@<marketplace name>`;
+   never another scope or another marketplace's copy. In this order:
    - `login`: the browser sign-in of M5 against `__RELAY_URL__` (team chosen in the browser);
      skipped when a valid sign-in for this relay exists.
    - `folders`: shows the team's GitHub orgs and asks for the folders that hold those clones
      (one per line, empty line ends; `~` allowed; each must exist, not be `/` or `$HOME`); shows
      how many clones it found in each. Extra folders only when the team allows them. Re-running
-     shows the current list and lets the member keep or replace it.
-   - `drive`: when the team has drives, connects Google Drive (M10's Drive sign-in) unless
-     connected.
-   - `daemon install`: writes `~/Library/LaunchAgents/<label>.plist` (label
+     shows the current list and lets the member keep or replace it. When a chosen folder is under
+     `~/Documents`, `~/Desktop`, `~/Downloads` or `~/Library/Mobile Documents`, one sentence says
+     macOS may ask to allow "node" the first time the background answerer reads it: click Allow.
+   - `daemon install --claude <path> --plugin team-relay@<marketplace name>`: first checks that
+     the launcher would find `dist/daemon.js` under that key (else it stops, saying so, and
+     writes nothing). Writes `~/Library/LaunchAgents/<label>.plist` (label
      `com.team-relay.answerer`) running the absolute node path with
-     `~/.config/team-relay/daemon-launch.mjs`, which reads the install path from
-     `installed_plugins.json` at each start and imports `dist/daemon.js` from it. `RunAtLoad`,
-     `KeepAlive`, `ThrottleInterval 30`, environment `TEAM_RELAY_CLAUDE_BIN`, `HOME`, a PATH of
-     node's and claude's folders plus `/usr/bin:/bin`. Then `launchctl bootout` (if loaded) and
-     `launchctl bootstrap gui/<uid>`. Files mode 600, folders 700.
-   - `status`: prints the checklist of §6 from the relay's view.
+     `~/.config/team-relay/daemon-launch.mjs`, which holds the key, reads the install path under
+     it from `installed_plugins.json` at each start and imports `dist/daemon.js` from it.
+     `RunAtLoad`, `KeepAlive`, `ThrottleInterval 30`, environment `TEAM_RELAY_CLAUDE_BIN`, `HOME`,
+     a PATH of node's and claude's folders plus `/usr/bin:/bin`. Then `launchctl bootout` (if
+     loaded), a wait (up to 20 s) until `launchctl print gui/<uid>/<label>` no longer finds it,
+     and `launchctl bootstrap gui/<uid>`, tried up to 3 more times 2 s apart when it fails. Files
+     mode 600, folders 700.
+   - `drive`: when the team has drives, connects Google Drive (M10's Drive sign-in) unless
+     connected, and says macOS may ask to allow "node" for Google Drive. Last of the steps that
+     change things: a failed or cancelled Drive sign-in does not stop the setup; it says to run
+     the same setup command again to connect Drive, and goes on.
+   - `status`: prints the checklist of §6 from the relay's view. "Folders chosen" and "Google
+     Drive connected" need nothing only when the boundaries were read and hold no orgs (or no
+     drives); boundaries that could not be read leave both not known, never ticked (the console
+     too).
 5. Ends with the console URL and "open it to accept the boundaries".
 
 `setup-cli.js daemon uninstall` removes the agent; `setup-cli.js` with no command prints help.
+
+The console is at the relay's origin: one public host serves both (M10-SPEC §5), so the setup
+command and the console links are that host; a relay deployed at its run.app URL only (no
+`PUBLIC_HOST`) has no setup command, and `scripts/deploy.sh` warns so.
 
 ## 6. Guided join (console)
 

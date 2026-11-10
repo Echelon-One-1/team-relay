@@ -15613,8 +15613,9 @@ import { fileURLToPath as fileURLToPath4 } from "node:url";
 // src/daemon-core.ts
 import { execFile as execFile7 } from "node:child_process";
 import { accessSync as accessSync2, appendFileSync, chmodSync as chmodSync6, constants as constants3, lstatSync as lstatSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync10, renameSync as renameSync6, statSync as statSync4 } from "node:fs";
+import { readdir } from "node:fs/promises";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname6, isAbsolute as isAbsolute10, join as join16 } from "node:path";
+import { basename as basename7, dirname as dirname6, isAbsolute as isAbsolute10, join as join16 } from "node:path";
 
 // src/answer-host.ts
 import { randomUUID } from "node:crypto";
@@ -26988,6 +26989,9 @@ async function closedPort() {
   await new Promise((r) => s.close(() => r()));
   return port;
 }
+function offlineEnv(port) {
+  return { ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, CLAUDE_CODE_MAX_RETRIES: "0", API_TIMEOUT_MS: "5000" };
+}
 function prepareDryRun(i) {
   const scope = scopeFolder(i.cwd, i.env);
   const socket = new HostSocket();
@@ -27062,7 +27066,7 @@ async function executeDryRun(p, o) {
     throw new Error(`unknown method ${method}`);
   });
   const runEnv = { ...plan.env };
-  if (o.offline) runEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await closedPort()}`;
+  if (o.offline) Object.assign(runEnv, offlineEnv(await closedPort()));
   const result = await runChild({
     bin: plan.bin,
     args: plan.args,
@@ -27302,7 +27306,7 @@ async function selfTest(o) {
       capabilities: false
     });
   } catch (err) {
-    return { ok: false, at, reason: reason(`the answerer could not be prepared (${describeError(err)})`) };
+    return { ok: false, at, reason: "the answerer could not be prepared", detail: describeError(err) };
   }
   try {
     const { result } = await executeDryRun(prepared, { offline: true, limitMs: o.limitMs ?? 12e4, ...o.signal ? { signal: o.signal } : {} });
@@ -27311,7 +27315,7 @@ async function selfTest(o) {
     if (result.code === null && result.signal === null) return { ok: false, at, reason: "the answerer could not be started" };
     return { ok: false, at, reason: `the answerer did not start (exit ${result.code ?? result.signal}; no result)` };
   } catch (err) {
-    return { ok: false, at, reason: reason(`the self-test failed (${describeError(err)})`) };
+    return { ok: false, at, reason: "the self-test failed", detail: describeError(err) };
   } finally {
     await disposeDryRun(prepared);
   }
@@ -27330,6 +27334,7 @@ async function runDaemon(o) {
       return kc ? await kc.account() !== null : false;
     },
     clones: (roots, orgs) => countClones(roots, orgs, env2),
+    canRead: (path) => readdir(path),
     ...o.facts
   };
   const makeHost = o.makeHost ?? ((h) => new AnswerHost(h));
@@ -27372,10 +27377,10 @@ async function runDaemon(o) {
       try {
         test = await runSelfTest(signal);
       } catch (err) {
-        test = { ok: false, at: new Date(now()).toISOString(), reason: reason(`the self-test could not run (${describeError(err)})`) };
+        test = { ok: false, at: new Date(now()).toISOString(), reason: "the self-test could not run", detail: describeError(err) };
       }
       test = { ...test, reason: test.reason === null ? null : reason(test.reason) };
-      log2(test.ok ? "self-test passed" : `self-test failed: ${test.reason ?? "no reason"}`);
+      log2(test.ok ? "self-test passed" : `self-test failed: ${test.reason ?? "no reason"}${test.detail ? ` (${test.detail.slice(0, 500)})` : ""}`);
     })().finally(() => {
       testing = null;
     });
@@ -27387,23 +27392,51 @@ async function runDaemon(o) {
   let clones = 0;
   let factsAt = Number.NEGATIVE_INFINITY;
   let factsKey = "";
+  const refusals = /* @__PURE__ */ new Map();
+  const checkReadable = async (targets) => {
+    for (const t of targets) {
+      try {
+        await facts.canRead(t.path);
+      } catch (err) {
+        if (err?.code !== "EPERM") continue;
+        const n = (refusals.get(t.what) ?? 0) + 1;
+        refusals.set(t.what, n);
+        log2(`macOS refused the background answerer access to ${t.what} (EPERM, ${n} ${n === 1 ? "time" : "times"} so far): allow "node" when macOS asks, or in System Settings > Privacy & Security`);
+      }
+    }
+  };
   const refreshFacts = async (client, folders2) => {
     const bin = claudeBinFrom(env2);
     let orgs = [];
+    let drives = 0;
+    let ownFolders = false;
     if (client) {
       try {
         const tb = await client.boundaries({ attempts: 1, timeoutMs: 15e3, signal });
-        if (validBoundaries(tb) && tb.boundaries) orgs = tb.boundaries.github_orgs;
+        if (validBoundaries(tb) && tb.boundaries) {
+          orgs = tb.boundaries.github_orgs;
+          drives = tb.boundaries.drives.length;
+          ownFolders = tb.boundaries.member_folders;
+        }
       } catch {
       }
     }
-    const key = JSON.stringify([folders2.repo_roots, orgs]);
+    const key = JSON.stringify([folders2.repo_roots, folders2.extra_folders, orgs, drives, ownFolders]);
     if (now() - factsAt < iv.factsMs && key === factsKey) return;
     factsAt = now();
     factsKey = key;
     signedIn = bin ? await facts.claudeSignedIn(bin).catch(() => false) : false;
     driveConnected = await facts.driveConnected().catch(() => false);
     clones = await facts.clones(folders2.repo_roots, orgs).catch(() => 0);
+    const named = (what, raw) => {
+      const path = expandPath(raw, env2);
+      return path ? [{ what: `${what} ${JSON.stringify(basename7(path).slice(0, 80))}`, path }] : [];
+    };
+    await checkReadable([
+      ...orgs.length > 0 ? folders2.repo_roots.flatMap((r) => named("a repo root", r)) : [],
+      ...ownFolders ? folders2.extra_folders.flatMap((r) => named("a folder of your own", r)) : [],
+      ...drives > 0 ? [{ what: "the Google Drive folder", path: join16(env2.HOME?.trim() || homedir7(), "Library", "CloudStorage") }] : []
+    ]);
   };
   const folders = (team) => {
     try {
@@ -27522,7 +27555,7 @@ async function runDaemon(o) {
     }
   };
   try {
-    await doSelfTest();
+    void doSelfTest();
     let refusedAt;
     let failures = 0;
     let said = "";
@@ -27582,35 +27615,26 @@ function pluginVersion(dist2) {
 
 // src/daemon-launch.ts
 import { accessSync as accessSync3, chmodSync as chmodSync7, closeSync as closeSync5, constants as constants4, fsyncSync as fsyncSync3, lstatSync as lstatSync4, mkdirSync as mkdirSync8, openSync as openSync5, readFileSync as readFileSync11, renameSync as renameSync7, rmSync as rmSync10, statSync as statSync5, writeSync as writeSync4 } from "node:fs";
-import { basename as basename7, dirname as dirname7, isAbsolute as isAbsolute11, join as join17 } from "node:path";
-var PLUGIN_NAME = "team-relay";
+import { basename as basename8, dirname as dirname7, isAbsolute as isAbsolute11, join as join17 } from "node:path";
+var PLUGIN_KEY_RE = /^team-relay@[A-Za-z0-9._-]{1,100}$/;
+var PLUGIN_KEY_ENV = "TEAM_RELAY_PLUGIN_KEY";
 function installedPluginsPath(home2) {
   return join17(home2, ".claude", "plugins", "installed_plugins.json");
 }
 var isObj4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-function pickPluginEntry(json) {
-  if (!isObj4(json) || !isObj4(json.plugins)) return null;
-  let best = null;
-  for (const key of Object.keys(json.plugins).sort()) {
-    if (!key.startsWith(`${PLUGIN_NAME}@`)) continue;
-    const list = json.plugins[key];
-    if (!Array.isArray(list)) continue;
-    for (const e2 of list) {
-      if (!isObj4(e2) || e2.scope !== "user" || typeof e2.installPath !== "string" || !isAbsolute11(e2.installPath)) continue;
-      const updated = typeof e2.lastUpdated === "string" ? e2.lastUpdated : "";
-      const bestUpdated = best && typeof best.e.lastUpdated === "string" ? best.e.lastUpdated : "";
-      if (!best || updated > bestUpdated) best = { key, e: e2 };
-    }
-  }
-  if (!best) return null;
-  const e = best.e;
+function pickPluginEntry(json, key) {
+  if (!PLUGIN_KEY_RE.test(key) || !isObj4(json) || !isObj4(json.plugins) || !Object.prototype.hasOwnProperty.call(json.plugins, key)) return null;
+  const list = json.plugins[key];
+  if (!Array.isArray(list)) return null;
+  const e = list.find((x) => isObj4(x) && x.scope === "user" && typeof x.installPath === "string" && isAbsolute11(x.installPath));
+  if (!e) return null;
   const path = e.installPath;
   const str2 = (v) => typeof v === "string" ? v : "";
-  return { key: best.key, installPath: path, identity: [path, str2(e.gitCommitSha), str2(e.lastUpdated), str2(e.version)].join("\n") };
+  return { key, installPath: path, identity: [path, str2(e.gitCommitSha), str2(e.lastUpdated), str2(e.version)].join("\n") };
 }
-function readInstalledPlugin(home2) {
+function readInstalledPlugin(home2, key) {
   try {
-    return pickPluginEntry(JSON.parse(readFileSync11(installedPluginsPath(home2), "utf8")));
+    return pickPluginEntry(JSON.parse(readFileSync11(installedPluginsPath(home2), "utf8")), key);
   } catch {
     return null;
   }
@@ -27636,6 +27660,9 @@ process.on("unhandledRejection", (err) => {
   process.exit(1);
 });
 var version = pluginVersion(dist);
+var keyGiven = env[PLUGIN_KEY_ENV]?.trim() ?? "";
+var pluginKey = PLUGIN_KEY_RE.test(keyGiven) ? keyGiven : null;
+if (!pluginKey) log("not started by the launcher (no plugin key): updates of the plugin are not watched");
 log(`starting the background answerer (version ${version}, pid ${process.pid})`);
 runDaemon({
   env,
@@ -27643,7 +27670,8 @@ runDaemon({
   dist,
   version,
   signal: controller.signal,
-  installedIdentity: () => readInstalledPlugin(homeDir(env))?.identity ?? null
+  // The launcher's key (daemon-launch.ts): the update check reads that install only.
+  ...pluginKey ? { installedIdentity: () => readInstalledPlugin(homeDir(env), pluginKey)?.identity ?? null } : {}
 }).then(
   (outcome) => {
     log(outcome === "updated" ? "exiting: the plugin was updated" : "stopped");

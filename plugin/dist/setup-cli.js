@@ -15653,6 +15653,7 @@ var init_relay_client = __esm({
 
 // src/setup-cli.ts
 import { createReadStream, openSync as openSync4 } from "node:fs";
+import { join as join9 } from "node:path";
 import { createInterface } from "node:readline";
 
 // src/answering-lock.ts
@@ -16259,30 +16260,46 @@ import { basename as basename5, dirname as dirname5, isAbsolute as isAbsolute5, 
 var AGENT_LABEL = "com.team-relay.answerer";
 var LAUNCHER_FILE = "daemon-launch.mjs";
 var LAUNCHCTL = "/bin/launchctl";
-var PLUGIN_NAME = "team-relay";
-function launcherSource() {
+var PLUGIN_KEY_RE = /^team-relay@[A-Za-z0-9._-]{1,100}$/;
+var PLUGIN_KEY_ENV = "TEAM_RELAY_PLUGIN_KEY";
+function installedPluginsPath(home2) {
+  return join7(home2, ".claude", "plugins", "installed_plugins.json");
+}
+var isObj4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+function pickPluginEntry(json, key) {
+  if (!PLUGIN_KEY_RE.test(key) || !isObj4(json) || !isObj4(json.plugins) || !Object.prototype.hasOwnProperty.call(json.plugins, key)) return null;
+  const list = json.plugins[key];
+  if (!Array.isArray(list)) return null;
+  const e = list.find((x) => isObj4(x) && x.scope === "user" && typeof x.installPath === "string" && isAbsolute5(x.installPath));
+  if (!e) return null;
+  const path = e.installPath;
+  const str = (v) => typeof v === "string" ? v : "";
+  return { key, installPath: path, identity: [path, str(e.gitCommitSha), str(e.lastUpdated), str(e.version)].join("\n") };
+}
+function readInstalledPlugin(home2, key) {
+  try {
+    return pickPluginEntry(JSON.parse(readFileSync5(installedPluginsPath(home2), "utf8")), key);
+  } catch {
+    return null;
+  }
+}
+function launcherSource(key) {
+  if (!PLUGIN_KEY_RE.test(key)) throw new AgentError(`--plugin ${key} cannot be used: it must be team-relay@<marketplace name>`);
   return `// The team relay's background answerer (written by setup-cli.js daemon install).
-// At each start it finds where the team-relay plugin is installed now and runs its dist/daemon.js.
+// At each start it finds where the team-relay plugin is installed now, under the key setup
+// installed it with, and runs its dist/daemon.js.
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+const KEY = ${JSON.stringify(key)};
 const home = process.env.HOME;
 function pick(json) {
   if (!json || typeof json !== 'object' || !json.plugins || typeof json.plugins !== 'object' || Array.isArray(json.plugins)) return null;
-  let best = null;
-  for (const key of Object.keys(json.plugins).sort()) {
-    if (!key.startsWith('${PLUGIN_NAME}@')) continue;
-    const list = json.plugins[key];
-    if (!Array.isArray(list)) continue;
-    for (const e of list) {
-      if (!e || typeof e !== 'object' || e.scope !== 'user' || typeof e.installPath !== 'string' || !isAbsolute(e.installPath)) continue;
-      const updated = typeof e.lastUpdated === 'string' ? e.lastUpdated : '';
-      const bestUpdated = best && typeof best.lastUpdated === 'string' ? best.lastUpdated : '';
-      if (!best || updated > bestUpdated) best = e;
-    }
-  }
-  return best;
+  if (!Object.prototype.hasOwnProperty.call(json.plugins, KEY)) return null;
+  const list = json.plugins[KEY];
+  if (!Array.isArray(list)) return null;
+  return list.find((e) => e && typeof e === 'object' && !Array.isArray(e) && e.scope === 'user' && typeof e.installPath === 'string' && isAbsolute(e.installPath)) ?? null;
 }
 let entry = null;
 try {
@@ -16294,6 +16311,7 @@ if (!entry) {
   process.stderr.write('team-relay: the plugin is not installed for this user; nothing to run\\n');
   process.exit(1);
 }
+process.env.${PLUGIN_KEY_ENV} = KEY;
 await import(pathToFileURL(join(entry.installPath, 'dist', 'daemon.js')).href);
 `;
 }
@@ -16395,22 +16413,48 @@ function writePrivate(path, text) {
     throw err instanceof AgentError ? err : new AgentError(`cannot write ${path} (${err.code ?? "error"})`);
   }
 }
+var BOOTOUT_WAIT_MS = 2e4;
+var BOOTOUT_POLL_MS = 500;
+var BOOTSTRAP_RETRIES = 3;
+var BOOTSTRAP_RETRY_MS = 2e3;
+var realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function installAgent(i) {
   const exec = i.exec ?? defaultExec;
+  const sleep = i.sleep ?? realSleep;
   if (!isAbsolute5(i.home)) throw new AgentError("HOME is not an absolute path");
   if (!isAbsolute5(i.node)) throw new AgentError("the node path is not absolute");
   const bad = claudeProblem(i.claude);
   if (bad) throw new AgentError(`--claude ${i.claude} cannot be used: ${bad}`);
   if (!Number.isInteger(i.uid) || i.uid < 0) throw new AgentError("the user id is unknown");
+  const source = launcherSource(i.pluginKey);
+  const entry = readInstalledPlugin(i.home, i.pluginKey);
+  if (!entry) throw new AgentError(`${i.pluginKey} is not installed for this user (claude plugin install ${i.pluginKey}), so the background answerer would have nothing to run.`);
+  let hasDaemon = false;
+  try {
+    hasDaemon = statSync2(join7(entry.installPath, "dist", "daemon.js")).isFile();
+  } catch {
+    hasDaemon = false;
+  }
+  if (!hasDaemon) throw new AgentError(`${i.pluginKey} is installed, but without dist/daemon.js: update it (claude plugin update ${i.pluginKey}) and run this again.`);
   ensureDir2(i.configDir);
   const launcher = launcherPath(i.configDir);
-  writePrivate(launcher, launcherSource());
+  writePrivate(launcher, source);
   const plist = agentPlistPath(i.home);
   ensureDir2(dirname5(plist));
   writePrivate(plist, plistXml({ node: i.node, launcher, claude: i.claude, home: i.home, ...i.xdgConfigHome ? { xdgConfigHome: i.xdgConfigHome } : {} }));
-  await exec(LAUNCHCTL, ["bootout", `gui/${i.uid}/${AGENT_LABEL}`]);
-  const r = await exec(LAUNCHCTL, ["bootstrap", `gui/${i.uid}`, plist]);
-  if (r.code !== 0) throw new AgentError(`launchctl bootstrap failed (exit ${r.code ?? "unknown"}): ${r.stderr.trim().slice(0, 200) || "no reason given"}`);
+  const target = `gui/${i.uid}/${AGENT_LABEL}`;
+  await exec(LAUNCHCTL, ["bootout", target]);
+  for (let waited = 0; ; waited += BOOTOUT_POLL_MS) {
+    if ((await exec(LAUNCHCTL, ["print", target])).code !== 0) break;
+    if (waited >= BOOTOUT_WAIT_MS) break;
+    await sleep(BOOTOUT_POLL_MS);
+  }
+  for (let attempt = 0; ; attempt++) {
+    const r = await exec(LAUNCHCTL, ["bootstrap", `gui/${i.uid}`, plist]);
+    if (r.code === 0) break;
+    if (attempt >= BOOTSTRAP_RETRIES) throw new AgentError(`launchctl bootstrap failed (exit ${r.code ?? "unknown"}): ${r.stderr.trim().slice(0, 200) || "no reason given"}`);
+    await sleep(BOOTSTRAP_RETRY_MS);
+  }
   return { plist, launcher };
 }
 async function uninstallAgent(i) {
@@ -17380,11 +17424,25 @@ var HELP = [
   "  login [--relay <url>]            sign in to the team relay in your browser",
   "  folders                          choose the folders that hold your clones of the team's repositories",
   "  drive                            connect Google Drive, when your team has shared drives",
-  "  daemon install --claude <path>   start answering teammates in the background (macOS)",
+  "  daemon install --claude <path> --plugin team-relay@<marketplace>",
+  "                                   start answering teammates in the background (macOS)",
   "  daemon uninstall                 stop answering in the background",
   "  status                           show your setup checklist"
 ].join("\n");
 var NOT_SIGNED_IN = "Not signed in to the team relay: run `node setup-cli.js login` first.";
+var PROTECTED_DIRS = ["Documents", "Desktop", "Downloads", join9("Library", "Mobile Documents")];
+var PRIVACY_FOLDERS_NOTE = 'macOS protects Documents, Desktop, Downloads and iCloud Drive, so the first time the background answerer reads a folder there, macOS may ask whether "node" may access it: click Allow.';
+var PRIVACY_DRIVE_NOTE = 'The first time the background answerer reads Google Drive, macOS may ask whether "node" may access it: click Allow.';
+function privacyProtected(raw, env) {
+  const path = memberFolderProblem(raw, env).path ?? expandPath(raw, env);
+  if (!path) return false;
+  const home2 = homeDir(env);
+  const p = path.toLowerCase();
+  return PROTECTED_DIRS.some((d) => {
+    const dir = join9(home2, d).toLowerCase();
+    return p === dir || p.startsWith(`${dir}/`);
+  });
+}
 async function defaultConnect(env) {
   const a = await connectOnce(env);
   if (a.kind === "connected") return { client: a.client, member: a.me.member, team: a.me.team };
@@ -17568,6 +17626,8 @@ async function folders(d) {
     return 1;
   }
   io.print(`Saved: ${roots.length} repo ${roots.length === 1 ? "root" : "roots"}${tb.boundaries.member_folders ? `, ${extra.length} own ${extra.length === 1 ? "folder" : "folders"}` : ""}. Your background answerer uses them from its next answer.`);
+  const used = tb.boundaries.member_folders ? [...roots, ...extra] : roots;
+  if (used.some((raw) => privacyProtected(raw, env))) io.print(PRIVACY_FOLDERS_NOTE);
   return 0;
 }
 async function drive(d) {
@@ -17601,12 +17661,14 @@ async function drive(d) {
   }
   if (account) {
     io.print(`Google Drive is already connected as ${account}.`);
+    io.print(PRIVACY_DRIVE_NOTE);
     return 0;
   }
   io.print("Connecting Google Drive (read-only): sign in with your work Google account in the browser tab that opens.");
   const run = d.drive ?? ((argv, client, kc) => runDriveCli(argv, { platform, keychain: kc, relay: () => ({ driveClient: () => client.driveClient(), boundaries: () => client.boundaries() }), log: (l) => io.print(`  ${l}`) }));
   const r = await run(["connect"], c.client, keychain);
   io.print(r.line);
+  if (r.exitCode === 0) io.print(PRIVACY_DRIVE_NOTE);
   return r.exitCode;
 }
 async function daemon(argv, d) {
@@ -17618,8 +17680,10 @@ async function daemon(argv, d) {
     return 2;
   }
   let claude;
+  let plugin;
   for (let i = 1; i < argv.length; i++) {
     if (sub === "install" && argv[i] === "--claude" && argv[i + 1] !== void 0 && claude === void 0) claude = argv[++i];
+    else if (sub === "install" && argv[i] === "--plugin" && argv[i + 1] !== void 0 && plugin === void 0) plugin = argv[++i];
     else {
       io.print(HELP);
       return 2;
@@ -17642,6 +17706,10 @@ async function daemon(argv, d) {
       io.print("daemon install needs --claude <the absolute path of claude>.");
       return 2;
     }
+    if (!plugin) {
+      io.print("daemon install needs --plugin team-relay@<marketplace name>, the plugin as the setup command installed it.");
+      return 2;
+    }
     const xdg = env.XDG_CONFIG_HOME?.trim();
     const r = await installAgent({
       home: home2,
@@ -17649,7 +17717,9 @@ async function daemon(argv, d) {
       node: d.node ?? process.execPath,
       claude,
       uid: uid3,
+      pluginKey: plugin,
       ...d.exec ? { exec: d.exec } : {},
+      ...d.sleep ? { sleep: d.sleep } : {},
       ...xdg && xdg.startsWith("/") ? { xdgConfigHome: xdg } : {}
     });
     io.print(`The background answerer is installed and started (${r.plist}). It answers teammates while this Mac is on, without a Claude Code window.`);
@@ -17659,6 +17729,7 @@ async function daemon(argv, d) {
     return 1;
   }
 }
+var NOT_KNOWN = "Not known: your team's boundaries could not be read from the relay just now; run status again in a minute.";
 function checklist(p) {
   const s = p.status;
   const reason = typeof s?.self_test?.reason === "string" && s.self_test.reason ? s.self_test.reason : null;
@@ -17671,11 +17742,15 @@ function checklist(p) {
     },
     { done: p.answering, title: "Answering in the background", todo: "Run the setup command again to start the background answerer, and keep this Mac on." },
     {
-      done: p.orgs === 0 || typeof s?.folders?.repo_roots === "number" && s.folders.repo_roots > 0,
+      done: p.orgs !== null && (p.orgs === 0 || typeof s?.folders?.repo_roots === "number" && s.folders.repo_roots > 0),
       title: "Folders chosen",
-      todo: "Choose the folders that hold your clones: node setup-cli.js folders."
+      todo: p.orgs === null ? NOT_KNOWN : "Choose the folders that hold your clones: node setup-cli.js folders."
     },
-    { done: p.drives === 0 || s?.drive?.connected === true, title: "Google Drive connected", todo: "Connect Google Drive: node setup-cli.js drive." },
+    {
+      done: p.drives !== null && (p.drives === 0 || s?.drive?.connected === true),
+      title: "Google Drive connected",
+      todo: p.drives === null ? NOT_KNOWN : "Connect Google Drive: node setup-cli.js drive."
+    },
     {
       done: p.boundariesVersion > 0 && p.acceptedVersion === p.boundariesVersion,
       title: "Boundaries accepted",
@@ -17709,8 +17784,9 @@ async function status(d) {
     answering: entry?.answering === true,
     acceptedVersion: typeof acc.version === "number" ? acc.version : 0,
     boundariesVersion: typeof ms.boundaries_version === "number" ? ms.boundaries_version : 0,
-    orgs: tb?.boundaries?.github_orgs.length ?? 0,
-    drives: tb?.boundaries?.drives.length ?? 0,
+    // Not read: not known. Read with none set: nothing to choose.
+    orgs: tb ? tb.boundaries?.github_orgs.length ?? 0 : null,
+    drives: tb ? tb.boundaries?.drives.length ?? 0 : null,
     console: consoleUrl(c.client.url)
   });
   const done = steps.filter((s) => s.done).length;
@@ -17789,6 +17865,8 @@ if (process.argv[1] && /setup-cli\.[jt]s$/.test(process.argv[1])) {
 }
 export {
   HELP,
+  PRIVACY_DRIVE_NOTE,
+  PRIVACY_FOLDERS_NOTE,
   checklist,
   runSetup
 };

@@ -23079,6 +23079,9 @@ async function closedPort() {
   await new Promise((r) => s.close(() => r()));
   return port;
 }
+function offlineEnv(port) {
+  return { ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`, CLAUDE_CODE_MAX_RETRIES: "0", API_TIMEOUT_MS: "5000" };
+}
 function prepareDryRun(i) {
   const scope = scopeFolder(i.cwd, i.env);
   const socket = new HostSocket();
@@ -23153,7 +23156,7 @@ async function executeDryRun(p, o) {
     throw new Error(`unknown method ${method}`);
   });
   const runEnv = { ...plan.env };
-  if (o.offline) runEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${await closedPort()}`;
+  if (o.offline) Object.assign(runEnv, offlineEnv(await closedPort()));
   const result = await runChild({
     bin: plan.bin,
     args: plan.args,
@@ -23224,5 +23227,6 @@ export {
   NOWHERE_RELAY,
   disposeDryRun,
   executeDryRun,
+  offlineEnv,
   prepareDryRun
 };

@@ -6,7 +6,7 @@
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DaemonLog, daemonLogPath, pluginVersion, runDaemon } from './daemon-core.js';
-import { readInstalledPlugin } from './daemon-launch.js';
+import { PLUGIN_KEY_ENV, PLUGIN_KEY_RE, readInstalledPlugin } from './daemon-launch.js';
 import { homeDir } from './boundary-set.js';
 import { describeError } from './tool-util.js';
 
@@ -33,6 +33,9 @@ process.on('unhandledRejection', (err) => {
 });
 
 const version = pluginVersion(dist);
+const keyGiven = env[PLUGIN_KEY_ENV]?.trim() ?? '';
+const pluginKey = PLUGIN_KEY_RE.test(keyGiven) ? keyGiven : null;
+if (!pluginKey) log('not started by the launcher (no plugin key): updates of the plugin are not watched');
 log(`starting the background answerer (version ${version}, pid ${process.pid})`);
 runDaemon({
   env,
@@ -40,7 +43,8 @@ runDaemon({
   dist,
   version,
   signal: controller.signal,
-  installedIdentity: () => readInstalledPlugin(homeDir(env))?.identity ?? null,
+  // The launcher's key (daemon-launch.ts): the update check reads that install only.
+  ...(pluginKey ? { installedIdentity: () => readInstalledPlugin(homeDir(env), pluginKey)?.identity ?? null } : {}),
 }).then(
   (outcome) => {
     log(outcome === 'updated' ? 'exiting: the plugin was updated' : 'stopped');
