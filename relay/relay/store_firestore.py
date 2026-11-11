@@ -127,7 +127,13 @@ from .store import (
     stamp_deliveries,
 )
 
+# A transaction aborted by contention on a read starts again (fresh transaction, short wait);
+# one aborted at commit is retried by the client library, which keeps its place in line
+# (``retry_transaction``). A fresh transaction for every commit retry lost that place, so under
+# contention one writer could lose round after round: twelve team creations at once by one
+# account failed (11 Nov 2026).
 _TXN_ATTEMPTS = 8
+_TXN_COMMIT_ATTEMPTS = 16
 _MAX_SCAN_PAGE = 250
 # One team listing reads team documents in pages of this many (seed teams are skipped).
 _TEAM_PAGE = 200
@@ -842,11 +848,11 @@ class FirestoreStore:
     # Transactions -------------------------------------------------------------------------
     async def _run[T](self, body: Callable[[AsyncTransaction], Awaitable[T]]) -> T:
         """Run ``body`` in a transaction, retrying contention (Aborted) from reads as well
-        as from the commit. Anything else, including an ApiError from a mutation
-        function, rolls back and propagates."""
+        as from the commit (the commit's in place, see ``_TXN_COMMIT_ATTEMPTS``). Anything
+        else, including an ApiError from a mutation function, rolls back and propagates."""
         wrapped = firestore.async_transactional(body)
         for attempt in range(_TXN_ATTEMPTS):
-            txn = self._db().transaction(max_attempts=1)
+            txn = self._db().transaction(max_attempts=_TXN_COMMIT_ATTEMPTS)
             try:
                 return await wrapped(txn)
             except (gexc.Aborted, ValueError) as exc:
