@@ -1,0 +1,187 @@
+/* The public sign-in page (docs/SIGNIN-PAGE.md). Self-hosted fonts, latin subset, SIL OFL
+   (licences beside them in relay/relay/static/welcome/fonts/). No scripts, no third parties. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url(/v1/login/fonts/inter-latin-wght-normal.woff2) format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Playfair Display';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400 900;
+  src: url(/v1/login/fonts/playfair-display-latin-wght-normal.woff2) format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Playfair Display';
+  font-style: italic;
+  font-display: swap;
+  font-weight: 400 900;
+  src: url(/v1/login/fonts/playfair-display-latin-wght-italic.woff2) format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Google Sans Code';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300 800;
+  src: url(/v1/login/fonts/google-sans-code-latin-wght-normal.woff2) format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+:root {
+  color-scheme: light;
+  --paper: #f9f7f2;
+  --ink: #35312f;
+  --ink-2: #5b5551;
+  --muted: #7a726a;
+  --rule: #dfd9cd;
+  --terracotta: #b7573a;
+  --band: #171716;
+  --band-ink: #f9f7f2;
+  --band-ink-2: #c9c0b4;
+  --band-rule: #34312d;
+  --band-accent: #e3a58c;
+  /* Google's own button colours (light theme) */
+  --g-bg: #ffffff;
+  --g-border: #747775;
+  --g-text: #1f1f1f;
+  --g-hover: rgba(31, 31, 31, 0.06);
+  --serif: 'Playfair Display', Georgia, serif;
+  --sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --mono: 'Google Sans Code', 'SF Mono', ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --paper: #141312;
+    --ink: #ece6dd;
+    --ink-2: #bcb3a8;
+    --muted: #978e84;
+    --rule: #34312d;
+    --terracotta: #d2714c;
+    --band: #0d0d0c;
+    --band-ink: #f2ede6;
+    --band-ink-2: #b3aa9f;
+    --band-rule: #2a2826;
+    /* Google's own button colours (dark theme) */
+    --g-bg: #131314;
+    --g-border: #8e918f;
+    --g-text: #e3e3e3;
+    --g-hover: rgba(227, 227, 227, 0.08);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  min-height: 100dvh;
+  overflow-x: hidden;
+}
+a { color: inherit; }
+:focus-visible { outline: 2px solid var(--terracotta); outline-offset: 3px; }
+
+.shell { display: grid; min-height: 100vh; min-height: 100dvh; grid-template-columns: minmax(0, 1fr); }
+/* A phone: the band is a short header, the sign-in side takes the rest. */
+@media (max-width: 899.98px) {
+  .shell { grid-template-rows: auto 1fr; }
+}
+@media (min-width: 900px) {
+  .shell { grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
+}
+
+/* ---------- the brand side: a short header on a phone, the full band from 900px ---------- */
+.brand {
+  position: relative; overflow: hidden;
+  background: var(--band); color: var(--band-ink);
+  padding: 20px 16px;
+  display: flex; flex-direction: column; justify-content: space-between; gap: 40px;
+}
+@media (min-width: 900px) { .brand { padding: 40px 48px 36px; } }
+.mark {
+  position: relative; margin: 0;
+  font-family: var(--serif); font-weight: 500; font-size: 20px; line-height: 1.2;
+  letter-spacing: -.005em; overflow-wrap: anywhere;
+}
+@media (min-width: 900px) { .mark { font-size: 26px; } }
+
+.strata {
+  position: absolute; inset: auto -10% -18% auto; width: 78%; max-width: 560px;
+  opacity: .9; pointer-events: none;
+}
+.strata path { fill: none; stroke: #b7573a; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.strata path:nth-child(3n) { stroke: #5a4a40; }
+
+.brand-body { position: relative; display: none; max-width: 30rem; }
+@media (min-width: 900px) { .brand-body { display: block; } }
+.eyebrow {
+  font-family: var(--mono); font-size: 12px; letter-spacing: .16em; text-transform: lowercase;
+  color: var(--band-ink-2); margin: 0 0 14px;
+}
+.brand h2 {
+  font-family: var(--serif); font-weight: 500; font-size: clamp(34px, 3.2vw, 46px);
+  line-height: 1.08; letter-spacing: -.01em; margin: 0 0 28px;
+}
+.brand h2 em { font-style: italic; color: var(--band-accent); }
+.steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 0; border-top: 1px solid var(--band-rule); }
+.steps li { display: grid; grid-template-columns: 44px 1fr; padding: 12px 0; border-bottom: 1px solid var(--band-rule); font-size: 14.5px; color: var(--band-ink-2); }
+.steps .n { font-family: var(--mono); font-size: 12.5px; color: var(--band-accent); letter-spacing: .08em; padding-top: 2px; }
+.brand-foot { position: relative; display: none; margin: 0; font-family: var(--mono); font-size: 11.5px; letter-spacing: .12em; color: var(--band-ink-2); text-transform: lowercase; }
+@media (min-width: 900px) { .brand-foot { display: block; } }
+
+/* ---------- the sign-in side ---------- */
+.main { display: flex; flex-direction: column; padding: 40px 16px 24px; }
+@media (min-width: 900px) { .main { padding: 40px 48px 28px; } }
+.sign {
+  flex: 1; width: 100%; max-width: 400px; margin: 0 auto;
+  display: flex; flex-direction: column; justify-content: center;
+}
+.wordmark { font-family: var(--serif); font-size: 15px; color: var(--ink-2); margin: 0 0 22px; overflow-wrap: anywhere; }
+.wordmark span { font-family: var(--sans); font-size: 13px; letter-spacing: .02em; }
+h1 {
+  font-family: var(--serif); font-weight: 500; font-size: clamp(34px, 6vw, 44px);
+  line-height: 1.05; letter-spacing: -.01em; margin: 0 0 14px;
+}
+.lede { font-size: 17px; line-height: 1.55; color: var(--ink-2); margin: 0 0 32px; }
+.lede b, .who b { color: var(--ink); font-weight: 500; }
+
+/* Google's standard "Sign in with Google" button: Roboto Medium 14px (where the device has it), 18px "G" */
+.gsi {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; height: 44px; padding: 0 16px;
+  background: var(--g-bg); color: var(--g-text);
+  border: 1px solid var(--g-border); border-radius: 22px;
+  font-family: 'Roboto', arial, sans-serif; font-weight: 500; font-size: 14px; letter-spacing: .25px;
+  cursor: pointer; position: relative; text-decoration: none;
+  transition: background-color .2s, box-shadow .2s;
+}
+.gsi::after { content: ''; position: absolute; inset: 0; border-radius: inherit; background: transparent; transition: background-color .2s; }
+.gsi:hover { box-shadow: 0 1px 2px 0 rgba(60,64,67,.30), 0 1px 3px 1px rgba(60,64,67,.15); }
+.gsi:hover::after { background: var(--g-hover); }
+.gsi svg { width: 18px; height: 18px; flex: none; }
+
+.who { margin: 18px 0 0; font-size: 14px; color: var(--ink-2); line-height: 1.5; }
+
+.foot {
+  width: 100%; max-width: 400px; margin: 40px auto 0;
+  font-size: 12.5px; line-height: 1.55; color: var(--muted);
+}
+.foot p { margin: 0; }
+.foot .lock { display: inline-flex; gap: 8px; align-items: flex-start; }
+.foot .lock svg { width: 14px; height: 14px; flex: none; margin-top: 2px; stroke: var(--muted); fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+@media (prefers-reduced-motion: reduce) {
+  .gsi, .gsi::after { transition: none; }
+}

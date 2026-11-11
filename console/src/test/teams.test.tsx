@@ -336,7 +336,8 @@ describe('the admin page (M9 §4)', () => {
     await user.click(switcher())
     await user.click(within(await screen.findByRole('dialog', { name: 'Your teams' })).getByText('Research'))
     await waitFor(() => expect(switcher()).toHaveTextContent('Research'))
-    expect(window.location.pathname).toBe('/')
+    // Back to a team: the team view's own path (docs/SIGNIN-PAGE.md).
+    expect(window.location.pathname).toBe('/team')
   })
 
   it('pages: Next asks for the page after the last id', async () => {

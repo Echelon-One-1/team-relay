@@ -154,7 +154,8 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect(doneOf().accept).toBe(true)
     await waitFor(() => expect(within(panel).getByText('1 of 2 done')).toBeInTheDocument())
     await user.click(tab('team'))
-    expect(window.location.pathname).toBe('/')
+    // The team view's own path (docs/SIGNIN-PAGE.md: / is the sign-in page on the hosted address).
+    expect(window.location.pathname).toBe('/team')
     await screen.findByRole('region', { name: 'Members' })
     expect(screen.queryByRole('region', { name: 'Accept what the team shares' })).toBeNull()
   })

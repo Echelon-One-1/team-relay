@@ -111,7 +111,9 @@ exception for the relay before using it; the deployment this was built for did (
   `scripts/deploy-lb.sh` (idempotent gcloud) when `PUBLIC_HOST` is set: a global external HTTPS load
   balancer, a reserved global static IP, a Google-managed certificate for `PUBLIC_HOST`, and two
   serverless NEGs. URL map: `/v1/*` and `/healthz` → relay backend (no IAP: the relay signs people in
-  itself); everything else → console backend with IAP (custom OAuth client, `IAP_ACCESS`). Both
+  itself); everything else → console backend with IAP (custom OAuth client, `IAP_ACCESS`).
+  (Correction, 11 Nov 2026: `/setup` (M11) and the public sign-in page at `/` and `/login` also go
+  to the relay; see [SIGNIN-PAGE.md](SIGNIN-PAGE.md).) Both
   Cloud Run services get ingress `internal-and-cloud-load-balancing`, so the `run.app` URLs answer
   nothing from outside. `RELAY_PUBLIC_URL` and the relay's audience become `https://PUBLIC_HOST`;
   the console server calls the relay through that address; login callback

@@ -26,6 +26,7 @@ asker polls `replies` or anyone reads a request.
 | `relay/member_state.py` | M11 §2, §3: the strict bodies of `PUT me/acceptance` and `PUT me/status`, and their JSON |
 | `relay/setup_script.py` | M11 §5: `RELAY_PLUGIN_MARKETPLACE`, and the setup script rendered once at start for `GET /setup` |
 | `relay/static/setup.sh` | M11 §5: the setup script's template (package data; written with the plugin) |
+| `relay/welcome.py`, `relay/static/welcome/` | the public sign-in page at `/` and `/login` ([docs/SIGNIN-PAGE.md](../docs/SIGNIN-PAGE.md)): template, stylesheet and fonts (package data, SIL OFL licences beside the fonts), rendered once at start with `RELAY_BRAND_NAME` |
 | `relay/store.py` | the store protocol: `create_request`, `mutate_request`, `set_cursor`, `count_quota`, `mutate_roster`, `mutate_login`, `redeem_code`, `create_team`, `delete_team`, `purge_team`, `set_boundaries`, `set_acceptance`, `set_member_status` and reads; `stamp_deliveries`, the one delivery-time rule both stores run (M2 §3.2); `monotonic_updated_at` (M2 §7.1) |
 | `relay/store_memory.py`, `relay/store_firestore.py` | the two stores; one contract suite covers both |
 | `relay/service.py` | the state machine, the sweep (§4), audit (§7), tool events, the activity feed and the directory's stats (M2 §3); store-agnostic |
@@ -73,6 +74,7 @@ points them at another copy (tests only).
 | `RELAY_DRIVE_CLIENT_FILE` | unset | M10-SPEC §2a: path to the Desktop OAuth client members connect Google Drive with: Google's downloaded JSON (`{"installed": {client_id, client_secret, …}}`) or a flat `{client_id, client_secret}`; on Cloud Run the optional mounted secret `team-relay-drive-client` (`/secrets/drive-oauth/client.json`). No setting or no file: `GET /drive-client` is `404 drive_not_configured`. A `"web"` client, an unreadable file, or the login's own client id is a startup error |
 | `RELAY_FORWARDED_FOR_HOPS` | `1`; required on Cloud Run when `RELAY_PUBLIC_URL` is not a `run.app` address | M10-SPEC §5: how many right-most `X-Forwarded-For` entries Google appends in front of the relay; the per-IP limits count the left-most of them. `1` when Cloud Run is reached directly (its front end's entry); `2` behind the external Application Load Balancer (the client's address, then the forwarding rule's). `1`, `2` or `3`. Check the `x_forwarded_for_hops` field of `login_started` on the live service |
 | `RELAY_ALLOWED_DOMAINS` | unset (any domain) | M10-SPEC §7.2: comma-separated lower-case domains, e.g. `example.com`; set it for any deployment meant for one organisation. When set, every Google identity needs a verified email whose domain is exactly one of them (a subdomain is not its parent) and an `hd` claim equal to that domain; see "Allowed domains" below. A malformed or empty entry, or a seed member or admin in the team file outside them, is a startup error |
+| `RELAY_BRAND_NAME` | unset (generic copy) | [docs/SIGNIN-PAGE.md](../docs/SIGNIN-PAGE.md): the name the public sign-in page shows (e.g. `Example Co`): 1 to 40 ASCII letters, digits, spaces and `& . , ' -`, not starting or ending with a space. Anything else is a startup error that does not quote the value; shown HTML-escaped |
 | `RELAY_PLUGIN_MARKETPLACE` | unset | M11-SPEC §5: the plugin's marketplace as a GitHub `owner/repo` (`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`), written into the setup script `GET /setup` serves. Malformed: a startup error; set with a `RELAY_PUBLIC_URL` that is not an `https` origin: a startup error. Unset (or `RELAY_PUBLIC_URL` unset, or no `relay/static/setup.sh` in the image): `/setup` is `404` |
 | `RELAY_AUTH_MODE` | `google` | `google` or `static`; `static` is refused when `K_SERVICE` is set |
 | `RELAY_AUDIENCE` | required for `google` | the accepted ID token audiences, comma-separated (on Cloud Run: gcloud's OAuth client id and the service URL); whitespace around an entry is dropped, an empty entry is a startup error |
@@ -693,6 +695,10 @@ The JSON matches `plugin/src/boundaries-types.ts` (`Acceptance`, `MemberStatusBo
 - `GET /setup` (no authentication, outside `/v1`) → the setup script with `__RELAY_URL__` and
   `__MARKETPLACE__` replaced, `text/x-shellscript; charset=utf-8`, `Cache-Control: no-store`;
   read once at start. See `RELAY_PLUGIN_MARKETPLACE`.
+- `GET /` and `GET /login` (no authentication, outside `/v1`) → the public sign-in page; its
+  stylesheet `GET /v1/login/welcome.css` and four fonts `GET /v1/login/fonts/<name>`. GET and
+  HEAD only (else `405`, `Allow: GET, HEAD`), static, no scripts; see
+  [docs/SIGNIN-PAGE.md](../docs/SIGNIN-PAGE.md).
 
 ## Google Drive's client (M10-SPEC §2a)
 
@@ -705,7 +711,9 @@ it is still only handed to members and never logged.
 ## One address with the console (M10-SPEC §5)
 
 At one public address (e.g. `https://team.example.com`) a load balancer sends `/v1/*` and
-`/healthz` to the relay and everything else to the console behind IAP. Nothing in the relay assumes a `run.app`
+`/healthz` to the relay and everything else to the console behind IAP. (Correction, 11 Nov 2026:
+`/setup` (M11) and the public sign-in page at `/` and `/login` also go to the relay; the console's
+team view moved to `/team`. See [docs/SIGNIN-PAGE.md](../docs/SIGNIN-PAGE.md).) Nothing in the relay assumes a `run.app`
 address: `RELAY_PUBLIC_URL` is the origin the login's redirect URI and the chooser's `Origin`
 check use, and `RELAY_AUDIENCE` lists every audience an ID token may carry (add the new
 address there if a caller mints tokens for it). The relay's only cookie, `trl`, is

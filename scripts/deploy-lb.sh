@@ -2,11 +2,17 @@
 # One address for the relay and the hosted console (docs/M10-SPEC.md §5): a global external
 # Application Load Balancer on a reserved static IP with a Google-managed certificate for
 # PUBLIC_HOST, two serverless NEGs (relay, console), and:
+#   https://PUBLIC_HOST/ and /login       -> the relay: the public sign-in page (docs/SIGNIN-PAGE.md),
+#                                            whose button leads to /start on the console
 #   https://PUBLIC_HOST/v1/*, /healthz, /setup -> the relay (no IAP: the relay signs people in
 #                                         itself; /setup is the public setup script, M11-SPEC §5)
-#   https://PUBLIC_HOST/ (everything else) -> the console (IAP, custom OAuth client, IAP_ACCESS)
+#   https://PUBLIC_HOST/<everything else>  -> the console (IAP, custom OAuth client, IAP_ACCESS):
+#                                            /start, /team, /join, /ask, /admin, /api/*, assets
 #   http://PUBLIC_HOST/*                 -> a redirect to https
 #   any other Host (the bare IP, ...)    -> a redirect to https://PUBLIC_HOST
+# The path matcher uses route rules (exact paths and one prefix, in priority order) and the map
+# carries tests, which Google checks on every import: a map that would send a path elsewhere is
+# refused before it takes effect.
 # Idempotent: every step checks first and prints `exists`, `created` or `updated`; a re-run
 # changes nothing that is already right. Nothing secret is written to a file that outlives the
 # run, and nothing secret is printed.
@@ -274,6 +280,8 @@ MAP_DIR="$(mktemp -d)"
 trap 'rm -rf "$MAP_DIR"' EXIT
 # Written as JSON, which `url-maps import` reads as the YAML it is.
 # The HTTPS map: the relay's paths, the console for the rest, other hosts redirected to ours.
+# Route rules, not path rules (a path matcher holds one kind or the other): "/" alone must go to
+# the relay while every other path without a rule goes to the console. The tests pin both sides.
 cat > "$MAP_DIR/${URL_MAP}.json" <<JSON
 {
   "name": "${URL_MAP}",
@@ -283,8 +291,24 @@ cat > "$MAP_DIR/${URL_MAP}.json" <<JSON
   "pathMatchers": [{
     "name": "team-relay",
     "defaultService": "${BACKEND_URL_PREFIX}/${CONSOLE_BACKEND}",
-    "pathRules": [{"paths": ["/v1/*", "/healthz", "/setup"], "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"}]
-  }]
+    "routeRules": [
+      {"priority": 1, "matchRules": [{"fullPathMatch": "/"}], "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"},
+      {"priority": 2, "matchRules": [{"fullPathMatch": "/login"}], "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"},
+      {"priority": 3, "matchRules": [{"prefixMatch": "/v1/"}], "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"},
+      {"priority": 4, "matchRules": [{"fullPathMatch": "/healthz"}], "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"},
+      {"priority": 5, "matchRules": [{"fullPathMatch": "/setup"}], "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"}
+    ]
+  }],
+  "tests": [
+    {"host": "${PUBLIC_HOST}", "path": "/", "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"},
+    {"host": "${PUBLIC_HOST}", "path": "/login", "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"},
+    {"host": "${PUBLIC_HOST}", "path": "/v1/health", "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"},
+    {"host": "${PUBLIC_HOST}", "path": "/setup", "service": "${BACKEND_URL_PREFIX}/${RELAY_BACKEND}"},
+    {"host": "${PUBLIC_HOST}", "path": "/start", "service": "${BACKEND_URL_PREFIX}/${CONSOLE_BACKEND}"},
+    {"host": "${PUBLIC_HOST}", "path": "/join", "service": "${BACKEND_URL_PREFIX}/${CONSOLE_BACKEND}"},
+    {"host": "${PUBLIC_HOST}", "path": "/team", "service": "${BACKEND_URL_PREFIX}/${CONSOLE_BACKEND}"},
+    {"host": "${PUBLIC_HOST}", "path": "/login/", "service": "${BACKEND_URL_PREFIX}/${CONSOLE_BACKEND}"}
+  ]
 }
 JSON
 # Port 80: every request to https, same host and path.
@@ -307,7 +331,7 @@ def tidy(v):
     if isinstance(v, list):
         return [tidy(x) for x in v]
     return v
-print(json.dumps(tidy({k: m.get(k) for k in ("defaultService", "defaultUrlRedirect", "hostRules", "pathMatchers")}), sort_keys=True))
+print(json.dumps(tidy({k: m.get(k) for k in ("defaultService", "defaultUrlRedirect", "hostRules", "pathMatchers", "tests")}), sort_keys=True))
 '
 }
 

@@ -35,6 +35,9 @@ same ``404`` (M9-SPEC §7.3).
 ``GET /setup`` (M11-SPEC §5) is unauthenticated and outside ``/v1``: the setup script, rendered
 at start (:mod:`relay.setup_script`); 404 when it is not configured.
 
+``GET /`` and ``GET /login`` (docs/SIGNIN-PAGE.md) are the public sign-in page, with its
+stylesheet and fonts under ``/v1/login/``: static, rendered at start (:mod:`relay.welcome`).
+
 A roster entry that is only invited (M9-SPEC §7.2) is not a member anywhere here: it never
 resolves a principal, a delegate's email or a credential.
 
@@ -102,6 +105,8 @@ from .teams import (
     parse_new_team,
     valid_team_id,
 )
+from .welcome import load_welcome
+from .welcome import mount as mount_welcome
 
 MAX_BODY_BYTES = 256 * 1024
 
@@ -262,6 +267,7 @@ def create_app(
     ``settings.oauth_client`` with Google's fixed endpoints. Tests pass a fake here, never
     through the environment. Without ``settings.public_url`` the login pages are 404."""
     manifests = ManifestValidator(settings.manifest_schema)
+    welcome = load_welcome(settings.brand_name)
     service = RelayService(settings.team_config, store, manifests, clock, poll_interval)
     verifier = verifier if verifier is not None else build_verifier(settings)
     config = settings.team_config
@@ -873,6 +879,9 @@ def create_app(
             )
 
         return await service._guarded(caller, "team.delete", None, work)
+
+    # docs/SIGNIN-PAGE.md: the public sign-in page; no authentication, the same for everyone.
+    mount_welcome(app, welcome)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, bool]:

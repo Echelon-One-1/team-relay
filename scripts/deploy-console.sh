@@ -146,7 +146,8 @@ done
 if [[ -n "${PUBLIC_HOST:-}" ]]; then
   # IAP's access list and OAuth client live on the backend service (scripts/deploy-lb.sh).
   echo
-  echo "Deployed ${SERVICE}: ${URL} (through the load balancer; IAP audience ${IAP_AUDIENCE})"
+  # docs/SIGNIN-PAGE.md: the address itself is the relay's sign-in page; the team view is /team.
+  echo "Deployed ${SERVICE}: ${URL}/team (through the load balancer; IAP audience ${IAP_AUDIENCE}; ${URL}/ is the sign-in page)"
   exit 0
 fi
 

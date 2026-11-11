@@ -20,6 +20,10 @@
 # then serves the one-command setup at https://PUBLIC_HOST/setup. It needs PUBLIC_HOST (the script
 # sends members to the console at the same address). Unset, /setup answers 404.
 #
+# BRAND_NAME (docs/SIGNIN-PAGE.md; 1 to 40 letters, digits, spaces and & . , ' -, e.g. Example Co)
+# becomes RELAY_BRAND_NAME: the public sign-in page at https://PUBLIC_HOST/ names it ("Use your
+# Example Co Google account"). Unset, the page says just "Team Relay" and "For team members."
+#
 # ALLOWED_DOMAINS (M10-SPEC §7.2; comma-separated lower-case domains, e.g. example.com) becomes
 # RELAY_ALLOWED_DOMAINS: the relay then refuses every Google account outside those domains, on
 # every route. Unset, any Google account can sign in and use the relay's API (create a team,
@@ -108,6 +112,16 @@ if [[ -n "$MARKETPLACE" ]]; then
     echo "       at the relay's address, which only the load balancer provides (scripts/deploy-lb.sh)" >&2
     exit 1
   fi
+fi
+
+# The sign-in page's brand, checked as the relay checks it (a value it refuses would stop the new
+# revision from starting). ASCII only: the check runs in the C locale.
+BRAND_RE="^[A-Za-z0-9&.,'-]([A-Za-z0-9 &.,'-]{0,38}[A-Za-z0-9&.,'-])?$"
+BRAND="${BRAND_NAME:-}"
+if [[ -n "$BRAND" ]] && ! (LC_ALL=C; [[ "$BRAND" =~ $BRAND_RE ]]); then
+  echo "error: BRAND_NAME must be 1 to 40 letters, digits, spaces and & . , ' - (such as Example Co)," >&2
+  echo "       not starting or ending with a space" >&2
+  exit 1
 fi
 
 if [[ -n "$(git status --porcelain -- relay schema)" ]]; then
@@ -206,6 +220,14 @@ else
   REMOVE_VARS+=(RELAY_PLUGIN_MARKETPLACE)
   SETUP_NOTE="no setup command"
 fi
+if [[ -n "$BRAND" ]]; then
+  ENV_VARS="${ENV_VARS};RELAY_BRAND_NAME=${BRAND}"
+  BRAND_NOTE="sign-in page for ${BRAND}"
+else
+  # Not configured: the sign-in page shows the generic copy.
+  REMOVE_VARS+=(RELAY_BRAND_NAME)
+  BRAND_NOTE="generic sign-in page"
+fi
 if [[ -n "$DRIVE_VERSION" ]]; then
   SECRETS="${SECRETS},/secrets/drive-oauth/client.json=${DRIVE_SECRET}:${DRIVE_VERSION}"
   ENV_VARS="${ENV_VARS};RELAY_DRIVE_CLIENT_FILE=/secrets/drive-oauth/client.json"
@@ -220,7 +242,7 @@ if [[ ${#REMOVE_VARS[@]} -gt 0 ]]; then
   REMOVE_FLAG=("--remove-env-vars=$(IFS=','; echo "${REMOVE_VARS[*]}")")
 fi
 
-echo "Deploying ${SERVICE} (${IMAGE_BY_DIGEST}, team config v${SECRET_VERSION}, oauth v${OAUTH_VERSION}, ${DRIVE_NOTE}, ${DOMAINS_NOTE}, ${SETUP_NOTE}, ingress ${INGRESS})"
+echo "Deploying ${SERVICE} (${IMAGE_BY_DIGEST}, team config v${SECRET_VERSION}, oauth v${OAUTH_VERSION}, ${DRIVE_NOTE}, ${DOMAINS_NOTE}, ${SETUP_NOTE}, ${BRAND_NOTE}, ingress ${INGRESS})"
 gcloud run deploy "$SERVICE" \
   --project="$PROJECT" \
   --region="$REGION" \

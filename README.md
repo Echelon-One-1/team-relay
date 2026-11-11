@@ -89,8 +89,8 @@ flowchart LR
 
 ## Joining a team
 
-On a Mac, the simple way: open your team's page (the link in your invitation), accept the
-invitation, and follow the card "Join in 2 minutes": open Terminal, paste the one setup line
+On a Mac, the simple way: open your team's page (the link in your invitation), click "Sign in
+with Google", accept the invitation, and follow the card "Join in 2 minutes": open Terminal, paste the one setup line
 it shows, answer its questions (it gets what it needs, Node.js included, and opens the Mac's
 own folder chooser), then click Accept on the page. The Setup page shows what is left in plain
 words. The steps below are the manual way, for developers and other systems.
@@ -224,10 +224,13 @@ in `plugin/relay.default.json`; teams on another relay start Claude Code with
 
 ## Deploying on your own domain
 
-One address, say `https://team.example.com`, serves both: `/v1/*` and `/healthz` go to the
-relay (which signs people in itself), everything else to the console behind IAP. A global
-external Application Load Balancer with a reserved static IP and a Google-managed
-certificate sits in front; both Cloud Run services take traffic only from it.
+One address, say `https://team.example.com`, serves both: `/` and `/login` (a public sign-in
+page), `/v1/*`, `/healthz` and `/setup` go to the relay (which signs people in itself),
+everything else to the console behind IAP. The sign-in page's button leads to `/start`, which
+takes a member to their Setup page until it is done and to Ask after that; the team view lives
+at `/team` ([sign-in page](docs/SIGNIN-PAGE.md)). A global external Application Load Balancer
+with a reserved static IP and a Google-managed certificate sits in front; both Cloud Run
+services take traffic only from it.
 
 1. **Settings.** In `config/deploy.local.env` set `PUBLIC_HOST=team.example.com`,
    `IAP_ACCESS` (who may pass IAP to the console: `domain:example.com`, `group:<email>` or
@@ -236,7 +239,10 @@ certificate sits in front; both Cloud Run services take traffic only from it.
    relay then refuses every Google account outside them, on every route). Without
    `ALLOWED_DOMAINS` any Google account can sign in and use the relay's API (create a team,
    for one); `deploy.sh` warns, and with `PUBLIC_HOST` set it stops unless you also set
-   `CONFIRM_OPEN_RELAY=1` to choose that on purpose.
+   `CONFIRM_OPEN_RELAY=1` to choose that on purpose. Optionally `BRAND_NAME="Example Co"`
+   (1 to 40 letters, digits, spaces and `& . , ' -`): the sign-in page then says "Use your
+   Example Co Google account" (`RELAY_BRAND_NAME` on the relay); unset, it says just "Team
+   Relay".
 2. **The Web OAuth client** (step 2 above) gets two redirect URIs:
    `https://team.example.com/v1/login/callback` (the relay's sign-in) and
    `https://iap.googleapis.com/v1/oauth/clientIds/<client id>:handleRedirect` (IAP). With a
@@ -281,7 +287,7 @@ changes nothing that is already right. Without `PUBLIC_HOST`, both services answ
 | [`plugin/`](plugin/README.md) | The Claude Code plugin: channel server (with the automatic answerer), capability server, manual answering-session launcher, local and hosted console server. |
 | `console/` | The console UI: React, Vite, TypeScript, Tailwind, shadcn/ui. It builds into `plugin/dist/console`. |
 | `schema/` | The capability manifest's JSON Schema. |
-| `docs/` | The contracts, milestone by milestone, with dated corrections: [M1](docs/M1-SPEC.md) (relay and channel), [M2](docs/M2-SPEC.md) (deploy, identity, console), [M3](docs/M3-SPEC.md) (hosted console), [M4](docs/M4-SPEC.md) (granted reads), [M5](docs/M5-SPEC.md) (install and sign in), [M6](docs/M6-SPEC.md) (members in the console), [M7](docs/M7-SPEC.md) (questions waiting), [M8](docs/M8-SPEC.md) (automatic answers within the folder), [M9](docs/M9-SPEC.md) (anyone can create a team), [M10](docs/M10-SPEC.md) (team boundaries, answers without dialogs, one address). |
+| `docs/` | The contracts, milestone by milestone, with dated corrections: [M1](docs/M1-SPEC.md) (relay and channel), [M2](docs/M2-SPEC.md) (deploy, identity, console), [M3](docs/M3-SPEC.md) (hosted console), [M4](docs/M4-SPEC.md) (granted reads), [M5](docs/M5-SPEC.md) (install and sign in), [M6](docs/M6-SPEC.md) (members in the console), [M7](docs/M7-SPEC.md) (questions waiting), [M8](docs/M8-SPEC.md) (automatic answers within the folder), [M9](docs/M9-SPEC.md) (anyone can create a team), [M10](docs/M10-SPEC.md) (team boundaries, answers without dialogs, one address), [M11](docs/M11-SPEC.md) (answering in the background, guided joining, asking from the browser), [the sign-in page](docs/SIGNIN-PAGE.md). |
 | `scripts/` | Emulator, tests, bootstrap, deploy (relay, console, load balancer) and smoke checks. |
 
 ## Development
@@ -329,4 +335,6 @@ Working end to end and deployed for a team of three. Known limits:
 
 ## License
 
-MIT: see [`LICENSE`](LICENSE). The plugin's manifest and the marketplace entry say so too.
+MIT: see [`LICENSE`](LICENSE). The plugin's manifest and the marketplace entry say so too. The
+sign-in page's fonts (Inter, Playfair Display, Google Sans Code) are under the SIL Open Font
+License; their licences sit beside them in `relay/relay/static/welcome/fonts/`.
