@@ -35,10 +35,30 @@
 // she can change them; she is a member of `ops`, so she reads them only); `research` and any
 // new team have none yet. A change needs the current version (else 409 version_conflict), as
 // on the relay. The directory's shares read as what each member can answer from.
+//
+// PICKERS-SPEC: the demo plays the relay's picked sources. `demo`'s boundaries hold a whole org,
+// one repository of another org, a whole shared drive, one folder of another shared drive and a
+// legacy drive matched by name (which can be kept or removed, never added: 400 legacy_drive).
+// Its owner reads the sources settings (the GitHub App configured, `google_picker` null: the
+// Picker never runs in the demo) and a fake GitHub listing (two installations and a suspended
+// one); anyone else is refused (403), as the relay refuses them. Members' statuses carry the
+// sources their Macs could not find, as item keys of the current boundaries: the owner sees
+// every member's, anyone else only their own.
 
 import { createHash } from 'node:crypto';
-import { nextSince } from './boundaries-rule.js';
-import type { Acceptance, Boundaries, MemberStatusEntry, MembersStatus, MyRequest, SetBoundariesBody, TeamBoundaries } from './boundaries-types.js';
+import { boundariesValid, knownItemKeys, legacyDrivesOk, nextSince, normaliseBoundaries } from './boundaries-rule.js';
+import type {
+  Acceptance,
+  Boundaries,
+  GithubListing,
+  MemberSources,
+  MemberStatusEntry,
+  MembersStatus,
+  MyRequest,
+  SetBoundariesBody,
+  SourcesConfig,
+  TeamBoundaries,
+} from './boundaries-types.js';
 import { defaultManifestPath } from './exposed.js';
 import { loadManifest, type Capability, type Manifest } from './manifest.js';
 
@@ -485,12 +505,64 @@ export type DemoTeamOptions = {
   boundaries?: { boundaries: Boundaries; version: number; updated_by: string };
 };
 
-/** M10-SPEC §1: the scripted demo team's boundaries (synthetic). */
+/** PICKERS-SPEC §2.1: the demo's shared drives and the picked folder (synthetic ids). */
+export const DEMO_DRIVE_ID = '0AExampleDriveId0PVA';
+export const DEMO_DELIVERY_DRIVE_ID = '0AExampleDeliveryPVA';
+export const DEMO_FOLDER_ID = '1ExampleFolderIdxxxxxxxxxxxxxxxxx';
+
+/** M10-SPEC §1 and PICKERS-SPEC §2.1: the scripted demo team's boundaries (synthetic). */
 export const DEMO_BOUNDARIES: Boundaries = {
   topic: 'Example Co: the orders and payments services, their runbooks, deploys and incidents, and how the team works.',
   github_orgs: ['example-org'],
-  drives: [{ domain: 'example.com', shared_drive: 'Example Team Drive' }],
+  github_repos: [{ org: 'example-labs', repo: 'api', id: 123456 }],
+  drive_folders: [
+    { domain: 'example.com', drive_id: DEMO_DRIVE_ID, folder_id: DEMO_DRIVE_ID, folder_name: 'Example Team Drive', drive_name: 'Example Team Drive' },
+    { domain: 'example.com', drive_id: DEMO_DELIVERY_DRIVE_ID, folder_id: DEMO_FOLDER_ID, folder_name: 'Clients', drive_name: 'Example Delivery Drive' },
+  ],
+  drives: [{ domain: 'example.com', shared_drive: 'Example Archive' }],
   member_folders: true,
+};
+
+/** PICKERS-SPEC §3.5: the demo relay's sources settings (the Picker never runs in the demo). */
+export const DEMO_SOURCES_CONFIG: SourcesConfig = {
+  github: { configured: true, install_url: 'https://github.com/apps/example-relay-sources/installations/new' },
+  google_picker: null,
+};
+
+/** PICKERS-SPEC §3.6: the demo relay's GitHub listing (synthetic), sorted as the relay sorts it. */
+const DEMO_GITHUB: Omit<GithubListing, 'fetched_at'> = {
+  installations: [
+    {
+      account: 'example-labs',
+      state: 'ok',
+      repository_selection: 'selected',
+      repos: [
+        { name: 'api', id: 123456, private: true, archived: false },
+        { name: 'ml-notebooks', id: 123457, private: false, archived: false },
+      ],
+      truncated: false,
+    },
+    {
+      account: 'example-org',
+      state: 'ok',
+      repository_selection: 'all',
+      repos: [
+        { name: 'old-site', id: 100104, private: false, archived: true },
+        { name: 'orders-service', id: 100101, private: true, archived: false },
+        { name: 'payments', id: 100102, private: true, archived: false },
+        { name: 'runbooks', id: 100103, private: true, archived: false },
+      ],
+      truncated: false,
+    },
+    { account: 'example-sandbox', state: 'suspended', repository_selection: 'all', repos: [], truncated: false },
+  ],
+};
+
+/** PICKERS-SPEC §3.3: what each scripted member's Mac could not find (item keys). */
+const DEMO_MISSING: Record<string, string[]> = {
+  alice: [`folder:${DEMO_FOLDER_ID}`],
+  bob: [],
+  carol: ['org:example-org', 'repo:example-labs/api'],
 };
 
 /** M6-SPEC §1: at most this many members per team. */
@@ -622,9 +694,17 @@ export class DemoTeam {
       self_test: { ok: o.selfOk ?? true, at: iso(now - 2 * 3_600_000), reason: o.reason ?? null },
       seen_at: iso(now - o.seenAgo),
     });
+    // PICKERS-SPEC §3.4: an owner sees every member's missing sources, anyone else only their
+    // own; each list is filtered against the current boundaries, as the relay filters it.
+    const owner = this.viewerRole() === 'owner';
+    const sources = (member: string, version: number): MemberSources | null => {
+      if (!owner && member !== this.viewer) return null;
+      const b = this.bounds.boundaries;
+      return { boundaries_version: version, missing: b ? knownItemKeys(b, DEMO_MISSING[member] ?? []) : [] };
+    };
     const entry = (member: string): MemberStatusEntry => {
       const accepted = member === this.viewer ? this.accepted.version : 0;
-      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted };
+      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted, sources: null };
       const s =
         member === 'bob'
           ? status({ seenAgo: 25_000 })
@@ -632,7 +712,9 @@ export class DemoTeam {
             ? status({ signedIn: false, roots: 0, clones: 0, selfOk: false, reason: 'Claude Code is not signed in.', seenAgo: 9 * 60_000 })
             : status({ drive: false, seenAgo: 40_000 });
       const version = member === 'bob' ? this.bounds.version : accepted;
-      return { member, status: s, answering: now - Date.parse(s.seen_at) < 180_000, accepted_version: version };
+      // carol's Mac last looked at the version before the current one (her daemon is behind).
+      const looked = member === 'carol' ? Math.max(0, this.bounds.version - 1) : this.bounds.version;
+      return { member, status: s, answering: now - Date.parse(s.seen_at) < 180_000, accepted_version: version, sources: sources(member, looked) };
     };
     return { members: active.map(entry), boundaries_version: this.bounds.version };
   }
@@ -702,22 +784,43 @@ export class DemoTeam {
     return structuredClone(this.bounds);
   }
 
-  /** PUT /v1/teams/{team}/boundaries (M10-SPEC §1): owners, at the current version. */
+  /**
+   * PUT /v1/teams/{team}/boundaries (M10-SPEC §1, PICKERS-SPEC §3.2): owners, at the current
+   * version; a legacy drive the stored document does not hold is 400 legacy_drive. Stored as the
+   * relay stores it (normaliseBoundaries), with `since` by PICKERS-SPEC §2.3.
+   */
   setBoundaries(body: SetBoundariesBody): TeamBoundaries {
     if (this.viewerRole() !== 'owner') throw new RosterRefusal(403, 'forbidden', 'Only team owners can set the boundaries.');
+    if (!boundariesValid(body.boundaries)) throw new RosterRefusal(400, 'invalid_body', 'The boundaries do not pass the rule.');
+    if (!legacyDrivesOk(this.bounds.boundaries?.drives ?? null, body.boundaries.drives)) {
+      throw new RosterRefusal(400, 'legacy_drive', 'Pick shared-drive folders instead of typing drive names.');
+    }
     if (body.version !== this.bounds.version) {
       throw new RosterRefusal(409, 'version_conflict', 'The boundaries changed since you read them. Read them again.');
     }
     const version = this.bounds.version + 1;
+    const stored = normaliseBoundaries(body.boundaries);
     this.bounds = {
       team: this.team,
       version,
-      boundaries: structuredClone(body.boundaries),
-      since: nextSince(this.bounds, version, body.boundaries),
+      boundaries: stored,
+      since: nextSince(this.bounds, version, stored),
       updated_at: iso(this.now()),
       updated_by: this.viewer,
     };
     return this.boundaries();
+  }
+
+  /** GET /v1/teams/{team}/sources/config (PICKERS-SPEC §3.5): owners only. */
+  sourcesConfig(): SourcesConfig {
+    if (this.viewerRole() !== 'owner') throw new RosterRefusal(403, 'forbidden', 'Only team owners can choose the sources.');
+    return structuredClone(DEMO_SOURCES_CONFIG);
+  }
+
+  /** GET /v1/teams/{team}/sources/github (PICKERS-SPEC §3.6): owners only; a fake listing. */
+  sourcesGithub(): GithubListing {
+    if (this.viewerRole() !== 'owner') throw new RosterRefusal(403, 'forbidden', 'Only team owners can choose the sources.');
+    return { ...structuredClone(DEMO_GITHUB), fetched_at: iso(this.now()) };
   }
 
   /** The viewer's role here, by the roster's active entries. */
@@ -1087,7 +1190,9 @@ export class DemoAccount {
           boundaries: {
             topic: 'Operations at Example Co: on-call, incidents, infrastructure and the runbooks behind them.',
             github_orgs: ['example-ops'],
-            drives: [{ domain: 'example.com', shared_drive: 'Operations' }],
+            github_repos: [],
+            drive_folders: [{ domain: 'example.com', drive_id: '0AExampleOpsDrive0PVA', folder_id: '0AExampleOpsDrive0PVA', folder_name: 'Operations', drive_name: 'Operations' }],
+            drives: [],
             member_folders: false,
           },
           version: 1,

@@ -65,10 +65,13 @@ pytestmark = pytest.mark.anyio
 NOW = START
 STAMP = "2026-09-23T12:00:00.000Z"
 DRIVE = DriveBoundary(domain="example.com", shared_drive="Example Team Drive")
+# PICKERS-SPEC §3.2: every field required; no legacy drive (a PUT cannot add one).
 EXAMPLE = {
     "topic": "Example Org: our clients, products and engineering.",
     "github_orgs": ["Example-Org"],
-    "drives": [{"domain": "example.com", "shared_drive": "Example Team Drive"}],
+    "github_repos": [],
+    "drive_folders": [],
+    "drives": [],
     "member_folders": False,
 }
 STATUS: dict[str, Any] = {
@@ -163,7 +166,9 @@ def accepting(team: str, member: str, version: int):
 
 
 def reporting(status: dict[str, Any], seen: Any = NOW):
-    def fn(current: MemberStatus | None, entry: RosterEntry | None) -> StatusChange[str]:
+    def fn(
+        current: MemberStatus | None, entry: RosterEntry | None, bounds: TeamBoundaries | None
+    ) -> StatusChange[str]:
         if entry is None or not entry.active:
             raise ApiError(404, "not_found")
         return StatusChange(result="written", status=MemberStatus(status=status, seen_at=seen))
@@ -274,15 +279,23 @@ async def test_the_status_function_sees_the_status_it_replaces(store: Store):
     team = await team_with_member(store)
     seen: list[Any] = []
 
-    def peek(current, entry):
-        seen.append((current.seen_at if current else None, entry.member if entry else None))
+    def peek(current, entry, bounds):
+        seen.append(
+            (
+                current.seen_at if current else None,
+                entry.member if entry else None,
+                bounds.version if bounds else None,
+            )
+        )
         return StatusChange(result=None)
 
     await store.set_member_status(team, "member1", peek)
     await store.set_member_status(team, "member1", reporting(STATUS))
     await store.set_member_status(team, "member1", peek)
+    # PICKERS-SPEC §3.3: the team's boundaries are read in the same transaction.
+    await store.set_boundaries(team, "owner1", put_boundaries(boundaries(1)))
     await store.set_member_status(team, "nobody", peek)
-    assert seen == [(None, "member1"), (NOW, "member1"), (None, None)]
+    assert seen == [(None, "member1", None), (NOW, "member1", None), (None, None, 1)]
     assert await store.get_member_statuses(team, ["nobody"]) == {}
 
 
@@ -558,7 +571,10 @@ async def test_a_member_self_delegate_reaches_nothing_else(console: Api):
         for method in sorted(route.methods):
             kwargs = {} if method == "GET" else {"json": {}}
             r = await api.delegated(method, path, EMAILS["alice"], **kwargs)
-            if method == "GET" and route.path in DELEGATE_ROUTES:
+            if method == "GET" and route.path == "/v1/teams/{team}/sources/github":
+                # Reached: this relay has no GitHub app (PICKERS-SPEC §3.6).
+                assert r.json()["error"] == "github_not_configured", r.text
+            elif method == "GET" and route.path in DELEGATE_ROUTES:
                 assert r.status_code == 200, (method, route.path, r.text)
             elif (method, route.path) in MEMBER_SELF_MUTATIONS:
                 # Reached: the empty body is what is refused.
@@ -602,14 +618,27 @@ async def test_a_member_reports_and_every_member_reads_it(api: Api):
     assert r.json() == {**STATUS, "seen_at": STAMP}
     expected = {
         "members": [
-            {"member": "alice", "status": None, "answering": False, "accepted_version": 0},
+            {
+                "member": "alice",
+                "status": None,
+                "answering": False,
+                "accepted_version": 0,
+                "sources": None,
+            },
             {
                 "member": "bob",
                 "status": {**STATUS, "seen_at": STAMP},
                 "answering": True,
                 "accepted_version": 0,
+                "sources": None,
             },
-            {"member": "carol", "status": None, "answering": False, "accepted_version": 0},
+            {
+                "member": "carol",
+                "status": None,
+                "answering": False,
+                "accepted_version": 0,
+                "sources": None,
+            },
         ],
         "boundaries_version": 0,
     }

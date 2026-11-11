@@ -138,14 +138,23 @@ var RelayError = class extends Error {
   status;
   code;
   detail;
-  constructor(status, code, detail) {
+  /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
+  retryAfter;
+  constructor(status, code, detail, retryAfter) {
     super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
     this.name = "RelayError";
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.retryAfter = retryAfter;
   }
 };
+var RETRY_AFTER_MAX_S = 3600;
+function parseRetryAfter(v) {
+  const t = v?.trim();
+  if (!t || !/^[0-9]{1,10}$/.test(t)) return void 0;
+  return Math.min(RETRY_AFTER_MAX_S, Number(t));
+}
 var RelayNetworkError = class extends Error {
   constructor(message) {
     super(message);
@@ -382,7 +391,7 @@ var RelayClient = class _RelayClient {
       const obj = json && typeof json === "object" ? json : {};
       const code = typeof obj.error === "string" ? obj.error : `http_${res.status}`;
       const detail = typeof obj.detail === "string" ? obj.detail.slice(0, 500) : "";
-      throw new RelayError(res.status, code, detail);
+      throw new RelayError(res.status, code, detail, parseRetryAfter(res.headers.get("retry-after")));
     }
     return json;
   }
@@ -497,6 +506,21 @@ var RelayClient = class _RelayClient {
   /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
   setBoundaries(body, opts) {
     return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
+  }
+  /**
+   * PICKERS-SPEC §3.5 (owners): the GitHub App's install link and the Google Picker's public
+   * settings. Never a key or a token.
+   */
+  sourcesConfig(opts) {
+    return this.call("GET", this.teamPath("sources", "config"), void 0, opts);
+  }
+  /**
+   * PICKERS-SPEC §3.6 (owners): the repositories of the allowed orgs where the relay's GitHub App
+   * is installed. Not configured: 404 github_not_configured; GitHub's rate limit: 503
+   * github_rate_limited with a Retry-After (RelayError.retryAfter).
+   */
+  sourcesGithub(opts) {
+    return this.call("GET", this.teamPath("sources", "github"), void 0, opts);
   }
   /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
   acceptance(opts) {

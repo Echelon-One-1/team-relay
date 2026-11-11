@@ -87,6 +87,7 @@ from .clock import Clock, utc_now
 from .config import Delegate, Identity, Settings, normalise_email
 from .credentials import looks_like_credential
 from .errors import ApiError, ConfigError, not_found
+from .github_app import GithubApp
 from .jsonutil import BodyError, parse_json, sha256_hex
 from .log import log_event
 from .login import LoginService, client_ip
@@ -95,6 +96,7 @@ from .oauth import GoogleOAuthProvider, OAuthProvider
 from .pages import stylesheet_response
 from .roster import OWNER, SeedConflict, email_hash
 from .service import Caller, RelayService
+from .sources import GithubRateLimited
 from .store import Quota, Store, TeamGone
 from .teams import (
     ADMIN_LIST_DEFAULT,
@@ -132,6 +134,10 @@ DELEGATE_ROUTES = frozenset(
         "/v1/teams/{team}/me/acceptance",
         "/v1/teams/{team}/members/status",
         "/v1/teams/{team}/me/requests",
+        # PICKERS-SPEC §3.5, §3.6: the boundaries form's pickers (the service requires the
+        # member the delegate names to be an owner).
+        "/v1/teams/{team}/sources/config",
+        "/v1/teams/{team}/sources/github",
     }
 )
 # M6-SPEC §3: with scope manage-roster, a delegate may also make these, by (method, route).
@@ -262,13 +268,26 @@ def create_app(
     poll_interval: float = 1.0,
     verifier: Verifier | None = None,
     oauth: OAuthProvider | None = None,
+    github: GithubApp | None = None,
 ) -> FastAPI:
     """``oauth`` is the Google sign-in the login pages use; without it one is built from
-    ``settings.oauth_client`` with Google's fixed endpoints. Tests pass a fake here, never
-    through the environment. Without ``settings.public_url`` the login pages are 404."""
+    ``settings.oauth_client`` with Google's fixed endpoints. ``github`` is the GitHub App's
+    client (PICKERS-SPEC §4.3); without it one is built from ``settings.github_app`` for
+    ``api.github.com``. Tests pass fakes here, never through the environment. Without
+    ``settings.public_url`` the login pages are 404."""
     manifests = ManifestValidator(settings.manifest_schema)
     welcome = load_welcome(settings.brand_name)
-    service = RelayService(settings.team_config, store, manifests, clock, poll_interval)
+    if github is None and settings.github_app is not None:
+        github = GithubApp(settings.github_app, settings.team_config.allowed_github_orgs)
+    service = RelayService(
+        settings.team_config,
+        store,
+        manifests,
+        clock,
+        poll_interval,
+        settings=settings,
+        github=github,
+    )
     verifier = verifier if verifier is not None else build_verifier(settings)
     config = settings.team_config
     roster = service.roster
@@ -305,6 +324,8 @@ def create_app(
         except Exception as exc:
             log_event("roster_seed_failed", severity="ERROR", error=type(exc).__name__)
         yield
+        if github is not None:
+            await github.aclose()
         await store.aclose()
 
     app = FastAPI(
@@ -961,6 +982,30 @@ def create_app(
     async def members_status(caller: Caller = CallerDep) -> dict[str, Any]:
         return await service.members_status(caller)
 
+    # PICKERS-SPEC §3.5, §3.6: what owners pick sources from. Owners only (a delegate for an
+    # owner); never cached: the config is per deployment, the listing names private
+    # repositories.
+    no_store_headers = {"Cache-Control": "no-store"}
+
+    @app.get("/v1/teams/{team}/sources/config")
+    async def sources_config(caller: Caller = CallerDep) -> JSONResponse:
+        try:
+            config = await service.sources_config(caller)
+        except ApiError as err:
+            return JSONResponse(err.body(), status_code=err.status, headers=no_store_headers)
+        return JSONResponse(config, headers=no_store_headers)
+
+    @app.get("/v1/teams/{team}/sources/github")
+    async def sources_github(caller: Caller = CallerDep) -> JSONResponse:
+        try:
+            listing = await service.sources_github(caller)
+        except GithubRateLimited as err:
+            headers = {**no_store_headers, "Retry-After": str(err.retry_after)}
+            return JSONResponse(err.body(), status_code=err.status, headers=headers)
+        except ApiError as err:
+            return JSONResponse(err.body(), status_code=err.status, headers=no_store_headers)
+        return JSONResponse(listing, headers=no_store_headers)
+
     # M11-SPEC §4: the caller's own recent questions.
     @app.get("/v1/teams/{team}/me/requests")
     async def my_requests(request: Request, caller: Caller = CallerDep) -> dict[str, Any]:
@@ -1142,6 +1187,8 @@ def create_app_from_env() -> FastAPI:
         teams=sorted(settings.team_config.teams),
         login=settings.login_enabled,
         drive_client=settings.drive_client is not None,
+        github_app=settings.github_app is not None,
+        picker=settings.picker is not None,
         setup_script=settings.setup_script is not None,
         forwarded_for_hops=settings.forwarded_for_hops,
     )

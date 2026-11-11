@@ -4,14 +4,17 @@
 
 import { describe, expect, it } from 'vitest'
 
-import type { Join, MemberSetupStatus, MemberStatusEntry, TeamBoundaries } from '@/api/types'
+import type { Join, MemberSetupStatus, MemberSources, MemberStatusEntry, TeamBoundaries } from '@/api/types'
 import {
   acceptedVersion,
   boundaryItems,
+  CLONE_TODO,
   currentVersion,
   inviteMessage,
   hasJoined,
   macChecks,
+  missingNames,
+  missingSources,
   publicOrigin,
   readAcceptance,
   readMembersStatus,
@@ -35,7 +38,16 @@ function status(o: Partial<{ found: boolean; signedIn: boolean; roots: number; d
   }
 }
 
-const entry = (s: MemberSetupStatus | null, answering = true, accepted = 3): MemberStatusEntry => ({ member: 'alice', status: s, answering, accepted_version: accepted })
+const entry = (s: MemberSetupStatus | null, answering = true, accepted = 3, sources: MemberSources | null = null): MemberStatusEntry => ({
+  member: 'alice',
+  status: s,
+  answering,
+  accepted_version: accepted,
+  sources,
+})
+
+const DRIVE_ID = '0AExampleDriveId0PVA'
+const FOLDER_ID = '1ExampleFolderClients0000000000a'
 
 const BOUNDS: TeamBoundaries = {
   team: 'demo',
@@ -43,6 +55,8 @@ const BOUNDS: TeamBoundaries = {
   boundaries: {
     topic: 'Example Co: orders and payments.',
     github_orgs: ['Example-Org', 'second-org'],
+    github_repos: [],
+    drive_folders: [],
     drives: [
       { domain: 'example.com', shared_drive: 'Team Drive' },
       { domain: 'example.com', shared_drive: 'Clients' },
@@ -51,6 +65,8 @@ const BOUNDS: TeamBoundaries = {
   },
   since: {
     github_orgs: { 'example-org': 1, 'second-org': 3 },
+    github_repos: {},
+    drive_folders: {},
     drives: [
       { domain: 'example.com', shared_drive: 'Team Drive', since: 1 },
       { domain: 'example.com', shared_drive: 'Clients', since: 2 },
@@ -154,6 +170,21 @@ describe('setupSteps: two plain steps', () => {
     expect(checks(bare, plain)).toMatchObject({ folders: true, drive: true })
   })
 
+  it('single repositories need project folders, picked Drive folders need Google Drive (PICKERS-SPEC)', () => {
+    const bare = entry(status({ roots: 0, drive: false }))
+    const repos = { ...BOUNDS, boundaries: { ...BOUNDS.boundaries!, github_orgs: [], drives: [], github_repos: [{ org: 'labs-org', repo: 'api', id: 1 }] } }
+    expect(checks(bare, repos)).toMatchObject({ folders: false, drive: true })
+    expect(todo(bare, 'folders', repos)).toBe("Your Mac doesn't know where your labs-org project folders are yet. Run the setup line again and pick them.")
+    const folders = {
+      ...BOUNDS,
+      boundaries: { ...BOUNDS.boundaries!, github_orgs: [], drives: [], drive_folders: [{ domain: 'example.com', drive_id: DRIVE_ID, folder_id: FOLDER_ID, folder_name: 'Clients', drive_name: null }] },
+    }
+    expect(checks(bare, folders)).toMatchObject({ folders: true, drive: false })
+    // Whole orgs and the orgs of repositories, each once.
+    const both = { ...BOUNDS, boundaries: { ...BOUNDS.boundaries!, github_repos: [{ org: 'example-org', repo: 'api', id: null }, { org: 'labs-org', repo: 'x', id: 2 }] } }
+    expect(todo(bare, 'folders', both)).toMatch(/your Example-Org, second-org and labs-org project folders/)
+  })
+
   it('boundaries never set: accepting cannot be done', () => {
     const none: TeamBoundaries = { team: 'demo', version: 0, boundaries: null, since: null, updated_at: null, updated_by: null }
     expect(setupSteps(entry(status()), none, 0, 0)[1]!.done).toBe(false)
@@ -190,6 +221,111 @@ describe('boundaryItems: what is new since the viewer accepted (M10 §7.1 since)
     expect(unnamed.orgs.every((o) => o.isNew)).toBe(true)
     // Not allowed: never new.
     expect(boundaryItems({ ...set, boundaries: { ...set.boundaries, member_folders: false } }, 1).memberFolders).toEqual({ allowed: false, isNew: false })
+  })
+})
+
+describe('boundaryItems: repositories and Drive folders (PICKERS-SPEC §7.3)', () => {
+  const picked = {
+    ...BOUNDS,
+    boundaries: {
+      ...BOUNDS.boundaries!,
+      github_repos: [
+        { org: 'labs-org', repo: 'API', id: 1 },
+        { org: 'labs-org', repo: 'web', id: 2 },
+        // Of a whole org: never an item.
+        { org: 'example-org', repo: 'x', id: 3 },
+      ],
+      drive_folders: [
+        { domain: 'example.com', drive_id: DRIVE_ID, folder_id: DRIVE_ID, folder_name: 'Team', drive_name: 'Team' },
+        { domain: 'example.com', drive_id: DRIVE_ID, folder_id: FOLDER_ID, folder_name: 'Clients', drive_name: null },
+      ],
+    },
+    since: { ...BOUNDS.since!, github_repos: { 'labs-org/api': 1, 'labs-org/web': 3 }, drive_folders: { [DRIVE_ID]: 1 } },
+  } as TeamBoundaries & { boundaries: NonNullable<TeamBoundaries['boundaries']> }
+
+  it('lists them with their new marks; an item since does not name is new in the current version', () => {
+    const items = boundaryItems(picked, 2)
+    expect(items.repos).toEqual([
+      { name: 'labs-org/API', isNew: false },
+      { name: 'labs-org/web', isNew: true },
+    ])
+    expect(items.folders).toEqual([
+      { key: `folder:${DRIVE_ID}`, name: 'Team', where: 'a whole shared drive', isNew: false },
+      { key: `folder:${FOLDER_ID}`, name: 'Clients', where: 'in a shared drive', isNew: true },
+    ])
+  })
+})
+
+describe("missing sources: the viewer's own lines, an owner's names (PICKERS-SPEC §7.4, ACC-021, ACC-022)", () => {
+  const b = {
+    ...BOUNDS,
+    version: 5,
+    boundaries: {
+      ...BOUNDS.boundaries!,
+      github_orgs: ['example-org'],
+      github_repos: [{ org: 'labs-org', repo: 'api', id: 1 }],
+      drive_folders: [{ domain: 'example.com', drive_id: DRIVE_ID, folder_id: FOLDER_ID, folder_name: 'Clients', drive_name: 'Example Team Drive' }],
+      drives: [{ domain: 'example.com', shared_drive: 'Old Drive' }],
+    },
+    since: { github_orgs: { 'example-org': 1 }, github_repos: { 'labs-org/api': 5 }, drive_folders: { [FOLDER_ID]: 2 }, drives: [{ domain: 'example.com', shared_drive: 'Old Drive', since: 1 }], member_folders: 3 },
+  } satisfies TeamBoundaries
+  const keys = ['repo:labs-org/api', 'org:example-org', `folder:${FOLDER_ID}`, 'drive:example.com/Old Drive'] as MemberSources['missing']
+
+  it('one line per item: the clone line, the org page, Drive guidance', () => {
+    const { missing, checking } = missingSources(entry(status(), true, 5, { boundaries_version: 5, missing: keys }), b)
+    expect(checking).toEqual([])
+    expect(missing).toEqual([
+      { kind: 'repo', key: 'repo:labs-org/api', name: 'labs-org/api', command: 'git clone https://github.com/labs-org/api.git', todo: CLONE_TODO },
+      {
+        kind: 'org',
+        key: 'org:example-org',
+        name: 'example-org',
+        todo: 'No example-org projects found. Clone the ones you work on into the folder you picked for projects.',
+        link: 'https://github.com/orgs/example-org/repositories',
+      },
+      {
+        kind: 'folder',
+        key: `folder:${FOLDER_ID}`,
+        name: 'Clients (in Example Team Drive)',
+        todo: "Clients (in Example Team Drive) isn't on this Mac. Make sure Google Drive for desktop is signed in with your work account; if it still doesn't show, ask a team owner for access to the shared drive.",
+      },
+      {
+        kind: 'drive',
+        key: 'drive:example.com/Old Drive',
+        name: 'Old Drive',
+        todo: "The shared drive Old Drive isn't on this Mac. Make sure Google Drive for desktop is signed in with your work account; if it still doesn't show, ask a team owner for access to the shared drive.",
+      },
+    ])
+    expect(CLONE_TODO).toBe('Run it in Terminal inside the folder you picked for projects.')
+  })
+
+  it('never a key that is not an item of the current boundaries; nothing without a report', () => {
+    const odd = ['repo:labs-org/gone', '/Users/someone/projects/api', 'org:example-org', 'org:example-org'] as MemberSources['missing']  // e1-guard: allow (synthetic macOS home path in a test)
+    expect(missingSources(entry(status(), true, 5, { boundaries_version: 5, missing: odd }), b).missing.map((m) => m.key)).toEqual(['org:example-org'])
+    expect(missingSources(entry(status(), true, 5, null), b)).toEqual({ missing: [], checking: [] })
+    expect(missingSources(null, b)).toEqual({ missing: [], checking: [] })
+    expect(missingSources(entry(status(), true, 5, { boundaries_version: 5, missing: keys }), undefined)).toEqual({ missing: [], checking: [] })
+  })
+
+  it('a report from an older version: items added since show as checking', () => {
+    const { missing, checking } = missingSources(entry(status(), true, 5, { boundaries_version: 3, missing: ['org:example-org'] }), b)
+    expect(missing.map((m) => m.key)).toEqual(['org:example-org'])
+    expect(checking).toEqual([{ key: 'repo:labs-org/api', name: 'labs-org/api' }])
+  })
+
+  it('missing never undoes "Set up your Mac"', () => {
+    const e = entry(status(), true, 5, { boundaries_version: 5, missing: keys })
+    expect(setupSteps(e, b, 5, 5)[0]!.done).toBe(true)
+  })
+
+  it("an owner reads each member's missing items by name", () => {
+    expect(missingNames(entry(status(), true, 5, { boundaries_version: 5, missing: keys }), b)).toEqual([
+      'labs-org/api',
+      'example-org (whole organisation)',
+      'Clients (in Example Team Drive)',
+      'Old Drive',
+    ])
+    expect(missingNames(entry(status(), true, 5, null), b)).toEqual([])
   })
 })
 
@@ -240,11 +376,25 @@ describe('reading the answers', () => {
     }
     const out = readMembersStatus(raw)!
     expect(out.members.map((m) => m.member)).toEqual(['alice', 'bob', 'dana'])
-    expect(out.members[2]).toEqual({ member: 'dana', status: null, answering: false, accepted_version: 0 })
+    expect(out.members[2]).toEqual({ member: 'dana', status: null, answering: false, accepted_version: 0, sources: null })
     expect(readMembersStatus({ members: 'x', boundaries_version: 1 })).toBeNull()
     expect(readMembersStatus({ ok: true })).toBeNull()
     expect(readMembersStatus(null)).toBeNull()
   })
+  it("members-status: a member's sources are kept only when well formed (keys of the four kinds, at most 140)", () => {
+    const read = (sources: unknown) => readMembersStatus({ boundaries_version: 2, members: [{ member: 'alice', status: null, answering: false, accepted_version: 0, sources }] })!.members[0]!.sources
+    expect(read({ boundaries_version: 2, missing: ['repo:example-org/api', 'org:x', 'repo:example-org/api'] })).toEqual({ boundaries_version: 2, missing: ['repo:example-org/api', 'org:x'] })
+    expect(read({ boundaries_version: 2, missing: [] })).toEqual({ boundaries_version: 2, missing: [] })
+    expect(read(undefined)).toBeNull()
+    expect(read(null)).toBeNull()
+    expect(read({ boundaries_version: -1, missing: [] })).toBeNull()
+    expect(read({ boundaries_version: 2, missing: 'org:x' })).toBeNull()
+    expect(read({ boundaries_version: 2, missing: ['/Users/someone/api'] })).toBeNull()  // e1-guard: allow (synthetic macOS home path in a test)
+    expect(read({ boundaries_version: 2, missing: ['org:a\u0007b'] })).toBeNull()
+    expect(read({ boundaries_version: 2, missing: [`drive:${'k'.repeat(400)}`] })).toBeNull()
+    expect(read({ boundaries_version: 2, missing: Array.from({ length: 141 }, (_, i) => `org:o${i}`) })).toBeNull()
+  })
+
   it('acceptance: {version, accepted_at} or null', () => {
     expect(readAcceptance({ version: 2, accepted_at: '2026-11-10T00:00:00Z' })).toEqual({ version: 2, accepted_at: '2026-11-10T00:00:00Z' })
     expect(readAcceptance({ version: 0 })).toEqual({ version: 0, accepted_at: null })

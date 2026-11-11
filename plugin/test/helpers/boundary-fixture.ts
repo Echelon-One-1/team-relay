@@ -181,7 +181,7 @@ export function makeFixture(): Fixture {
   return { root, home, xdg, env, repoRoot, outside, allowed: allowed.map((p) => realpathSync(p)), forbidden, driveRoot, myFolder };
 }
 
-/** What a member who accepted BOUNDARIES (version 1) has on record. */
+/** What a member who accepted BOUNDARIES (version 1) has on record (as an M10 plugin wrote it). */
 export const ACCEPTED = { version: 1, github_orgs: [ORG], drives: [{ domain: DOMAIN, shared_drive: SHARED_DRIVE }], member_folders: false };
 
 /**
@@ -202,7 +202,18 @@ export function writeFolders(
   chmodSync(join(dir, 'boundaries.local.json'), 0o600);
 }
 
+/** The team's boundaries as the relay answers them (PICKERS-SPEC §2.1: no picked repositories or folders). */
 export const BOUNDARIES = {
+  topic: TOPIC,
+  github_orgs: [ORG],
+  github_repos: [] as Array<{ org: string; repo: string; id: number | null }>,
+  drive_folders: [] as Array<{ domain: string; drive_id: string | null; folder_id: string; folder_name: string; drive_name: string | null }>,
+  drives: [{ domain: DOMAIN, shared_drive: SHARED_DRIVE }],
+  member_folders: false,
+};
+
+/** The same boundaries as the M10 relay wrote them (PICKERS-SPEC §2.5: no picked lists). */
+export const M10_BOUNDARIES = {
   topic: TOPIC,
   github_orgs: [ORG],
   drives: [{ domain: DOMAIN, shared_drive: SHARED_DRIVE }],

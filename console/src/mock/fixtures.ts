@@ -15,7 +15,7 @@
 //                       (M4 §2: the tool event is `waiting`)
 // bob shares two folders with his answering session; carol shares none (M4 §3).
 
-import type { ActivityPage, ActivityRequest, AdminTeam, Directory, Join, Manifest, Me, RequestDetail, Roster, TeamBoundaries, Teams } from '@/api/types'
+import type { ActivityPage, ActivityRequest, AdminTeam, Directory, GithubListing, Join, Manifest, Me, RequestDetail, Roster, SourcesConfig, TeamBoundaries, Teams } from '@/api/types'
 
 export const FIXTURE_NOW = '2026-09-23T10:15:00.000Z'
 
@@ -27,18 +27,31 @@ export const fixtureJoin: Join = {
   team: 'demo',
 }
 
-/** GET /api/boundaries for `demo` (M10 §1): set by alice, an owner. Synthetic. */
+/** A shared drive's id in the fixtures (synthetic). */
+export const FIXTURE_DRIVE_ID = '0AExampleDriveId0PVA'
+/** A folder of it, "Clients" (synthetic). */
+export const FIXTURE_FOLDER_ID = '1ExampleFolderClients0000000000a'
+
+/**
+ * GET /api/boundaries for `demo` (M10 §1, PICKERS-SPEC §2): set by alice, an owner. A whole org,
+ * one repository of another org, one picked folder and one shared drive still matched by name
+ * (from before folders could be picked). Synthetic.
+ */
 export const fixtureBoundaries: TeamBoundaries = {
   team: 'demo',
   version: 2,
   boundaries: {
     topic: 'Example Co: the orders and payments services, their runbooks, deploys and incidents, and how the team works.',
     github_orgs: ['example-org'],
+    github_repos: [{ org: 'example-labs', repo: 'handbook', id: 7001 }],
+    drive_folders: [{ domain: 'example.com', drive_id: FIXTURE_DRIVE_ID, folder_id: FIXTURE_FOLDER_ID, folder_name: 'Clients', drive_name: 'Example Team Drive' }],
     drives: [{ domain: 'example.com', shared_drive: 'Example Team Drive' }],
     member_folders: true,
   },
   since: {
     github_orgs: { 'example-org': 1 },
+    github_repos: { 'example-labs/handbook': 1 },
+    drive_folders: { [FIXTURE_FOLDER_ID]: 1 },
     drives: [{ domain: 'example.com', shared_drive: 'Example Team Drive', since: 1 }],
     member_folders: 2,
   },
@@ -53,16 +66,58 @@ export const fixtureOpsBoundaries: TeamBoundaries = {
   boundaries: {
     topic: 'Operations at Example Co: on-call, incidents, infrastructure and the runbooks behind them.',
     github_orgs: ['example-ops'],
+    github_repos: [],
+    drive_folders: [],
     drives: [{ domain: 'example.com', shared_drive: 'Operations' }],
     member_folders: false,
   },
   since: {
     github_orgs: { 'example-ops': 1 },
+    github_repos: {},
+    drive_folders: {},
     drives: [{ domain: 'example.com', shared_drive: 'Operations', since: 1 }],
     member_folders: null,
   },
   updated_at: '2026-09-14T08:00:00Z',
   updated_by: 'olga',
+}
+
+/**
+ * GET /api/sources/config (PICKERS-SPEC §3.5) as the local console answers it: the relay's
+ * GitHub App is set up; the Google Picker never is here.
+ */
+export const fixtureSourcesConfig: SourcesConfig = {
+  github: { configured: true, install_url: 'https://github.com/apps/example-relay-sources/installations/new' },
+  google_picker: null,
+}
+
+/** GET /api/sources/github (PICKERS-SPEC §3.6): the app on two orgs. Synthetic. */
+export const fixtureGithubListing: GithubListing = {
+  installations: [
+    {
+      account: 'example-labs',
+      state: 'ok',
+      repository_selection: 'all',
+      repos: [
+        { name: 'handbook', id: 7001, private: false, archived: false },
+        { name: 'tools', id: 7002, private: true, archived: false },
+      ],
+      truncated: false,
+    },
+    {
+      account: 'example-org',
+      state: 'ok',
+      repository_selection: 'all',
+      repos: [
+        { name: 'api', id: 6001, private: true, archived: false },
+        { name: 'old-site', id: 6002, private: false, archived: true },
+        { name: 'payments', id: 6003, private: true, archived: false },
+        { name: 'web', id: 6004, private: false, archived: false },
+      ],
+      truncated: false,
+    },
+  ],
+  fetched_at: '2026-11-11T10:00:00.000Z',
 }
 
 /** GET /api/roster as alice, an owner, reads it (M6 §2): every email visible. */

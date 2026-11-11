@@ -24,6 +24,9 @@ dependencies = [
     # Direct, not inherited: relay/oauth.py verifies the login's Google ID token (RS256 over
     # Google's JWKS) with it.
     "cryptography==50.0.1",
+    # Direct: relay/github_app.py calls GitHub's REST API with it (PICKERS-SPEC §4.3); the
+    # tests also drive the app through its ASGI transport.
+    "httpx==0.28.1",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +34,6 @@ dev = [
     "pytest==9.1.1",
     # The async tests use anyio's pytest plugin (asyncio backend only).
     "anyio==4.15.1",
-    "httpx==0.28.1",
     "ruff==0.16.5",
 ]
 

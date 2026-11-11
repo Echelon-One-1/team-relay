@@ -20,15 +20,22 @@ from relay.store import (
     STREAM_SCAN_LIMIT,
     AuditEntry,
     BeyondHead,
+    BoundariesChange,
+    DriveBoundary,
     Envelope,
+    FolderBoundary,
     IdempotencyRecord,
+    MemberStatus,
     Mutation,
     ProgressEntry,
     Quota,
     QuotaExceeded,
     RecipientState,
+    RepoBoundary,
     RequestDoc,
+    StatusChange,
     Store,
+    TeamBoundaries,
     ToolEvent,
 )
 from relay.store_memory import MemoryStore
@@ -1100,3 +1107,133 @@ async def test_two_writers_and_a_clock_that_goes_backwards(store: Store, team: s
     stored = await store.get_request(team, rid)
     assert stored.recipients["bob"].acked_at == START
     assert stored.recipients["bob"].delivered_at == START
+
+
+# PICKERS-SPEC §2.4: the boundaries' picked sources ------------------------------------------
+
+PICKED = TeamBoundaries(
+    version=3,
+    topic="Our work",
+    github_orgs=["Example-Org"],
+    drives=[DriveBoundary("example.com", "Old Name-Matched Drive")],
+    member_folders=True,
+    updated_at=START,
+    updated_by="alice",
+    org_since={"example-org": 1},
+    drive_since={DriveBoundary("example.com", "Old Name-Matched Drive"): 2},
+    member_folders_since=3,
+    github_repos=[
+        RepoBoundary("Example-Labs", "API", 2**53 - 1),
+        RepoBoundary("example-labs", "web", None),
+    ],
+    drive_folders=[
+        FolderBoundary(
+            "example.com",
+            "0AExampleDriveId0PVA",
+            "0AExampleDriveId0PVA",
+            "Example Team Drive",
+            "Example Team Drive",
+        ),
+        FolderBoundary(
+            "example.com", None, "1ExamplePastedFolder00000000000c", "Clients / 2026", None
+        ),
+    ],
+    repo_since={"example-labs/api": 2, "example-labs/web": 3},
+    folder_since={"0AExampleDriveId0PVA": 1, "1ExamplePastedFolder00000000000c": 3},
+)
+
+
+def _writing(new: TeamBoundaries):
+    def fn(current, actor) -> BoundariesChange[None]:
+        return BoundariesChange(result=None, boundaries=new)
+
+    return fn
+
+
+async def test_picked_sources_round_trip(store: Store, team: str):
+    await store.set_boundaries(team, "alice", _writing(PICKED))
+    assert await store.get_boundaries(team) == PICKED
+
+
+async def test_a_status_with_sources_round_trips(store: Store, team: str):
+    status = {
+        "daemon": {"version": "1.0.0", "started_at": "2026-09-23T12:00:00.000Z"},
+        "sources": {"boundaries_version": 3, "missing": ["repo:example-labs/api"]},
+    }
+
+    def fn(current, entry, bounds) -> StatusChange[None]:
+        return StatusChange(result=None, status=MemberStatus(status=status, seen_at=START))
+
+    await store.set_member_status(team, "alice", fn)
+    assert await store.get_member_statuses(team, ["alice"]) == {
+        "alice": MemberStatus(status=status, seen_at=START)
+    }
+
+
+async def test_an_m10_document_reads_with_empty_picked_lists_and_its_since():
+    """ACC-004: a document the M10 code wrote: no picked lists (read as empty), its version and
+    every since unchanged."""
+    if not emulator_host():
+        pytest.skip(NO_EMULATOR)
+    from relay.store_firestore import FirestoreStore
+
+    fs = FirestoreStore(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "demo-relay"))
+    try:
+        team = unique_team()
+        await fs._boundaries(team).set(  # noqa: SLF001 - the M10 code's exact shape
+            {
+                "version": 4,
+                "topic": "T",
+                "github_orgs": ["Example-Org"],
+                "orgs_since": {"example-org": 2},
+                "drives": [{"domain": "example.com", "shared_drive": "D", "since": 3}],
+                "member_folders": True,
+                "member_folders_since": 4,
+                "updated_at": START,
+                "updated_by": "alice",
+            }
+        )
+        stored = await fs.get_boundaries(team)
+        assert stored is not None
+        assert stored.version == 4
+        assert (stored.github_repos, stored.drive_folders) == ([], [])
+        assert (stored.repo_since, stored.folder_since) == ({}, {})
+        assert stored.org_since == {"example-org": 2}
+        assert stored.drive_since == {DriveBoundary("example.com", "D"): 3}
+        assert stored.member_folders_since == 4
+    finally:
+        await fs.aclose()
+
+
+async def test_a_new_document_keeps_the_m10_fields_exactly():
+    """ACC-004: what the new code writes still holds github_orgs, orgs_since and drives as the
+    M10 code wrote them, so an M10 reader sees whole orgs and legacy drives only."""
+    if not emulator_host():
+        pytest.skip(NO_EMULATOR)
+    from relay.store_firestore import FirestoreStore
+
+    fs = FirestoreStore(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "demo-relay"))
+    try:
+        team = unique_team()
+        await fs.set_boundaries(team, "alice", _writing(PICKED))
+        raw = (await fs._boundaries(team).get()).to_dict()  # noqa: SLF001
+        assert raw["github_orgs"] == ["Example-Org"]
+        assert raw["orgs_since"] == {"example-org": 1}
+        assert raw["drives"] == [
+            {"domain": "example.com", "shared_drive": "Old Name-Matched Drive", "since": 2}
+        ]
+        assert raw["member_folders"] is True and raw["member_folders_since"] == 3
+        assert raw["github_repos"] == [
+            {"org": "Example-Labs", "repo": "API", "id": 2**53 - 1, "since": 2},
+            {"org": "example-labs", "repo": "web", "id": None, "since": 3},
+        ]
+        assert raw["drive_folders"][1] == {
+            "domain": "example.com",
+            "drive_id": None,
+            "folder_id": "1ExamplePastedFolder00000000000c",
+            "folder_name": "Clients / 2026",
+            "drive_name": None,
+            "since": 3,
+        }
+    finally:
+        await fs.aclose()

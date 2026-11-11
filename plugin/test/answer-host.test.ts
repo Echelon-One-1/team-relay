@@ -223,6 +223,8 @@ describe('what waits for the member (M8-SPEC §3, §4)', () => {
     const s = await session({ decide: () => 'decline' });
     const id = ask(script([{ reply: { text: 'Customer X pays 40k a month.', needs_approval: true, reason: 'customer data' } }]));
     await waitFor(() => waitingNotes(s).length === 1, 15_000, 'the approval notice');
+    // The notice (stdio) and the tool event (HTTP) are sent side by side: wait for the event itself.
+    await waitFor(() => relay.toolEvents.find((e) => e.request_id === id), 5000, 'the waiting tool event');
     expect(relay.toolEvents.filter((e) => e.request_id === id).map((e) => e.body)).toEqual([{ tool: 'approval', status: 'waiting', duration_ms: null }]);
     expect(replyTo(id)).toBeUndefined();
     const r = await s.call('review_approvals');
@@ -300,6 +302,7 @@ describe('what waits for the member (M8-SPEC §3, §4)', () => {
     expect(denials[3].message).toBe('Bash is not available when answering automatically.');
     // The member was never asked about any of them: only the draft that followed waits.
     await waitFor(() => waitingNotes(s).length === 1, 5000, 'the draft notice');
+    await waitFor(() => relay.toolEvents.find((e) => e.request_id === id), 5000, 'the waiting tool event');
     expect(relay.toolEvents.filter((e) => e.request_id === id).map((e) => e.body)).toEqual([{ tool: 'approval', status: 'waiting', duration_ms: null }]);
     expect(s.elicited).toHaveLength(0);
   });
@@ -314,6 +317,7 @@ describe('what waits for the member (M8-SPEC §3, §4)', () => {
     await sleep(1000);
     expect(replyTo(id)).toBeUndefined();
     expect((await s.call('whoami')).json).toMatchObject({ approvals_pending: 0 });
+    await waitFor(() => relay.toolEvents.some((e) => e.request_id === id && (e.body as { status: string }).status === 'error'), 5000, 'the cleared waiting');
     expect(relay.toolEvents.filter((e) => e.request_id === id).map((e) => (e.body as { tool: string; status: string }).status)).toEqual(
       expect.arrayContaining(['waiting', 'error']),
     );

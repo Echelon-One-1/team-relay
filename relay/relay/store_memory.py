@@ -705,6 +705,7 @@ class MemoryStore:
             change = fn(
                 copy.deepcopy(self._statuses.get((team, member))),
                 copy.deepcopy(self._roster.get(team, {}).get(member)),
+                copy.deepcopy(self._boundaries.get(team)),
             )
             if change.status is not None:
                 self._statuses[(team, member)] = copy.deepcopy(change.status)

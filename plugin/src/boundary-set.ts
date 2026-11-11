@@ -4,15 +4,18 @@
 //
 // 1. GitHub: every git work tree under the member's repo_roots (at most 3 levels deep; never
 //    through a symlink, node_modules, .git or any dot folder) whose own config names an origin
-//    on github.com in one of the team's orgs (https, git@github.com: or ssh:// form; the org
-//    compared without case). In it only the files git tracks (`git ls-files -z`, run with
-//    execFile, never a shell; cached per work tree by HEAD and the index's stat). Submodules
-//    and nested repositories are not followed through their parent: each work tree stands on
-//    its own.
-// 2. Drive: for each {domain, shared_drive}, ~/Library/CloudStorage/GoogleDrive-<account>/
-//    Shared drives/<shared_drive>, where <account>'s domain is exactly that domain. Other
-//    accounts' mounts and My Drive are never in it. Its files (walk capped; files over 5 MB left
-//    out, except Google Docs/Sheets/Slides link files, which read_google_file reads).
+//    on github.com (https, git@github.com: or ssh:// form) in one of the team's whole orgs, or
+//    (PICKERS-SPEC §6.1) exactly one of its repositories (org and repository compared without
+//    case). In it only the files git tracks (`git ls-files -z`, run with execFile, never a
+//    shell; cached per work tree by HEAD and the index's stat). Submodules and nested
+//    repositories are not followed through their parent: each work tree stands on its own.
+// 2. Drive, picked folders (PICKERS-SPEC §6.2): each `drive_folders` entry found by its Drive id
+//    in a Drive for desktop mount of an account in its domain (drive-locate.ts); its files.
+//    Legacy name-matched drives: for each {domain, shared_drive},
+//    ~/Library/CloudStorage/GoogleDrive-<account>/Shared drives/<shared_drive>, where
+//    <account>'s domain is exactly that domain. Other accounts' mounts and My Drive are never in
+//    it. Walks are capped; files over 5 MB are left out, except Google Docs/Sheets/Slides link
+//    files, which read_google_file reads.
 // 3. The member's extra_folders, only when the team allows member folders: the files git
 //    tracks when the folder is in a work tree, else all its files (the same walk as Drive).
 //
@@ -25,9 +28,23 @@ import { execFile } from 'node:child_process';
 import { promises as fsp, type Dirent } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, join, normalize, relative, sep } from 'node:path';
-import type { Boundaries, DriveBoundary, TeamBoundaries } from './boundaries-types.js';
-import { BOUNDARIES_MAX_DRIVES, BOUNDARIES_MAX_ORGS, boundariesValid, domainOk, driveNameOk, orgOk, versionOk } from './boundaries-rule.js';
+import type { Boundaries, DriveBoundary, FolderBoundary, RepoBoundary, TeamBoundaries } from './boundaries-types.js';
+import {
+  BOUNDARIES_MAX_DRIVES,
+  BOUNDARIES_MAX_FOLDERS,
+  BOUNDARIES_MAX_ORGS,
+  BOUNDARIES_MAX_REPOS,
+  domainOk,
+  driveItemIdOk,
+  driveNameOk,
+  orgOk,
+  readBoundaries,
+  repoKey,
+  repoNameOk,
+  versionOk,
+} from './boundaries-rule.js';
 import { ANY_DEPTH, credentialHit, globRe, within } from './deny-list.js';
+import { DriveLocator } from './drive-locate.js';
 import { acceptedAtVersion, effectiveBoundaries, memberFolderProblem, type ItemSince, type MemberFolders, type TeamSettings, type Widening } from './member-folders.js';
 import { SHARE_NAME_RE, MAX_SHARES } from './manifest.js';
 import { neutraliseChannelTags } from './notify.js';
@@ -44,8 +61,13 @@ export type Area = {
   root: string;
   /** Canonical absolute paths, sorted. */
   files: string[];
-  /** For a drive area: the boundary it came from. */
+  /** For a drive area of a legacy, name-matched drive: the boundary it came from. */
   drive?: DriveBoundary;
+  /**
+   * For a drive area of a picked folder (PICKERS-SPEC §6.2): its domain, its folder id, and the
+   * Drive id of the shared drive root it is in, read locally from that root's attribute.
+   */
+  folder?: { domain: string; folder_id: string; drive_root_id: string; whole_drive: boolean; folder_name: string };
   /** For a github area: the org and repository its origin names. */
   repo?: { org: string; repo: string };
   /** Its walk or listing stopped at a cap. */
@@ -107,6 +129,19 @@ const ORIGIN_RES = [
   /^git@github\.com:([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/i,
   /^ssh:\/\/git@github\.com(?::22)?\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/i,
 ];
+
+/** The team's GitHub sources: whole orgs and single repositories. */
+export type GithubSources = { github_orgs: readonly string[]; github_repos: ReadonlyArray<{ org: string; repo: string }> };
+
+/**
+ * PICKERS-SPEC §6.1: whether a clone's origin is one of the team's GitHub sources: its org is a
+ * whole-org entry, or org/repository is a repository entry (both without case).
+ */
+export function githubSourceMatcher(s: GithubSources): (origin: { org: string; repo: string }) => boolean {
+  const orgs = new Set(s.github_orgs.map((o) => o.toLowerCase()));
+  const repos = new Set(s.github_repos.map((r) => repoKey(r)));
+  return (o) => orgs.has(o.org.toLowerCase()) || repos.has(repoKey(o));
+}
 
 /** The org and repository a github.com origin URL names, or null for anything else. */
 export function parseGithubOrigin(url: string): { org: string; repo: string } | null {
@@ -419,6 +454,11 @@ export type BuildInput = {
   git?: GitRunner;
   cache?: GitCache | null;
   limits?: Partial<Limits>;
+  /**
+   * PICKERS-SPEC §6.2: finds picked Drive folders (and remembers where; the daemon and the
+   * channel host each keep one). Default: a new one for this build, reading /usr/bin/xattr.
+   */
+  locator?: DriveLocator;
 };
 
 /** The allowed set for one run. */
@@ -432,12 +472,13 @@ export async function buildAllowedSet(input: BuildInput): Promise<AllowedSet> {
   const notes: string[] = [];
   const areas: Area[] = [];
   const budget = { left: limits.totalFiles };
-  const orgs = new Set(boundaries.github_orgs.map((o) => o.toLowerCase()));
+  const matches = githubSourceMatcher(boundaries);
+  const github = boundaries.github_orgs.length > 0 || boundaries.github_repos.length > 0;
   const member = 'error' in input.member ? null : input.member;
   if ('error' in input.member) notes.push(`your folders file cannot be used (${input.member.error})`);
 
   // 1. GitHub work trees under the repo roots.
-  if (member && orgs.size > 0) {
+  if (member && github) {
     const trees = new Set<string>();
     for (const raw of member.repo_roots) {
       const { path, reason } = memberFolderProblem(raw, env);
@@ -456,7 +497,7 @@ export async function buildAllowedSet(input: BuildInput): Promise<AllowedSet> {
       if (gd === null || `${normalize(gd)}/`.includes('/.git/modules/')) continue;
       const origin = await git(tree, ['config', '--local', '--get', 'remote.origin.url'], env);
       const parsed = origin === null ? null : parseGithubOrigin(origin);
-      if (!parsed || !orgs.has(parsed.org.toLowerCase())) continue;
+      if (!parsed || !matches(parsed)) continue;
       const rel = await trackedFiles(tree, env, git, cache);
       if (rel === null) continue;
       const kept = await keepFiles(
@@ -468,7 +509,36 @@ export async function buildAllowedSet(input: BuildInput): Promise<AllowedSet> {
     }
   }
 
-  // 2. Shared drives, through the mounts of accounts in their domain only.
+  // 2. Picked shared-drive folders, found by id in the mounts of accounts in their domain only.
+  if (boundaries.drive_folders.length > 0) {
+    const locator = input.locator ?? new DriveLocator({ home });
+    const found = await locator.locate(boundaries.drive_folders);
+    const entries = boundaries.drive_folders
+      .filter((e, i) => boundaries.drive_folders.findIndex((x) => x.folder_id === e.folder_id) === i)
+      .flatMap((e) => {
+        const f = found.get(e.folder_id);
+        return f ? [{ e, f }] : [];
+      })
+      // Parents before what they hold, so a folder inside one already walked is not walked again.
+      .sort((a, b) => (a.f.path < b.f.path ? -1 : a.f.path > b.f.path ? 1 : 0));
+    const walked: string[] = [];
+    for (const { e, f } of entries) {
+      if (walked.some((root) => within(f.path, root))) continue;
+      walked.push(f.path);
+      const w = await walk(f.path, limits);
+      const kept = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
+      areas.push({
+        kind: 'drive',
+        name: `drive:${e.folder_name}`,
+        root: f.path,
+        files: kept.files,
+        folder: { domain: e.domain, folder_id: e.folder_id, drive_root_id: f.drive_root_id, whole_drive: f.path === f.drive_root, folder_name: e.folder_name },
+        truncated: w.truncated || kept.truncated,
+      });
+    }
+  }
+
+  // 2b. Legacy shared drives, by name, through the mounts of accounts in their domain only.
   for (const drive of boundaries.drives) {
     const roots = await driveRoots(drive, home);
     for (const [i, r] of roots.entries()) {
@@ -538,7 +608,7 @@ export function shareNames(set: AllowedSet): string[] {
   for (const kind of order) {
     const raws = set.areas
       .filter((x) => x.kind === kind)
-      .map((a) => (kind === 'github' && a.repo ? a.repo.repo : kind === 'drive' && a.drive ? a.drive.shared_drive : basename(a.root)))
+      .map((a) => (kind === 'github' && a.repo ? a.repo.repo : kind === 'drive' && a.drive ? a.drive.shared_drive : kind === 'drive' && a.folder ? a.folder.folder_name : basename(a.root)))
       .sort();
     for (const raw of raws) {
       const n = shareName(raw);
@@ -555,7 +625,9 @@ export function setSummary(set: AllowedSet): string {
   const by = (k: AreaKind) => set.areas.filter((a) => a.kind === k);
   const parts: string[] = [];
   const gh = by('github');
-  const dr = by('drive');
+  // Legacy drives and picked whole drives read as shared drives; other picked folders as folders.
+  const dr = by('drive').filter((a) => !a.folder || a.folder.whole_drive);
+  const df = by('drive').filter((a) => a.folder && !a.folder.whole_drive);
   const fo = by('folder');
   const list = (as: Area[]) => {
     const names = as.slice(0, 8).map((a) => a.name.replace(/^[a-z]+:/, ''));
@@ -563,6 +635,7 @@ export function setSummary(set: AllowedSet): string {
   };
   parts.push(gh.length ? `${gh.length} GitHub ${gh.length === 1 ? 'repository' : 'repositories'} (${list(gh)})` : 'no GitHub repositories');
   parts.push(dr.length ? `${dr.length === 1 ? 'the shared drive' : `${dr.length} shared drives`} ${list(dr)}` : 'no shared drive');
+  if (df.length) parts.push(`${df.length === 1 ? 'the Drive folder' : `${df.length} Drive folders`} ${list(df)}`);
   if (fo.length) parts.push(`${fo.length} of your folders (${list(fo)})`);
   return `${parts.join(', ')}; ${set.files.size} files`;
 }
@@ -579,10 +652,38 @@ export function quotedOwnerText(text: string, limit: number): string {
   return JSON.stringify(flat.length <= limit ? flat : flat.slice(0, limit));
 }
 
-/** What a widening adds, for the member: org names (id-shaped), drive names (owner-written, quoted) and their domains. */
+/** At most `max` names, then how many more. */
+function someOf(names: string[], max: number): string {
+  return `${names.slice(0, max).join(', ')}${names.length > max ? ` and ${names.length - max} more` : ''}`;
+}
+
+/** A picked folder for the member: its name and its drive's (owner-written, quoted), and its domain. */
+/** A picked Drive folder for a reader: its quoted name and where it is (owner text quoted). */
+export function folderText(f: FolderBoundary, withDomain: boolean): string {
+  const where =
+    f.drive_id !== null && f.folder_id === f.drive_id
+      ? ' (a whole shared drive'
+      : f.drive_name !== null
+        ? ` (in ${quotedOwnerText(f.drive_name, 100)}`
+        : ' (in a shared drive';
+  return `${quotedOwnerText(f.folder_name, 255)}${where}${withDomain ? `, ${f.domain}` : ''})`;
+}
+
+/** Repositories as org/repo (id-shaped names). */
+const repoNames = (repos: ReadonlyArray<Pick<RepoBoundary, 'org' | 'repo'>>) => someOf(repos.map((r) => `${r.org}/${r.repo}`), 10);
+
+/**
+ * What a widening adds, for the member: org and repository names (id-shaped), Drive folder and
+ * drive names (owner-written, quoted) and their domains.
+ */
 export function wideningText(w: Widening): string {
   const parts: string[] = [];
   if (w.github_orgs.length) parts.push(`${w.github_orgs.length === 1 ? 'the GitHub org' : 'the GitHub orgs'} ${w.github_orgs.join(', ')}`);
+  if (w.github_repos.length) parts.push(`${w.github_repos.length === 1 ? 'the GitHub repository' : 'the GitHub repositories'} ${repoNames(w.github_repos)}`);
+  if (w.drive_folders.length) {
+    const names = someOf(w.drive_folders.map((f) => folderText(f, true)), 10);
+    parts.push(`${w.drive_folders.length === 1 ? 'the Drive folder' : 'the Drive folders'} ${names}`);
+  }
   if (w.drives.length) {
     const names = w.drives.map((d) => `${quotedOwnerText(d.shared_drive, 100)} (${d.domain})`).join(', ');
     parts.push(`${w.drives.length === 1 ? 'the shared drive' : 'the shared drives'} ${names}`);
@@ -591,12 +692,14 @@ export function wideningText(w: Widening): string {
   return parts.join(', ') || 'nothing to read yet';
 }
 
+const NOTHING: Widening = { github_orgs: [], github_repos: [], drive_folders: [], drives: [], member_folders: false };
+
 /**
- * M10-SPEC: the SessionStart sentence for a team with boundaries (names only; drive names are
- * owner-written, so quoted): what answers come from (the team's boundaries narrowed to what the
- * member accepted, §7.1), what is waiting to be accepted, and how many repo roots the member set.
- * M11-SPEC §2: what the member accepted is the relay's (`acceptedVersion`, GET me/acceptance);
- * accepting happens in the console at `consoleAt`.
+ * M10-SPEC: the SessionStart sentence for a team with boundaries (names only; folder and drive
+ * names are owner-written, so quoted): what answers come from (the team's boundaries narrowed to
+ * what the member accepted, §7.1), what is waiting to be accepted, and how many repo roots the
+ * member set. M11-SPEC §2: what the member accepted is the relay's (`acceptedVersion`, GET
+ * me/acceptance); accepting happens in the console at `consoleAt`.
  */
 export function boundariesSentence(
   current: Boundaries,
@@ -616,19 +719,25 @@ export function boundariesSentence(
   if (eff.notAccepted) {
     return (
       `Your team has boundaries (version ${version}) that you have not accepted yet, so teammates' questions to you are declined. ` +
-      `Accept them in the console at ${consoleAt} (your answerer would then answer on its own from ${wideningText(eff.pending ?? { github_orgs: [], drives: [], member_folders: false })}).`
+      `Accept them in the console at ${consoleAt} (your answerer would then answer on its own from ${wideningText(eff.pending ?? NOTHING)}).`
     );
   }
   const b = eff.boundaries;
   const orgs = b.github_orgs.length ? `files git tracks in your clones of ${b.github_orgs.length === 1 ? 'the GitHub org' : 'the GitHub orgs'} ${b.github_orgs.join(', ')}` : null;
+  const repos = b.github_repos.length
+    ? `files git tracks in your clones of ${b.github_repos.length === 1 ? 'the GitHub repository' : 'the GitHub repositories'} ${repoNames(b.github_repos)}`
+    : null;
+  const folders = b.drive_folders.length
+    ? `${b.drive_folders.length === 1 ? 'the Drive folder' : 'the Drive folders'} ${someOf(b.drive_folders.map((f) => folderText(f, false)), 10)}`
+    : null;
   const drives = b.drives.length ? `${b.drives.length === 1 ? 'the shared drive' : 'the shared drives'} ${b.drives.map((d) => quotedOwnerText(d.shared_drive, 100)).join(', ')}` : null;
   const own = b.member_folders ? 'your own added folders' : null;
-  const from = [orgs, drives, own].filter(Boolean).join(', ') || 'nothing yet';
+  const from = [orgs, repos, folders, drives, own].filter(Boolean).join(', ') || 'nothing yet';
   const pending = eff.pending
     ? ` Version ${version} adds ${wideningText(eff.pending)}, which you have not accepted: accept it in the console at ${consoleAt}; until then answers come only from what you accepted.`
     : '';
   let roots: string;
-  if (b.github_orgs.length && settings.repo_roots.length === 0) roots = ' You have set no repo roots yet: run /team-relay:folders add-root <the folder your clones are in>.';
+  if ((b.github_orgs.length || b.github_repos.length) && settings.repo_roots.length === 0) roots = ' You have set no repo roots yet: run /team-relay:folders add-root <the folder your clones are in>.';
   else roots = ` Repo roots set: ${settings.repo_roots.length} (/team-relay:folders shows them).`;
   return `Your team has boundaries (version ${version}): your answerer answers teammates on its own from ${from}; reads of anything else are denied and off-topic questions declined.${pending}${roots}`;
 }
@@ -639,27 +748,51 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object
  * A boundaries document from the relay, by the one rule (M10-SPEC §7.5, boundaries-rule.ts):
  * the relay checked it on write, and the host acts on nothing that does not pass it again
  * (drive domains and names reach the member's session and the file system).
+ *
+ * PICKERS-SPEC §2.3: a document the M10 code wrote (no `github_repos`, no `drive_folders`; its
+ * `since` without their maps) passes too, and is completed in place with the picked lists (and
+ * maps) empty, so every reader after this check sees the one shape.
  */
 export function validBoundaries(v: unknown): v is TeamBoundaries {
   if (!isObj(v) || !versionOk(v.version)) return false;
   if (v.boundaries === null) return v.since === undefined || v.since === null;
-  return boundariesValid(v.boundaries) && sinceValid(v.since, v.version);
+  const b = readBoundaries(v.boundaries);
+  if (!b || !sinceValid(v.since, v.version)) return false;
+  v.boundaries = b;
+  if (isObj(v.since)) v.since = { github_orgs: v.since.github_orgs, github_repos: v.since.github_repos ?? {}, drive_folders: v.since.drive_folders ?? {}, drives: v.since.drives, member_folders: v.since.member_folders };
+  return true;
 }
 
 /**
- * M10-SPEC §7.1: the relay's `since` for a document of version `version`: absent or null (every
- * item then counts as added in `version`), or exactly `github_orgs` (lower-case org names),
- * `drives` (domain, shared_drive, since) and `member_folders` (null or a version), each version
- * a whole number from 1 to `version`.
+ * M10-SPEC §7.1 and PICKERS-SPEC §2.3: the relay's `since` for a document of version `version`:
+ * absent or null (every item then counts as added in `version`), or exactly `github_orgs`
+ * (lower-case org names), `github_repos` (lower-case `org/repo`), `drive_folders` (folder ids),
+ * `drives` (domain, shared_drive, since) and `member_folders` (null or a version), each version a
+ * whole number from 1 to `version`; one the M10 relay wrote has no `github_repos` or
+ * `drive_folders`.
  */
 function sinceValid(v: unknown, version: number): boolean {
   if (v === undefined || v === null) return true;
   const inRange = (n: unknown) => versionOk(n) && n >= 1 && n <= version;
   const keys = (o: Record<string, unknown>, want: string[]) => Object.keys(o).length === want.length && want.every((k) => Object.prototype.hasOwnProperty.call(o, k));
-  if (!isObj(v) || !keys(v, ['github_orgs', 'drives', 'member_folders'])) return false;
+  if (!isObj(v) || !(keys(v, ['github_orgs', 'drives', 'member_folders']) || keys(v, ['github_orgs', 'github_repos', 'drive_folders', 'drives', 'member_folders']))) return false;
   const orgs = v.github_orgs;
   if (!isObj(orgs) || Object.keys(orgs).length > BOUNDARIES_MAX_ORGS) return false;
   if (!Object.entries(orgs).every(([o, n]) => orgOk(o) && o === o.toLowerCase() && inRange(n))) return false;
+  if (v.github_repos !== undefined) {
+    const repos = v.github_repos;
+    if (!isObj(repos) || Object.keys(repos).length > BOUNDARIES_MAX_REPOS) return false;
+    const repoKeyOk = (k: string) => {
+      const at = k.indexOf('/');
+      return at > 0 && k === k.toLowerCase() && orgOk(k.slice(0, at)) && repoNameOk(k.slice(at + 1));
+    };
+    if (!Object.entries(repos).every(([k, n]) => repoKeyOk(k) && inRange(n))) return false;
+  }
+  if (v.drive_folders !== undefined) {
+    const folders = v.drive_folders;
+    if (!isObj(folders) || Object.keys(folders).length > BOUNDARIES_MAX_FOLDERS) return false;
+    if (!Object.entries(folders).every(([k, n]) => driveItemIdOk(k) && inRange(n))) return false;
+  }
   if (!Array.isArray(v.drives) || v.drives.length > BOUNDARIES_MAX_DRIVES) return false;
   if (!v.drives.every((d) => isObj(d) && keys(d, ['domain', 'shared_drive', 'since']) && domainOk(d.domain) && driveNameOk(d.shared_drive) && inRange(d.since))) return false;
   return v.member_folders === null || inRange(v.member_folders);

@@ -3,7 +3,10 @@
 // On disk, Drive for desktop keeps a native Google file as a small JSON link file
 // (.gdoc/.gsheet/.gslides) holding its `doc_id`. readGoogleFile(path) reads that id and asks
 // the Drive API, as the member, for the file's `driveId`; only when it equals the id of the
-// team's shared drive (resolved by name with drives.list, as the member) is the file exported:
+// team's shared drive is the file exported. For a picked folder's area (PICKERS-SPEC §6.2) that
+// id is the one read locally from the shared drive root's Drive for desktop attribute (no
+// drives.list); for a legacy, name-matched drive it is resolved by name with drives.list, as the
+// member. Exported as:
 // Docs → Markdown (plain text when Markdown is refused), Sheets → CSV for every sheet (Sheets
 // API values, which drive.readonly covers; the Drive CSV export of the first sheet, said so in
 // the text, when the Sheets API refuses), Slides → plain text. At most 200 KB of text.
@@ -11,8 +14,9 @@
 // Defence in depth: the caller (the answer host) has already checked the path is inside an
 // allowed Drive mount. This module checks again on its own: the link file's real path must sit
 // under ~/Library/CloudStorage/GoogleDrive-<account>/Shared drives/<shared drive>/ for an
-// account in the team's domain, be a regular file of at most 4 KB, and carry a well-formed
-// doc_id; the connected Google account must be in the team's domain too.
+// account in the team's domain (for a picked folder's area: also under the area's root), be a
+// regular file of at most 4 KB, and carry a well-formed doc_id; the connected Google account
+// must be in the team's domain too.
 //
 // The refresh token lives only in the macOS Keychain (service "team-relay-drive", account =
 // the Google email), written and read through /usr/bin/security without a shell and never as a
@@ -406,18 +410,36 @@ export function cloudStorageRoot(): string {
   return join(homedir(), 'Library', 'CloudStorage');
 }
 
+/** A legacy shared drive, matched by name (M10-SPEC §2a). */
+export type NamedDriveArea = { domain: string; shared_drive: string };
 /**
- * Check the link file sits under GoogleDrive-<account in domain>/Shared drives/<shared_drive>/
- * below `root` (real paths, so a symlink cannot lead out), then read and parse it.
+ * PICKERS-SPEC §6.2: a picked folder's area: its canonical root folder, the Drive id of the
+ * shared drive it is in (read locally from that drive root's attribute) and the picked folder's
+ * own Drive id (the drive's id when the whole shared drive was picked).
  */
-export function readLinkFile(linkPath: string, drive: { domain: string; shared_drive: string }, root: string): LinkFile {
+export type FolderDriveArea = { domain: string; root: string; drive_root_id: string; folder_id: string };
+export type GoogleFileArea = NamedDriveArea | FolderDriveArea;
+
+const isFolderArea = (a: GoogleFileArea): a is FolderDriveArea => 'root' in a;
+
+/** Whether `rel` (relative) stays below its base: not empty, not upwards, not absolute. */
+const below = (rel: string) => rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+
+/**
+ * Check the link file sits under GoogleDrive-<account in domain>/Shared drives/<shared drive>/
+ * below `root` (real paths, so a symlink cannot lead out): for a legacy drive the shared drive of
+ * that name, for a picked folder below the folder's own root. Then read and parse it.
+ */
+export function readLinkFile(linkPath: string, area: GoogleFileArea, root: string): LinkFile {
   if (!isGoogleLinkFile(linkPath)) throw new DriveReadError('not a Google file');
   if (!isAbsolute(linkPath)) throw new DriveReadError('not in the team drive');
   let realRoot: string;
   let realFile: string;
+  let realArea: string | null = null;
   try {
     realRoot = realpathSync(root);
     realFile = realpathSync(linkPath);
+    if (isFolderArea(area)) realArea = realpathSync(area.root);
   } catch {
     throw new DriveReadError('not in the team drive');
   }
@@ -425,17 +447,19 @@ export function readLinkFile(linkPath: string, drive: { domain: string; shared_d
   const ext = extname(realFile).toLowerCase();
   if (ext !== extname(linkPath).toLowerCase()) throw new DriveReadError('not a Google file');
   const rel = relative(realRoot, realFile);
-  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new DriveReadError('not in the team drive');
+  if (!below(rel)) throw new DriveReadError('not in the team drive');
   const segs = rel.split(sep);
   const mount = /^GoogleDrive-(.+)$/.exec(segs[0] ?? '');
   const account = mount?.[1];
-  if (
-    segs.length < 4 ||
-    !account ||
-    !emailInDomain(account, drive.domain) ||
-    segs[1] !== 'Shared drives' ||
-    (segs[2] ?? '').normalize('NFC') !== drive.shared_drive.normalize('NFC')
-  ) {
+  if (segs.length < 4 || !account || !emailInDomain(account, area.domain) || segs[1] !== 'Shared drives') throw new DriveReadError('not in the team drive');
+  if (isFolderArea(area)) {
+    // The area's root is itself in a shared drive of that mount, and the file below it.
+    const areaRel = relative(realRoot, realArea!);
+    const areaSegs = areaRel.split(sep);
+    if (!below(areaRel) || areaSegs.length < 3 || areaSegs[0] !== segs[0] || areaSegs[1] !== 'Shared drives' || !below(relative(realArea!, realFile))) {
+      throw new DriveReadError('not in the team drive');
+    }
+  } else if ((segs[2] ?? '').normalize('NFC') !== area.shared_drive.normalize('NFC')) {
     throw new DriveReadError('not in the team drive');
   }
 
@@ -482,7 +506,7 @@ export function readLinkFile(linkPath: string, drive: { domain: string; shared_d
   }
   // The account Drive for desktop wrote it for must be in the team's domain too.
   const email = o.email;
-  if (email !== undefined && email !== null && email !== '' && (typeof email !== 'string' || !emailInDomain(email, drive.domain))) {
+  if (email !== undefined && email !== null && email !== '' && (typeof email !== 'string' || !emailInDomain(email, area.domain))) {
     throw new DriveReadError('not in the team drive');
   }
   const t = GOOGLE_TYPES[ext]!;
@@ -493,6 +517,42 @@ export function readLinkFile(linkPath: string, drive: { domain: string; shared_d
 // Drive and Sheets calls
 
 /** The id of the one shared drive the member sees with exactly this name. */
+/** Levels of parents walked up from a file to find the picked folder (PICKERS-SPEC §6.2, 11 Nov 2026). */
+export const MAX_ANCESTRY_LEVELS = 20;
+const NOT_IN_FOLDER = 'not in the picked Drive folder';
+
+/** A Drive item's one parent, or null (none, several, or not id-shaped: an item in a shared drive has exactly one). */
+function oneParent(parents: unknown): string | null {
+  if (!Array.isArray(parents) || parents.length !== 1) return null;
+  const p: unknown = parents[0];
+  return typeof p === 'string' && DOC_ID_RE.test(p) ? p : null;
+}
+
+/**
+ * PICKERS-SPEC §6.2 (11 Nov 2026): whether a file whose parents are `parents` lies in the picked
+ * folder `folderId` of the shared drive `driveId`, asked of the Drive API as the member: walk up
+ * one parent at a time (each `files.get` with `id,parents,driveId`), at most MAX_ANCESTRY_LEVELS,
+ * stopping as soon as the folder is met. Not in it: the drive root reached first, the cap hit, a
+ * parent that cannot be read, a parent in another drive, or an item without exactly one parent.
+ * Nothing is kept between files. A network failure throws (Google did not answer).
+ */
+async function reachesFolder(s: Session, parents: unknown, driveId: string, folderId: string): Promise<boolean> {
+  let current = oneParent(parents);
+  for (let level = 1; level <= MAX_ANCESTRY_LEVELS; level++) {
+    if (current === null || current === driveId) return false;
+    if (current === folderId) return true;
+    if (level === MAX_ANCESTRY_LEVELS) return false;
+    const q = new URLSearchParams({ supportsAllDrives: 'true', fields: 'id,parents,driveId' });
+    const r = await s.get(`${DRIVE_API}files/${encodeURIComponent(current)}?${q.toString()}`);
+    if (r.status === 0) throw new GoogleHttpError(0);
+    if (r.status !== 200) return false;
+    const m = jsonOf(r);
+    if (!m || m.id !== current || m.driveId !== driveId) return false;
+    current = oneParent(m.parents);
+  }
+  return false;
+}
+
 async function resolveSharedDrive(s: Session, name: string): Promise<string> {
   const want = name.normalize('NFC');
   const found: string[] = [];
@@ -642,21 +702,31 @@ async function defaultRelay(): Promise<DriveClientSource> {
   return relayClientFromEnv(process.env, { attempts: 1, timeoutMs: 10_000 });
 }
 
+/** The area as given, checked for shape (null: it cannot be used). */
+function areaOk(a: unknown): GoogleFileArea | null {
+  if (typeof a !== 'object' || a === null) return null;
+  const o = a as Record<string, unknown>;
+  if (!isDomain(o.domain)) return null;
+  if ('root' in o) {
+    const idOk = (v: unknown): v is string => typeof v === 'string' && DOC_ID_RE.test(v);
+    return typeof o.root === 'string' && isAbsolute(o.root) && idOk(o.drive_root_id) && idOk(o.folder_id)
+      ? { domain: o.domain, root: o.root, drive_root_id: o.drive_root_id, folder_id: o.folder_id }
+      : null;
+  }
+  const n = o.shared_drive;
+  return typeof n === 'string' && n.length > 0 && n.length <= 100 && !/[/\u0000-\u001f\u007f]/.test(n) ? { domain: o.domain, shared_drive: n } : null;
+}
+
 /**
- * Read a native Google file in the team's shared drive, as the connected member. Never
- * throws; every failure is {ok:false, reason} with a short reason that holds no token and no
- * text from Google.
+ * Read a native Google file in the team's shared drive (a legacy drive by name, or a picked
+ * folder's area), as the connected member. Never throws; every failure is {ok:false, reason}
+ * with a short reason that holds no token and no text from Google.
  */
-export async function readGoogleFile(
-  linkPath: string,
-  drive: { domain: string; shared_drive: string },
-  deps: ReadGoogleFileDeps = {},
-): Promise<GoogleFileResult> {
+export async function readGoogleFile(linkPath: string, given: GoogleFileArea, deps: ReadGoogleFileDeps = {}): Promise<GoogleFileResult> {
   try {
     if (!isGoogleLinkFile(linkPath)) return { ok: false, reason: 'not a Google file' };
-    if (!drive || !isDomain(drive.domain) || typeof drive.shared_drive !== 'string' || drive.shared_drive.length === 0 || drive.shared_drive.length > 100 || /[/\u0000-\u001f\u007f]/.test(drive.shared_drive)) {
-      return { ok: false, reason: 'not in the team drive' };
-    }
+    const drive = areaOk(given);
+    if (!drive) return { ok: false, reason: 'not in the team drive' };
     const link = readLinkFile(linkPath, drive, deps.cloudStorageRoot ?? cloudStorageRoot());
 
     const keychain = deps.keychain === undefined ? defaultKeychain() : deps.keychain;
@@ -673,9 +743,12 @@ export async function readGoogleFile(
     const relay = deps.relay ?? (await defaultRelay());
     const s = new Session(doFetch as FetchLike, relay, account, refresh, deps.now ?? Date.now);
 
-    const driveId = await resolveSharedDrive(s, drive.shared_drive);
+    // PICKERS-SPEC §6.2: a picked folder's drive id was read on this Mac; only a legacy drive is looked up by name.
+    const driveId = isFolderArea(drive) ? drive.drive_root_id : await resolveSharedDrive(s, drive.shared_drive);
+    // A folder inside a shared drive (not a whole drive): the file's ancestry must reach it.
+    const folderId = isFolderArea(drive) && drive.folder_id !== drive.drive_root_id ? drive.folder_id : null;
 
-    const q = new URLSearchParams({ supportsAllDrives: 'true', fields: 'id,name,mimeType,driveId' });
+    const q = new URLSearchParams({ supportsAllDrives: 'true', fields: folderId ? 'id,name,mimeType,driveId,parents' : 'id,name,mimeType,driveId' });
     const headers: Record<string, string> = link.resourceKey ? { 'X-Goog-Drive-Resource-Keys': `${link.docId}/${link.resourceKey}` } : {};
     const meta = await s.get(`${DRIVE_API}files/${encodeURIComponent(link.docId)}?${q.toString()}`, { headers });
     if (meta.status !== 200) throw new GoogleHttpError(meta.status);
@@ -683,6 +756,7 @@ export async function readGoogleFile(
     if (!m || m.id !== link.docId) return { ok: false, reason: 'Google answered with something unexpected' };
     if (typeof m.driveId !== 'string' || m.driveId !== driveId) return { ok: false, reason: 'not in the team drive' };
     if (m.mimeType !== link.googleMime) return { ok: false, reason: 'not a Google file' };
+    if (folderId && !(await reachesFolder(s, m.parents, driveId, folderId))) return { ok: false, reason: NOT_IN_FOLDER };
 
     return await exportFile(s, link);
   } catch (err) {

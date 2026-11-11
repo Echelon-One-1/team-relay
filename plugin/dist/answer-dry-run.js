@@ -431,12 +431,15 @@ var init_relay_client = __esm({
       status;
       code;
       detail;
-      constructor(status, code, detail) {
+      /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
+      retryAfter;
+      constructor(status, code, detail, retryAfter) {
         super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
         this.name = "RelayError";
         this.status = status;
         this.code = code;
         this.detail = detail;
+        this.retryAfter = retryAfter;
       }
     };
     RelayNetworkError = class extends Error {
@@ -15262,6 +15265,7 @@ var CONTENT_SECURITY_POLICY = [
 ].join("; ");
 
 // src/boundaries-rule.ts
+var REPO_ID_MAX = Number.MAX_SAFE_INTEGER;
 var BOUNDARIES_VERSION_MAX = 2 ** 31 - 1;
 
 // src/deny-list.ts
@@ -15385,6 +15389,17 @@ function credentialHit(p, ctx) {
   }
   return null;
 }
+
+// src/drive-locate.ts
+var DEFAULT_LOCATE_LIMITS = {
+  rootsPerMount: 50,
+  depth: 8,
+  hintDirs: 5e3,
+  blindReads: 300,
+  blindMs: 1e4,
+  verifyMs: 6e4,
+  notFoundMs: 10 * 6e4
+};
 
 // src/member-folders.ts
 init_relay_client_core();

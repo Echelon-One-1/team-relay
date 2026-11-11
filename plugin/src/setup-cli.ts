@@ -2,13 +2,16 @@
 // the plugin. The setup script runs them in order; a member can run any of them again.
 //
 //   login [--relay <url>]               the browser sign-in of M5 (skipped when signed in to that relay)
-//   folders                             choose the folders that hold your clones (asks on the terminal)
-//   drive                               connect Google Drive when the team has drives (M10 §2a)
+//   folders                             choose the folders that hold your clones of the team's whole
+//                                       orgs and repositories (asks on the terminal)
+//   drive                               connect Google Drive when the team shares Drive folders or
+//                                       drives (M10 §2a)
 //   daemon install --claude <path> --plugin team-relay@<marketplace>
 //                                       write and load the background answerer's LaunchAgent, for
 //                                       the plugin installed under exactly that key
 //   daemon uninstall                    stop and remove it
-//   status [--after-setup]              your setup checklist, as the relay sees it (M11 §6)
+//   status [--after-setup]              your setup checklist, as the relay sees it (M11 §6), and what
+//                                       your Mac cannot find of what the team shares (PICKERS-SPEC §7.4)
 //
 // Nothing here prints a credential or token. Exit 0: done (or nothing to do); 1: it did not
 // work (the line says why); 2: usage.
@@ -21,8 +24,9 @@ import { createReadStream, existsSync, openSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { configDir } from './answering-lock.js';
-import { SELF_TEST_PENDING, type MemberStatusEntry, type TeamBoundaries } from './boundaries-types.js';
-import { homeDir, validBoundaries } from './boundary-set.js';
+import { boundaryItems, itemKey, sinceByKey } from './boundaries-rule.js';
+import { SELF_TEST_PENDING, type Boundaries, type MemberSources, type MemberStatusEntry, type TeamBoundaries } from './boundaries-types.js';
+import { homeDir, validBoundaries, type GithubSources } from './boundary-set.js';
 import { clonesUnder } from './clones.js';
 import { consoleUrl } from './console-url.js';
 import { CredentialFileError, credentialsPath, normaliseRelayUrl, readCredential } from './credentials.js';
@@ -81,7 +85,7 @@ export type SetupDeps = {
   connect?: () => Promise<{ client: RelayClient; member: string; team: string } | { error: string }>;
   keychain?: Keychain | null;
   drive?: (argv: string[], client: RelayClient, keychain: Keychain) => Promise<DriveCliOutcome>;
-  clones?: (raw: string, orgs: string[]) => Promise<number>;
+  clones?: (raw: string, sources: GithubSources) => Promise<number>;
   /** The Mac's folder chooser (default: osascript's `choose folder`; tests: a fake). */
   chooseFolders?: FolderChooser;
 };
@@ -387,11 +391,12 @@ async function folders(d: SetupDeps): Promise<number> {
     return 1;
   }
   const current = teamSettings(all, c.team);
-  const orgs = tb.boundaries.github_orgs;
-  const count = d.clones ?? ((raw: string, o: string[]) => clonesUnder(raw, o, env));
+  // PICKERS-SPEC §6.1: whole orgs and single repositories, as the team listed them.
+  const github: GithubSources = { github_orgs: tb.boundaries.github_orgs, github_repos: tb.boundaries.github_repos };
+  const count = d.clones ?? ((raw: string, g: GithubSources) => clonesUnder(raw, g, env));
   let roots = current.repo_roots;
-  if (orgs.length > 0) {
-    const names = listWords(orgs);
+  if (github.github_orgs.length + github.github_repos.length > 0) {
+    const names = listWords([...github.github_orgs, ...github.github_repos.map((x) => `${x.org}/${x.repo}`)], 12);
     io.print(`Your team shares projects from GitHub: ${names}.`);
     roots = await chooseList(d, {
       nowTitle: 'The folders you picked for these projects:',
@@ -401,7 +406,7 @@ async function folders(d: SetupDeps): Promise<number> {
       prompt: `Pick the folders that hold your ${names} projects. Hold Cmd to pick more than one.`,
       typeIntro: `Type the full path of each folder that holds your ${names} projects, one per line (~ means your home folder). Press Enter on an empty line to finish.`,
       current: current.repo_roots,
-      count: (raw) => count(raw, orgs),
+      count: (raw) => count(raw, github),
     });
   } else {
     io.print('Your team shares no GitHub projects, so there are no project folders to pick.');
@@ -438,7 +443,9 @@ async function folders(d: SetupDeps): Promise<number> {
   return 0;
 }
 
-function listWords(items: string[]): string {
+/** "a", "a and b", "a, b and c"; past `max` items, "a, b and 3 more". */
+function listWords(items: string[], max = Number.POSITIVE_INFINITY): string {
+  if (items.length > max) return `${items.slice(0, max).join(', ')} and ${items.length - max} more`;
   if (items.length <= 1) return items[0] ?? '';
   return `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 }
@@ -457,7 +464,7 @@ async function drive(d: SetupDeps): Promise<number> {
     io.print(UNREACHABLE_BOUNDARIES);
     return 1;
   }
-  if (!tb.boundaries || tb.boundaries.drives.length === 0) {
+  if (!tb.boundaries || tb.boundaries.drives.length + tb.boundaries.drive_folders.length === 0) {
     io.print('Your team has no shared Google Drives, so there is nothing to connect.');
     return 0;
   }
@@ -687,8 +694,8 @@ async function status(d: SetupDeps, afterSetup: boolean): Promise<number> {
     acceptedVersion,
     boundariesVersion,
     // Not read: not known. Read with none set: nothing to choose.
-    orgs: tb ? (tb.boundaries?.github_orgs.length ?? 0) : null,
-    drives: tb ? (tb.boundaries?.drives.length ?? 0) : null,
+    orgs: tb ? (tb.boundaries ? tb.boundaries.github_orgs.length + tb.boundaries.github_repos.length : 0) : null,
+    drives: tb ? (tb.boundaries ? tb.boundaries.drives.length + tb.boundaries.drive_folders.length : 0) : null,
     console: url,
   });
   const done = steps.filter((s) => s.done).length;
@@ -703,6 +710,8 @@ async function status(d: SetupDeps, afterSetup: boolean): Promise<number> {
       io.print(`  [ ] ${s.title} - ${s.todo}`);
     }
   }
+  // PICKERS-SPEC §7.4: what this Mac cannot find (never makes "Set up your Mac" undone).
+  if (tb?.boundaries) for (const line of missingLines(tb, entry?.sources ?? null)) io.print(line);
   // Always there, never a step: asking is what the setup is for.
   io.print(`Ask the team: ${url}/ask`);
   if (afterSetup) {
@@ -712,6 +721,46 @@ async function status(d: SetupDeps, afterSetup: boolean): Promise<number> {
     io.print(`Done. Go back to the team page in your browser${toAccept ? ' and click Accept' : ''}.`);
   }
   return 0;
+}
+
+/**
+ * PICKERS-SPEC §7.4: the lines for what the member's Mac reported it cannot find (`sources`,
+ * the relay's view), named from the team's current boundaries: a `git clone` line for a
+ * repository, plain words for a whole org and for Drive. Keys that are no item of the current
+ * boundaries are left out; items added after the version the Mac looked at are "still checking".
+ */
+export function missingLines(tb: TeamBoundaries, sources: MemberSources | null): string[] {
+  const b: Boundaries | null = tb.boundaries;
+  if (!b || !sources) return [];
+  const items = boundaryItems(b);
+  const reported = new Set(sources.missing);
+  const lines: string[] = [];
+  const since = sinceByKey(b, tb.since ?? null, tb.version);
+  const missing = items.filter((i) => reported.has(itemKey(i)));
+  if (missing.length > 0) {
+    lines.push(`Your Mac can't find ${missing.length} of the things your team shares. It answers from the rest.`);
+    for (const i of missing) {
+      if (i.kind === 'repo') {
+        lines.push(`  - git clone https://github.com/${i.org}/${i.repo}.git`);
+        lines.push('    Run it in Terminal inside the folder you picked for projects.');
+      } else if (i.kind === 'org') {
+        lines.push(`  - No ${i.org} projects found. Clone the ones you work on into the folder you picked for projects: https://github.com/orgs/${i.org}/repositories`);
+      } else {
+        const name =
+          i.kind === 'drive'
+            ? i.shared_drive
+            : i.drive_id !== null && i.folder_id === i.drive_id
+              ? i.folder_name
+              : `${i.folder_name} (${i.drive_name !== null ? `in ${i.drive_name}` : 'in a shared drive'})`;
+        lines.push(
+          `  - ${name} isn't on this Mac. Make sure Google Drive for desktop is signed in with your work account; if it still doesn't show, ask a team owner for access to the shared drive.`,
+        );
+      }
+    }
+  }
+  const checking = sources.boundaries_version < tb.version ? items.filter((i) => (since.get(itemKey(i)) ?? tb.version) > sources.boundaries_version).length : 0;
+  if (checking > 0) lines.push(`Your Mac is still checking ${checking === 1 ? '1 new thing' : `${checking} new things`} your team shares.`);
+  return lines;
 }
 
 // -- main ------------------------------------------------------------------------------------------

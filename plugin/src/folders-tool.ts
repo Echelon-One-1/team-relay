@@ -14,7 +14,7 @@
 
 import type { Elicit } from './approvals-review.js';
 import type { TeamBoundaries } from './boundaries-types.js';
-import { buildAllowedSet, quotedOwnerText, setSummary, wideningText, type GitCache } from './boundary-set.js';
+import { buildAllowedSet, folderText, quotedOwnerText, setSummary, wideningText, type GitCache } from './boundary-set.js';
 import {
   acceptedAtVersion,
   changeMemberFolders,
@@ -91,7 +91,10 @@ function teamPart(tb: TeamBoundaries | null, otherTeam = false) {
     team_boundaries: {
       version: tb.version,
       github_orgs: b.github_orgs,
+      // PICKERS-SPEC §2: single repositories and picked Drive folders, when the team has any.
+      ...(b.github_repos.length > 0 ? { github_repos: b.github_repos.map((r) => `${r.org}/${r.repo}`) } : {}),
       // Owner-written names: data, quoted.
+      ...(b.drive_folders.length > 0 ? { drive_folders: b.drive_folders.map((x) => folderText(x, true)) } : {}),
       shared_drives: b.drives.map((d) => `${quotedOwnerText(d.shared_drive, 100)} (${d.domain})`),
       member_folders_allowed: b.member_folders,
     },

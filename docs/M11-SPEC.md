@@ -89,6 +89,13 @@ when the member leaves the roster.
   sentence (error text, which can hold paths, stays in the local log).
 - Claude's sign-in and the clone count are recounted every 10 min (or when the folders or the
   boundaries change); `drive.connected` is checked for every status (one keychain look-up).
+- (Correction, 11 Nov 2026, docs/PICKERS-SPEC.md §3.3-§3.4, §8.) The body may also hold
+  `"sources": {"boundaries_version": int, "missing": [item key, …]}` (optional; an explicit null is
+  400; ≤140 keys of ≤400 characters, no control characters): the team's own boundary items this
+  Mac did not find (`org:…`, `repo:…`, `folder:…`, `drive:…`). The relay keeps only keys of items of
+  its current boundaries, in the writing transaction, and filters them again on read.
+  `members/status` entries gain `"sources": {…}|null`: an owner gets every member's, anyone else
+  only their own (others `null`). Old daemons' statuses (no `sources`) are still accepted.
 
 ## 4. Asking from the console (relay + console)
 
@@ -224,6 +231,8 @@ command and the console links are that host; a relay deployed at its run.app URL
 - The daemon has the member's sign-in and Drive token (as the channel server did); the child it
   runs keeps M10's limits. The LaunchAgent and launcher are the member's own files, mode 600.
 - Status holds counts and booleans only: no paths, folder names, questions or answers.
+  (Correction, 11 Nov 2026, docs/PICKERS-SPEC.md §8: status holds counts, booleans and keys of
+  the team's own boundary items: no paths, local folder names, questions or answers.)
 
 ## Simpler joining (maintainer, 10 Nov 2026)
 

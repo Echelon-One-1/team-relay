@@ -1,8 +1,8 @@
-import { CircleAlert, CircleCheck, FolderGit2, FolderOpen, HardDrive, LoaderCircle, MessageSquare, ShieldAlert } from 'lucide-react'
+import { CircleAlert, CircleCheck, ExternalLink, Folder, FolderGit2, FolderOpen, HardDrive, LoaderCircle, MessageSquare, SearchX, ShieldAlert } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 
 import type { ChangeError } from '@/api/client'
-import type { TeamBoundaries } from '@/api/types'
+import type { MemberStatusEntry, TeamBoundaries } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -23,6 +23,7 @@ import {
   boundaryItems,
   CHECKING,
   currentVersion,
+  missingSources,
   publicOrigin,
   SETUP_STEPS,
   setupCommand,
@@ -123,9 +124,25 @@ function AcceptBoundaries({
         {items.orgs.map((o) => (
           <Line key={`org-${o.name}`} icon={<FolderGit2 />}>
             <span>
-              GitHub: <span className="font-mono text-[12px]">{o.name}</span>
+              GitHub: <span className="font-mono text-[12px]">{o.name}</span> <span className="text-subtle">(whole organisation)</span>
             </span>
             {o.isNew ? <NewMark /> : null}
+          </Line>
+        ))}
+        {items.repos.map((r) => (
+          <Line key={`repo-${r.name}`} icon={<FolderGit2 />}>
+            <span>
+              GitHub: <span className="font-mono text-[12px]">{r.name}</span>
+            </span>
+            {r.isNew ? <NewMark /> : null}
+          </Line>
+        ))}
+        {items.folders.map((f) => (
+          <Line key={f.key} icon={<Folder />}>
+            <span className="[overflow-wrap:anywhere]">
+              Google Drive: <span className="font-medium">{f.name}</span> <span className="text-subtle">({f.where})</span>
+            </span>
+            {f.isNew ? <NewMark /> : null}
           </Line>
         ))}
         {items.drives.map((d) => (
@@ -151,6 +168,72 @@ function AcceptBoundaries({
         <p role="alert" className="text-[12px] leading-snug text-bad" data-error>
           {error}
         </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * PICKERS-SPEC §7.4: what the viewer's Mac can't find of what the team shares, one line each
+ * (a repository with the line that clones it). Never part of "Set up your Mac": the Mac answers
+ * from the rest.
+ */
+function MissingSources({ entry, bounds }: { entry: MemberStatusEntry | null; bounds: TeamBoundaries | undefined }) {
+  const { missing, checking } = missingSources(entry, bounds)
+  if (missing.length === 0 && checking.length === 0) return null
+  return (
+    <div className="flex flex-col gap-2.5 rounded-md border border-warn/30 bg-warn-soft/50 px-3 py-2.5" data-missing-sources={missing.length}>
+      {missing.length > 0 ? (
+        <p className="flex items-start gap-2 text-[12.5px] leading-relaxed">
+          <SearchX aria-hidden className="mt-0.5 size-3.5 shrink-0 text-warn" />
+          <span>
+            Your Mac can&apos;t find {missing.length} of the things your team shares. It answers from the rest.
+          </span>
+        </p>
+      ) : null}
+      {missing.length > 0 ? (
+        <ul className="flex flex-col gap-2.5" aria-label="Not found on your Mac">
+          {missing.map((m) => (
+            <li key={m.key} className="flex min-w-0 flex-col gap-1.5 text-[12.5px] leading-relaxed" data-missing={m.key}>
+              {m.kind === 'repo' ? (
+                <>
+                  <span>
+                    <span className="font-mono text-[12px]">{m.name}</span> isn&apos;t on this Mac.
+                  </span>
+                  <CopyCommand text={m.command} label={`clone line for ${m.name}`} />
+                  <span className="text-[12px] text-subtle">{m.todo}</span>
+                </>
+              ) : m.kind === 'org' ? (
+                <>
+                  <span className="[overflow-wrap:anywhere]">{m.todo}</span>
+                  <a
+                    href={m.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex w-fit items-center gap-1 text-[12px] font-medium underline underline-offset-2 hover:text-foreground"
+                  >
+                    See {m.name}&apos;s projects on GitHub
+                    <ExternalLink aria-hidden className="size-3" />
+                  </a>
+                </>
+              ) : (
+                <span className="[overflow-wrap:anywhere]">{m.todo}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {checking.length > 0 ? (
+        <ul className="flex flex-col gap-1" aria-label="Your Mac is still checking">
+          {checking.map((c) => (
+            <li key={c.key} className="flex min-w-0 items-center gap-2 text-[12px] text-subtle" data-checking={c.key}>
+              <LoaderCircle aria-hidden className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+              <span className="min-w-0 [overflow-wrap:anywhere]">
+                {c.name}: checking…
+              </span>
+            </li>
+          ))}
+        </ul>
       ) : null}
     </div>
   )
@@ -254,6 +337,7 @@ export function SetupPage() {
       ) : (
         <OpenChecks checks={step.checks} />
       )}
+      <MissingSources entry={v.entry} bounds={bounds.data} />
     </>
   )
 

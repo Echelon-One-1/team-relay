@@ -447,6 +447,34 @@ describe('the /team-relay:drive command line', () => {
     });
     expect(notSignedIn.line).toMatch(/run \/team-relay:login first/);
   });
+
+  it('a team that shares only picked Drive folders connects for their domain (PICKERS-SPEC §6.2); a malformed document is refused', async () => {
+    const folderOnly = {
+      team: 'demo',
+      version: 1,
+      boundaries: {
+        topic: 't',
+        github_orgs: [],
+        github_repos: [],
+        drive_folders: [{ domain: DOMAIN, drive_id: '0AExampleDriveId0PVA', folder_id: '1ExampleFolderClients0000000000a', folder_name: 'Clients', drive_name: 'Example Team Drive' }],
+        drives: [],
+        member_folders: false,
+      },
+      updated_at: null,
+      updated_by: null,
+    };
+    // The domain is found (the next thing is the relay's Drive client, refused here).
+    const out = await runDriveCli(['connect'], {
+      platform: 'darwin',
+      keychain,
+      relay: () => ({ driveClient: async () => Promise.reject(Object.assign(new Error('x'), { status: 404, code: 'drive_not_configured' })), boundaries: async () => folderOnly }),
+    });
+    expect(out.line).toBe('Google Drive: Google Drive is not set up for this team (ask the relay admin)');
+    const other = await runDriveCli(['connect', 'bob@other.example'], { platform: 'darwin', keychain, relay: () => ({ driveClient: async () => CLIENT, boundaries: async () => folderOnly }) });
+    expect(other.line).toMatch(/not in your team's Drive domain/);
+    const bad = await runDriveCli(['connect'], { platform: 'darwin', keychain, relay: () => ({ driveClient: async () => CLIENT, boundaries: async () => ({ version: 1, boundaries: { topic: 't' } }) }) });
+    expect(bad).toEqual({ exitCode: 1, line: "The team relay did not give your team's boundaries; try again later." });
+  });
 });
 
 describe('commands/drive.md', () => {

@@ -5,7 +5,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import { nextSince } from '../../src/boundaries-rule.js';
+import { knownItemKeys, nextSince, readBoundaries } from '../../src/boundaries-rule.js';
 import type { Boundaries, BoundariesSince } from '../../src/boundaries-types.js';
 
 export const TOKENS: Record<string, string> = {
@@ -313,11 +313,20 @@ export class FakeRelay {
       return this.send(res, 200, { ok: true });
     }
     if (m === 'GET' && rest.length === 2 && rest[0] === 'members' && rest[1] === 'status') {
+      // PICKERS-SPEC §3.4, as the relay does: each entry's `sources`, narrowed to the current
+      // boundaries' items, goes to an owner for every member and to anyone else for their own
+      // entry only; the status itself never carries them.
+      const owner = this.roster.find((r) => r.member === member)?.role === 'owner';
+      const current = this.boundaries.boundaries ? readBoundaries(this.boundaries.boundaries) : null;
       return this.send(res, 200, {
         members: MEMBERS.map((x) => {
-          const st = this.memberStatus.get(x) ?? null;
-          const seen = st ? Date.parse(String(st.seen_at)) : NaN;
-          return { member: x, status: st, answering: Number.isFinite(seen) && Date.now() - seen < 180_000, accepted_version: this.acceptances.get(x) ?? 0 };
+          const stored = this.memberStatus.get(x) ?? null;
+          const { sources: reported, ...st } = stored ?? {};
+          const seen = stored ? Date.parse(String(stored.seen_at)) : NaN;
+          const r = reported as { boundaries_version: number; missing: string[] } | undefined;
+          const sources =
+            r && (owner || x === member) ? { boundaries_version: r.boundaries_version, missing: current ? knownItemKeys(current, r.missing) : [] } : null;
+          return { member: x, status: stored ? st : null, answering: Number.isFinite(seen) && Date.now() - seen < 180_000, accepted_version: this.acceptances.get(x) ?? 0, sources };
         }),
         boundaries_version: this.boundaries.version,
       });
