@@ -8,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useJoin, useMe, useRosterChange } from '@/hooks/queries'
 import { useNav } from '@/hooks/team'
 import { addProblem, entries, isInvited, ownerCount, sortedMembers, suggestMemberId, visibleEmails } from '@/lib/roster'
-import { currentVersion, inviteMessage, publicOrigin, SETUP_STEPS, setupCount } from '@/lib/setup'
+import { currentVersion, inviteMessage, missingNames, publicOrigin, SETUP_STEPS, setupCount } from '@/lib/setup'
 import { readStored, writeStored } from '@/lib/stored'
 import { cn } from '@/lib/utils'
 import { CopyTextButton } from './copy'
@@ -89,18 +89,36 @@ function InviteCopy() {
   )
 }
 
-/** M11 §6: a member's setup progress and whether their Mac answers now. */
-export type MemberProgress = { done: number; answering: boolean }
+/**
+ * M11 §6: a member's setup progress and whether their Mac answers now. PICKERS-SPEC §7.4: what
+ * their Mac can't find, by name (owners only: the relay gives no one else another member's).
+ */
+export type MemberProgress = { done: number; answering: boolean; missing: string[] }
 
-function Progress({ p }: { p: MemberProgress }) {
+function Progress({ p, owner }: { p: MemberProgress; owner: boolean }) {
+  const missing = owner ? p.missing : []
   return (
-    <span className="inline-flex items-center gap-1.5 text-[11.5px] text-subtle" data-setup-progress={p.done} data-answering={p.answering ? 'true' : 'false'}>
-      <span
-        aria-hidden
-        className={cn('size-1.5 shrink-0 rounded-full', p.answering ? 'bg-ok' : 'border border-faint')}
-      />
-      <span className="tnum">{p.done === SETUP_STEPS ? 'set up' : `${p.done} of ${SETUP_STEPS} set up`}</span>
-      {p.answering ? <span className="text-ok">answering now</span> : <span className="sr-only">, not answering now</span>}
+    <span className="flex min-w-0 flex-col gap-0.5">
+      <span className="inline-flex items-center gap-1.5 text-[11.5px] text-subtle" data-setup-progress={p.done} data-answering={p.answering ? 'true' : 'false'}>
+        <span aria-hidden className={cn('size-1.5 shrink-0 rounded-full', p.answering ? 'bg-ok' : 'border border-faint')} />
+        <span className="tnum">{p.done === SETUP_STEPS ? 'set up' : `${p.done} of ${SETUP_STEPS} set up`}</span>
+        {p.answering ? <span className="text-ok">answering now</span> : <span className="sr-only">, not answering now</span>}
+      </span>
+      {missing.length > 0 ? (
+        <details className="group text-[11.5px]" data-missing-count={missing.length}>
+          <summary className="w-fit cursor-pointer list-none rounded text-warn outline-none focus-visible:ring-3 focus-visible:ring-ring/40 [&::-webkit-details-marker]:hidden">
+            <span className="tnum">can&apos;t find {missing.length}</span>
+            <span className="text-subtle group-open:hidden"> (show)</span>
+          </summary>
+          <ul className="mt-1 flex flex-col gap-0.5 pl-2 text-subtle" aria-label="Not found on their Mac">
+            {missing.map((n) => (
+              <li key={n} className="[overflow-wrap:anywhere]">
+                {n}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
     </span>
   )
 }
@@ -160,7 +178,7 @@ function MemberRow({
               {emails.join(', ')}
             </span>
           ) : null}
-          {progress && !invited ? <Progress p={progress} /> : null}
+          {progress && !invited ? <Progress p={progress} owner={owner} /> : null}
         </div>
         {owner && invited ? (
           <div className="flex shrink-0 items-center gap-1 max-sm:basis-full max-sm:pl-[30px] sm:ml-auto">
@@ -368,7 +386,7 @@ export function progressByMember(statuses: MembersStatus | undefined, bounds: Te
   const out = new Map<string, MemberProgress>()
   if (!statuses) return out
   const current = currentVersion(bounds, statuses.boundaries_version)
-  for (const e of statuses.members) out.set(e.member, { done: setupCount(e, bounds, current), answering: e.answering })
+  for (const e of statuses.members) out.set(e.member, { done: setupCount(e, bounds, current), answering: e.answering, missing: missingNames(e, bounds) })
   return out
 }
 

@@ -16,6 +16,11 @@ wrong types and a bool for a number are refused):
 - ``drive``: ``connected`` a bool.
 - ``self_test``: ``ok`` a bool, ``at`` an RFC 3339 time with a zone, ``reason`` null or at most
   200 characters with no control or formatting character other than newline and tab.
+- ``sources`` (PICKERS-SPEC §3.3), optional (an older plugin sends none; null is refused):
+  ``boundaries_version`` an integer 0..2^31-1, ``missing`` at most 140 strings of 1-400
+  characters with no control or format character. The service keeps only the keys of items of
+  the team's current boundaries (:func:`relay.boundaries.known_item_keys`), so nothing but the
+  team's own item names is stored.
 
 Times are stored and answered in the relay's own form (UTC, milliseconds, ``Z``). A refusal is
 ``400 invalid_body`` naming the field, never the value sent.
@@ -30,6 +35,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .boundaries import MAX_MISSING, key_ok
 from .clock import format_time
 from .errors import ApiError
 from .store import Acceptance
@@ -84,12 +90,19 @@ class _SelfTest(_Strict):
     reason: str | None = Field(max_length=MAX_REASON)
 
 
+class _Sources(_Strict):
+    boundaries_version: int = Field(ge=0, le=MAX_VERSION)
+    missing: list[str] = Field(max_length=MAX_MISSING)
+
+
 class _StatusBody(_Strict):
     daemon: _Daemon
     claude: _Claude
     folders: _Folders
     drive: _Drive
     self_test: _SelfTest
+    # Absent from an older plugin's status; when present, never null.
+    sources: _Sources | None = None
 
 
 _FIELDS = frozenset(
@@ -110,6 +123,9 @@ _FIELDS = frozenset(
         "ok",
         "at",
         "reason",
+        "sources",
+        "boundaries_version",
+        "missing",
     }
 )
 
@@ -166,7 +182,10 @@ def parse_accept_body(raw: Any) -> int:
 
 
 def parse_status_body(raw: Any) -> dict[str, Any]:
-    """The status as it is stored: the body checked as the module says, times normalised."""
+    """The status as it is stored: the body checked as the module says, times normalised.
+    ``sources`` as sent (the service narrows ``missing`` to the team's own item keys)."""
+    if isinstance(raw, dict) and "sources" in raw and raw["sources"] is None:
+        raise _invalid("sources", "an object; leave it out when there is nothing to report")
     body = _validate(_StatusBody, raw)
     if not _clean(body.daemon.version):
         raise _invalid("daemon.version", "no control or formatting characters")
@@ -175,7 +194,14 @@ def parse_status_body(raw: Any) -> dict[str, Any]:
         raise _invalid(
             "self_test.reason", "no control or formatting characters other than newline and tab"
         )
-    return {
+    if body.sources is not None:
+        for i, key in enumerate(body.sources.missing):
+            if not key_ok(key):
+                raise _invalid(
+                    f"sources.missing.{i}",
+                    "1 to 400 characters, no control or formatting characters",
+                )
+    status: dict[str, Any] = {
         "daemon": {
             "version": body.daemon.version,
             "started_at": _time(body.daemon.started_at, "daemon.started_at"),
@@ -193,11 +219,36 @@ def parse_status_body(raw: Any) -> dict[str, Any]:
             "reason": reason,
         },
     }
+    if body.sources is not None:
+        status["sources"] = {
+            "boundaries_version": body.sources.boundaries_version,
+            "missing": list(body.sources.missing),
+        }
+    return status
+
+
+def sources_json(status: dict[str, Any], keep: list[str]) -> dict[str, Any] | None:
+    """``MemberSources`` of ``plugin/src/boundaries-types.ts`` from a stored status: its
+    ``boundaries_version`` and ``keep`` (the stored keys narrowed by the caller to the current
+    boundaries' items); None when the status has none (an older plugin's)."""
+    stored = status.get("sources")
+    if not isinstance(stored, dict):
+        return None
+    return {"boundaries_version": int(stored["boundaries_version"]), "missing": list(keep)}
+
+
+def stored_missing(status: dict[str, Any]) -> list[str]:
+    """The missing keys a stored status holds (none when it has no ``sources``)."""
+    stored = status.get("sources")
+    if not isinstance(stored, dict):
+        return []
+    return [k for k in stored.get("missing") or [] if isinstance(k, str)]
 
 
 def status_json(status: dict[str, Any], seen_at: datetime) -> dict[str, Any]:
     """A stored status as the routes answer it: the five groups in their order, then
-    ``seen_at``. Re-built field by field, so a stored document never hands out more."""
+    ``seen_at``. Re-built field by field, so a stored document never hands out more; its
+    ``sources`` never (the member's entry carries them, to whom the owner rule allows)."""
     return {
         "daemon": {
             "version": status["daemon"]["version"],

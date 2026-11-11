@@ -8,7 +8,13 @@
 // M11-SPEC §2: the member accepts in the browser and the relay keeps the accepted version
 // (GET me/acceptance); acceptedAtVersion turns that version into the accepted set. The
 // `accepted` entry M10 kept in this file is ignored from now on: still read without complaint
-// (a malformed one counts as absent), never used to decide what is read.
+// (a malformed one counts as absent; one without the picked lists reads with them empty), never
+// used to decide what is read.
+//
+// PICKERS-SPEC §2.3: every item (whole org, repository, Drive folder, legacy drive) is known by
+// its key (boundaries-rule.ts itemKey) and covered by an acceptance of version n when its
+// `since` is at most n. A repository is held by an accepted whole org of its org, and a folder by
+// an accepted whole shared drive of its drive, so narrowing either needs no new acceptance.
 //
 //   $XDG_CONFIG_HOME/team-relay/boundaries.local.json   (default ~/.config/team-relay/)
 //   {"teams": {"<team>": {"repo_roots": ["~/code/example-org"], "extra_folders": [],
@@ -31,8 +37,26 @@ import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFi
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
 import { configDir } from './answering-lock.js';
-import { BOUNDARIES_MAX_DRIVES, BOUNDARIES_MAX_ORGS, BOUNDARIES_VERSION_MAX, domainOk, driveNameOk, orgOk } from './boundaries-rule.js';
-import type { Boundaries, BoundariesSince, DriveBoundary } from './boundaries-types.js';
+import {
+  BOUNDARIES_MAX_DRIVES,
+  BOUNDARIES_MAX_FOLDERS,
+  BOUNDARIES_MAX_ORGS,
+  BOUNDARIES_MAX_REPOS,
+  BOUNDARIES_VERSION_MAX,
+  boundaryItems,
+  domainOk,
+  driveKey,
+  driveNameOk,
+  folderKey,
+  folderOk,
+  itemKey,
+  normaliseBoundaries,
+  orgKey,
+  orgOk,
+  repoKey,
+  repoOk,
+} from './boundaries-rule.js';
+import type { Boundaries, BoundariesSince, BoundaryItem, DriveBoundary, FolderBoundary, ItemKey, RepoBoundary } from './boundaries-types.js';
 import { TEAM_RE } from './relay-client-core.js';
 import { folderSafety } from './scope.js';
 
@@ -47,7 +71,16 @@ const MAX_FILE_BYTES = 256 * 1024;
 export type MemberFolders = { repo_roots: string[]; extra_folders: string[] };
 export type FolderList = keyof MemberFolders;
 /** M10-SPEC §7.1: the boundaries the member accepted for a team (what the answerer may come to read). */
-export type AcceptedBoundaries = { version: number; github_orgs: string[]; drives: DriveBoundary[]; member_folders: boolean };
+export type AcceptedBoundaries = {
+  version: number;
+  github_orgs: string[];
+  /** PICKERS-SPEC §2.3: empty in what an M10 plugin accepted. */
+  github_repos: RepoBoundary[];
+  /** PICKERS-SPEC §2.3: empty in what an M10 plugin accepted. */
+  drive_folders: FolderBoundary[];
+  drives: DriveBoundary[];
+  member_folders: boolean;
+};
 /** One team's local settings. `accepted` null: the member has not accepted any boundaries yet. */
 export type TeamSettings = MemberFolders & { accepted: AcceptedBoundaries | null };
 export type MemberSettings = { teams: Record<string, TeamSettings> };
@@ -125,7 +158,7 @@ export function sameDrive(a: DriveBoundary, b: DriveBoundary): boolean {
 /** The accepted part of one team's settings, checked by the boundaries rules. */
 export function parseAccepted(raw: unknown): AcceptedBoundaries {
   if (!isObj(raw)) throw new MemberFoldersError('accepted is not a JSON object');
-  onlyKeys(raw, ['version', 'github_orgs', 'drives', 'member_folders'], 'accepted');
+  onlyKeys(raw, ['version', 'github_orgs', 'github_repos', 'drive_folders', 'drives', 'member_folders'], 'accepted');
   const v = raw.version;
   if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 1 || v > BOUNDARIES_VERSION_MAX) throw new MemberFoldersError('accepted.version must be a whole number from 1');
   if (!Array.isArray(raw.github_orgs) || raw.github_orgs.length > BOUNDARIES_MAX_ORGS) throw new MemberFoldersError('accepted.github_orgs must be a list of at most 10 org names');
@@ -145,7 +178,22 @@ export function parseAccepted(raw: unknown): AcceptedBoundaries {
     if (!drives.some((x) => sameDrive(x, drive))) drives.push(drive);
   }
   if (typeof raw.member_folders !== 'boolean') throw new MemberFoldersError('accepted.member_folders must be true or false');
-  return { version: v, github_orgs: orgs, drives, member_folders: raw.member_folders };
+  // PICKERS-SPEC §2.3: absent from what an M10 plugin accepted.
+  const rawRepos = raw.github_repos ?? [];
+  if (!Array.isArray(rawRepos) || rawRepos.length > BOUNDARIES_MAX_REPOS) throw new MemberFoldersError('accepted.github_repos must be a list of at most 100 repositories');
+  const repos: RepoBoundary[] = [];
+  for (const r of rawRepos) {
+    if (!repoOk(r)) throw new MemberFoldersError('accepted.github_repos has an entry that is not a GitHub repository');
+    if (!repos.some((x) => repoKey(x) === repoKey(r))) repos.push({ org: r.org, repo: r.repo, id: r.id });
+  }
+  const rawFolders = raw.drive_folders ?? [];
+  if (!Array.isArray(rawFolders) || rawFolders.length > BOUNDARIES_MAX_FOLDERS) throw new MemberFoldersError('accepted.drive_folders must be a list of at most 20 folders');
+  const folders: FolderBoundary[] = [];
+  for (const f of rawFolders) {
+    if (!folderOk(f)) throw new MemberFoldersError('accepted.drive_folders has an entry that is not a shared-drive folder');
+    if (!folders.some((x) => x.folder_id === f.folder_id)) folders.push({ domain: f.domain, drive_id: f.drive_id, folder_id: f.folder_id, folder_name: f.folder_name, drive_name: f.drive_name });
+  }
+  return { version: v, github_orgs: orgs, github_repos: repos, drive_folders: folders, drives, member_folders: raw.member_folders };
 }
 
 /** One team's settings, checked strictly. */
@@ -319,7 +367,13 @@ export function changeMemberFolders<T extends MemberFolders>(
 // -- M10-SPEC §7.1: what the member accepted, and what the answerer may read ---------------------
 
 /** What a team's current boundaries add to what the member accepted (all of it when nothing was). */
-export type Widening = { github_orgs: string[]; drives: DriveBoundary[]; member_folders: boolean };
+export type Widening = {
+  github_orgs: string[];
+  github_repos: RepoBoundary[];
+  drive_folders: FolderBoundary[];
+  drives: DriveBoundary[];
+  member_folders: boolean;
+};
 
 export type Effective = {
   /** The boundaries the answerer works within: the team's current ones narrowed to what was accepted. */
@@ -331,64 +385,100 @@ export type Effective = {
 };
 
 /**
- * M10-SPEC §7.1: in which version each item of the team's current boundaries was last added
- * (the relay's `since`). An item the relay does not name counts as added in the current
- * version, so no earlier acceptance covers it.
+ * M10-SPEC §7.1 and PICKERS-SPEC §2.3: in which version each item of a boundaries document was
+ * last added (the relay's `since`), by item key, and that document's version. An item the relay
+ * does not name counts as added in the current version, so no earlier acceptance covers it.
  */
-/** When each item of a boundaries document was last added, and that document's version. */
-export type ItemSince = { version: number; org: (org: string) => number; drive: (d: DriveBoundary) => number; memberFolders: () => number };
+export type ItemSince = { version: number; item: (key: ItemKey) => number; memberFolders: () => number };
+
+/** An own entry of a map read from JSON (a key may be named like an Object.prototype member). */
+const own = (o: Record<string, number> | undefined, key: string): number | undefined => (o && Object.prototype.hasOwnProperty.call(o, key) ? o[key] : undefined);
 
 /** The `since` of a boundaries document from the relay, as lookups (see ItemSince). */
-export function sinceOf(tb: { version: number; since?: BoundariesSince | null }): ItemSince {
+export function sinceOf(tb: { version: number; since?: (Omit<BoundariesSince, 'github_repos' | 'drive_folders'> & Partial<BoundariesSince>) | null }): ItemSince {
   const s = tb.since ?? null;
+  const item = (key: ItemKey): number | undefined => {
+    if (!s) return undefined;
+    const at = key.indexOf(':');
+    const kind = key.slice(0, at);
+    const rest = key.slice(at + 1);
+    if (kind === 'org') return own(s.github_orgs, rest);
+    if (kind === 'repo') return own(s.github_repos, rest);
+    if (kind === 'folder') return own(s.drive_folders, rest);
+    return s.drives.find((d) => driveKey(d) === key)?.since;
+  };
   return {
     version: tb.version,
-    // Own keys only: an org may be named like an Object.prototype member ("constructor").
-    org: (o) => {
-      const key = o.toLowerCase();
-      return s && Object.prototype.hasOwnProperty.call(s.github_orgs, key) ? (s.github_orgs[key] ?? tb.version) : tb.version;
-    },
-    drive: (d) => s?.drives.find((x) => sameDrive(x, d))?.since ?? tb.version,
+    item: (key) => item(key) ?? tb.version,
     memberFolders: () => s?.member_folders ?? tb.version,
   };
 }
 
+const keySet = (a: AcceptedBoundaries): Set<ItemKey> =>
+  new Set<ItemKey>([...a.github_orgs.map(orgKey), ...a.github_repos.map(repoKey), ...a.drive_folders.map(folderKey), ...a.drives.map(driveKey)]);
+
+/** The whole shared drives an accepted set holds (by drive id). */
+const wholeDrives = (a: AcceptedBoundaries): Set<string> => new Set(a.drive_folders.filter((f) => f.drive_id !== null && f.folder_id === f.drive_id).map((f) => f.folder_id));
+
 /**
- * M10-SPEC §7.1: the intersection of the team's current boundaries and the accepted set (orgs
- * compared without case, drives exactly on domain and name, member folders only when both
- * allow them), and what the current boundaries add to it. An accepted item counts only when it
- * has been in the boundaries since the accepted version (`since`): one the team dropped and
- * added back after that is waiting again. The topic is the team's current one.
+ * Whether the accepted set holds an item: the item itself (same key), or, for a repository, its
+ * org as a whole org, and for a Drive folder with a drive id, that whole shared drive.
+ */
+function holds(keys: Set<ItemKey>, wholes: Set<string>, item: BoundaryItem): boolean {
+  if (keys.has(itemKey(item))) return true;
+  if (item.kind === 'repo') return keys.has(orgKey(item.org));
+  if (item.kind === 'folder') return item.drive_id !== null && wholes.has(item.drive_id);
+  return false;
+}
+
+function widening(items: BoundaryItem[], member_folders: boolean): Widening {
+  const w: Widening = { github_orgs: [], github_repos: [], drive_folders: [], drives: [], member_folders };
+  for (const i of items) {
+    if (i.kind === 'org') w.github_orgs.push(i.org);
+    else if (i.kind === 'repo') w.github_repos.push({ org: i.org, repo: i.repo, id: i.id });
+    else if (i.kind === 'folder') w.drive_folders.push({ domain: i.domain, drive_id: i.drive_id, folder_id: i.folder_id, folder_name: i.folder_name, drive_name: i.drive_name });
+    else w.drives.push({ domain: i.domain, shared_drive: i.shared_drive });
+  }
+  return w;
+}
+
+const widens = (w: Widening) => w.github_orgs.length > 0 || w.github_repos.length > 0 || w.drive_folders.length > 0 || w.drives.length > 0 || w.member_folders;
+
+/**
+ * M10-SPEC §7.1: the intersection of the team's current boundaries and the accepted set (by item
+ * key; a repository also through its accepted whole org, a folder through its accepted whole
+ * drive; member folders only when both allow them), and what the current boundaries add to it.
+ * An accepted item counts only when it has been in the boundaries since the accepted version
+ * (`since`): one the team dropped and added back after that is waiting again. The topic is the
+ * team's current one.
  */
 export function effectiveBoundaries(current: Boundaries, acceptedRaw: AcceptedBoundaries | null, since: ItemSince): Effective {
   const accepted = acceptedRaw ? (narrowAccepted(current, acceptedRaw, since)?.accepted ?? acceptedRaw) : null;
-  const orgs = new Set((accepted?.github_orgs ?? []).map((o) => o.toLowerCase()));
-  const acceptedDrives = accepted?.drives ?? [];
-  const added: Widening = {
-    github_orgs: current.github_orgs.filter((o) => !orgs.has(o.toLowerCase())),
-    drives: current.drives.filter((d) => !acceptedDrives.some((a) => sameDrive(a, d))),
-    member_folders: current.member_folders && accepted?.member_folders !== true,
-  };
-  const widens = added.github_orgs.length > 0 || added.drives.length > 0 || added.member_folders;
+  const keys = accepted ? keySet(accepted) : new Set<ItemKey>();
+  const wholes = accepted ? wholeDrives(accepted) : new Set<string>();
+  const stale = accepted !== null && accepted.version > since.version;
+  const isIn = (i: BoundaryItem) => accepted !== null && !stale && since.item(itemKey(i)) <= accepted.version && holds(keys, wholes, i);
+  const items = boundaryItems(current);
+  const inside = items.filter(isIn);
+  const kept = widening(inside, current.member_folders && accepted?.member_folders === true);
+  const added = widening(
+    items.filter((i) => !isIn(i)),
+    current.member_folders && accepted?.member_folders !== true,
+  );
   return {
-    boundaries: {
-      topic: current.topic,
-      github_orgs: current.github_orgs.filter((o) => orgs.has(o.toLowerCase())),
-      drives: current.drives.filter((d) => acceptedDrives.some((a) => sameDrive(a, d))),
-      member_folders: current.member_folders && accepted?.member_folders === true,
-    },
+    boundaries: { topic: current.topic, ...kept },
     notAccepted: accepted === null,
-    pending: widens ? added : null,
+    pending: widens(added) ? added : null,
   };
 }
 
 /**
- * M10-SPEC §7.1: the accepted set without what the team's current boundaries no longer hold
- * (orgs compared without case, drives exactly, member folders only while the team allows
- * them) and without what they hold only since a version after the accepted one (`since`: the
- * team dropped it and added it back, whether or not this host saw the drop), and what that
- * drops; null when nothing is dropped. Narrowing needs no dialog, and what is dropped needs a
- * new acceptance to come back.
+ * M10-SPEC §7.1: the accepted set without what the team's current boundaries no longer hold and
+ * without what they hold only since a version after the accepted one (`since`: the team dropped
+ * it and added it back, whether or not this host saw the drop), and what that drops; null when
+ * nothing changes. An accepted whole org the team narrowed to some of its repositories becomes
+ * those repositories (and a whole drive its folders), when they are covered. Narrowing needs no
+ * dialog, and what is dropped needs a new acceptance to come back.
  */
 export function narrowAccepted(current: Boundaries, accepted: AcceptedBoundaries | null, since: ItemSince): { accepted: AcceptedBoundaries; dropped: Widening } | null {
   if (!accepted) return null;
@@ -396,22 +486,30 @@ export function narrowAccepted(current: Boundaries, accepted: AcceptedBoundaries
   // the same id (deleted and created again, versions start over): it covers nothing.
   const stale = accepted.version > since.version;
   const covered = (n: number) => !stale && n <= accepted.version;
-  const orgs = new Set(current.github_orgs.map((o) => o.toLowerCase()));
-  const keep = (o: string) => orgs.has(o.toLowerCase()) && covered(since.org(o));
-  const listed = (d: DriveBoundary) => current.drives.some((c) => sameDrive(c, d)) && covered(since.drive(d));
-  const folders = current.member_folders && covered(since.memberFolders());
-  const dropped: Widening = {
-    github_orgs: accepted.github_orgs.filter((o) => !keep(o)),
-    drives: accepted.drives.filter((d) => !listed(d)),
-    member_folders: accepted.member_folders && !folders,
-  };
-  if (dropped.github_orgs.length === 0 && dropped.drives.length === 0 && !dropped.member_folders) return null;
+  const keys = keySet(accepted);
+  const wholes = wholeDrives(accepted);
+  const kept = boundaryItems(current).filter((i) => covered(since.item(itemKey(i))) && holds(keys, wholes, i));
+  const keptKeys = new Set(kept.map(itemKey));
+  const folders = accepted.member_folders && current.member_folders && covered(since.memberFolders());
+  const next: AcceptedBoundaries = { version: accepted.version, ...widening(kept, folders) };
+  const droppedItems: BoundaryItem[] = [
+    ...accepted.github_orgs.map((org): BoundaryItem => ({ kind: 'org', org })),
+    ...accepted.github_repos.map((r): BoundaryItem => ({ kind: 'repo', ...r })),
+    ...accepted.drive_folders.map((f): BoundaryItem => ({ kind: 'folder', ...f })),
+    ...accepted.drives.map((d): BoundaryItem => ({ kind: 'drive', ...d })),
+  ].filter((i) => !keptKeys.has(itemKey(i)));
+  const dropped = widening(droppedItems, accepted.member_folders && !folders);
+  const same = keptKeys.size === keys.size && [...keys].every((k) => keptKeys.has(k));
+  if (!widens(dropped) && same) return null;
+  // Entries kept as accepted wrote them (case as accepted) where the key is the same.
+  const asAccepted = <T>(list: T[], key: (x: T) => ItemKey, from: T[]) => list.map((x) => from.find((y) => key(y) === key(x)) ?? x);
   return {
     accepted: {
-      version: accepted.version,
-      github_orgs: accepted.github_orgs.filter(keep),
-      drives: accepted.drives.filter(listed),
-      member_folders: accepted.member_folders && folders,
+      ...next,
+      github_orgs: next.github_orgs.map((o) => accepted.github_orgs.find((a) => a.toLowerCase() === o.toLowerCase()) ?? o),
+      github_repos: asAccepted(next.github_repos, repoKey, accepted.github_repos),
+      drive_folders: asAccepted(next.drive_folders, folderKey, accepted.drive_folders),
+      drives: asAccepted(next.drives, driveKey, accepted.drives),
     },
     dropped,
   };
@@ -456,10 +554,13 @@ export function acceptedAtVersion(current: Boundaries, version: unknown, since: 
 
 /** What accepting a team's boundaries (version `version`) records. */
 export function acceptedFrom(current: Boundaries, version: number): AcceptedBoundaries {
+  const n = normaliseBoundaries(current);
   return parseAccepted({
     version,
-    github_orgs: current.github_orgs,
-    drives: current.drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive })),
-    member_folders: current.member_folders,
+    github_orgs: n.github_orgs,
+    github_repos: n.github_repos,
+    drive_folders: n.drive_folders,
+    drives: n.drives,
+    member_folders: n.member_folders,
   });
 }

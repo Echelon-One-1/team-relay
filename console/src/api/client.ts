@@ -7,6 +7,7 @@ import type {
   ApprovalsSummary,
   Boundaries,
   Directory,
+  GithubListing,
   InboxSummary,
   Join,
   Me,
@@ -15,6 +16,7 @@ import type {
   RequestDetail,
   Roster,
   RosterRole,
+  SourcesConfig,
   TeamBoundaries,
   Teams,
 } from './types'
@@ -61,13 +63,15 @@ export class ApiError extends Error {
   readonly email: string | null
   /** For a relay refusal: the relay's status (401: the stored sign-in was refused). */
   readonly relayStatus: number | null
+  /** For a relay refusal: the relay's error code (github_unavailable, ...), when it is one. */
+  readonly relayError: string | null
 
   constructor(
     kind: ApiErrorKind,
     status: number | null,
     message: string,
     retryAfterMs: number | null = null,
-    extra: { email?: string | null; relayStatus?: number | null } = {},
+    extra: { email?: string | null; relayStatus?: number | null; relayError?: string | null } = {},
   ) {
     super(message)
     this.name = 'ApiError'
@@ -76,6 +80,7 @@ export class ApiError extends Error {
     this.retryAfterMs = retryAfterMs
     this.email = extra.email ?? null
     this.relayStatus = extra.relayStatus ?? null
+    this.relayError = extra.relayError ?? null
   }
 }
 
@@ -181,7 +186,8 @@ export async function getJson<T>(path: string, team?: string | null): Promise<Ti
     if (res.status === 502 && (await relayRateLimited(res))) {
       throw new ApiError('rate_limited', res.status, 'Slowed down by the relay', retryAfter(res))
     }
-    throw new ApiError('relay_unreachable', res.status, 'The relay did not answer', null, { relayStatus: await relayStatusOf(res) })
+    const refusal = await relayRefusalOf(res)
+    throw new ApiError('relay_unreachable', res.status, 'The relay did not answer', retryAfter(res), refusal)
   }
   if (!res.ok) {
     throw new ApiError('failed', res.status, `Request failed with ${res.status}`)
@@ -204,13 +210,18 @@ function retryAfter(res: Response): number | null {
   return Math.min(300, Number(v.trim())) * 1000
 }
 
-async function relayStatusOf(res: Response): Promise<number | null> {
+/** The relay's status and error code from the console server's 502 relay_refused, when it says. */
+async function relayRefusalOf(res: Response): Promise<{ relayStatus: number | null; relayError: string | null }> {
   try {
     const body: unknown = await res.clone().json()
-    const st = typeof body === 'object' && body !== null ? (body as { relay_status?: unknown }).relay_status : null
-    return typeof st === 'number' ? st : null
+    if (typeof body !== 'object' || body === null) return { relayStatus: null, relayError: null }
+    const b = body as { relay_status?: unknown; relay_error?: unknown }
+    return {
+      relayStatus: typeof b.relay_status === 'number' ? b.relay_status : null,
+      relayError: typeof b.relay_error === 'string' && /^[a-z_]{1,40}$/.test(b.relay_error) ? b.relay_error : null,
+    }
   } catch {
-    return null
+    return { relayStatus: null, relayError: null }
   }
 }
 
@@ -364,6 +375,10 @@ export const api = {
   /** M10 §1: an owner replaces them, from the version they were read at (stale: 409). */
   setBoundaries: (version: number, boundaries: Boundaries, team?: string | null) =>
     sendChange<TeamBoundaries>('PUT', 'api/boundaries', { version, boundaries }, team),
+  /** PICKERS-SPEC §3.5 (owners): whether the GitHub App and the Google Picker are set up. */
+  sourcesConfig: (team?: string | null) => getJson<SourcesConfig>('api/sources/config', team),
+  /** PICKERS-SPEC §3.6 (owners): the repositories of the orgs the relay's GitHub App is installed on. */
+  sourcesGithub: (team?: string | null) => getJson<GithubListing>('api/sources/github', team),
   addMember: (member: string, email: string, team?: string | null) => sendChange<unknown>('POST', 'api/roster', { member, email }, team),
   setRole: (member: string, role: RosterRole, team?: string | null) => sendChange<unknown>('PATCH', `api/roster/${seg(member)}`, { role }, team),
   removeMember: (member: string, team?: string | null) => sendChange<unknown>('DELETE', `api/roster/${seg(member)}`, undefined, team),

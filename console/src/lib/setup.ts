@@ -6,7 +6,9 @@
 // the owner's invite message. Everything here is read by people who have never used Terminal:
 // plain sentences, never the names of tools.
 
-import type { Acceptance, Join, MemberStatusEntry, MembersStatus, TeamBoundaries } from '@/api/types'
+import type { Acceptance, ItemKey, Join, MemberSources, MemberStatusEntry, MembersStatus, TeamBoundaries } from '@/api/types'
+import { toBoundaries } from './boundaries'
+import { folderLabel, folderWhere, itemKey, itemLabel, itemsForKeys, itemSince, repoName, sourceItems, type SourceItem } from './sources'
 
 export type MacCheckId = 'setup' | 'claude' | 'answering' | 'folders' | 'drive' | 'self_test'
 
@@ -68,8 +70,10 @@ export function macChecks(entry: MemberStatusEntry | null, bounds: TeamBoundarie
   if (!s) return [{ id: 'setup', done: false, todo: SETUP_LINE_TODO }]
   const b = boundariesSet(bounds) ? bounds.boundaries : null
   const read = !!bounds
-  const noOrgs = read && (!b || b.github_orgs.length === 0)
-  const noDrives = read && (!b || b.drives.length === 0)
+  // PICKERS-SPEC: whole orgs and single repositories need project folders; picked Drive
+  // folders and legacy drives need Google Drive.
+  const noOrgs = read && (!b || (b.github_orgs.length === 0 && b.github_repos.length === 0))
+  const noDrives = read && (!b || (b.drives.length === 0 && b.drive_folders.length === 0))
   return [
     { id: 'setup', done: true, todo: SETUP_LINE_TODO },
     {
@@ -88,7 +92,7 @@ export function macChecks(entry: MemberStatusEntry | null, bounds: TeamBoundarie
       id: 'folders',
       done: read && (noOrgs || s.folders.repo_roots > 0),
       todo: read
-        ? `Your Mac doesn't know where your ${b ? listWords(b.github_orgs) : 'team'} project folders are yet. Run the setup line again and pick them.`
+        ? `Your Mac doesn't know where your ${b ? listWords(githubOrgs(b)) : 'team'} project folders are yet. Run the setup line again and pick them.`
         : NOT_KNOWN,
     },
     {
@@ -134,6 +138,13 @@ function plainLine(v: string | null | undefined): string | null {
   return t && t.length <= 200 ? t : null
 }
 
+/** The orgs a team shares from: whole orgs, then the orgs of single repositories, each once (without case). */
+function githubOrgs(b: NonNullable<TeamBoundaries['boundaries']>): string[] {
+  const out: string[] = []
+  for (const o of [...b.github_orgs, ...b.github_repos.map((r) => r.org)]) if (!out.some((x) => x.toLowerCase() === o.toLowerCase())) out.push(o)
+  return out
+}
+
 function listWords(items: string[]): string {
   if (items.length <= 1) return items[0] ?? ''
   return `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`
@@ -149,7 +160,13 @@ export function setupCount(entry: MemberStatusEntry, bounds: TeamBoundaries | nu
 
 export interface BoundaryItems {
   topic: string
+  /** Whole GitHub organisations. */
   orgs: Array<{ name: string; isNew: boolean }>
+  /** Single repositories, as example-org/api. */
+  repos: Array<{ name: string; isNew: boolean }>
+  /** Picked shared-drive folders: the folder's name and where it is ("in Example Team Drive"). */
+  folders: Array<{ key: ItemKey; name: string; where: string; isNew: boolean }>
+  /** Legacy shared drives, matched by name. */
   drives: Array<{ domain: string; shared_drive: string; isNew: boolean }>
   memberFolders: { allowed: boolean; isNew: boolean }
 }
@@ -163,9 +180,17 @@ export function boundaryItems(bounds: TeamBoundaries & { boundaries: NonNullable
   const b = bounds.boundaries
   const since = bounds.since ?? null
   const fresh = (v: number | null | undefined) => accepted > 0 && (v ?? bounds.version) > accepted
+  const n = toBoundaries(b)
   return {
     topic: b.topic,
     orgs: b.github_orgs.map((name) => ({ name, isNew: fresh(since?.github_orgs[name.toLowerCase()]) })),
+    repos: n.github_repos.map((r) => ({ name: repoName(r), isNew: fresh(itemSince({ kind: 'repo', ...r }, since, bounds.version)) })),
+    folders: n.drive_folders.map((f) => ({
+      key: itemKey({ kind: 'folder', ...f }),
+      name: f.folder_name,
+      where: folderWhere(f),
+      isNew: fresh(itemSince({ kind: 'folder', ...f }, since, bounds.version)),
+    })),
     drives: b.drives.map((d, i) => {
       const s = since?.drives[i]
       const match = s && s.domain === d.domain && s.shared_drive === d.shared_drive ? s.since : undefined
@@ -173,6 +198,71 @@ export function boundaryItems(bounds: TeamBoundaries & { boundaries: NonNullable
     }),
     memberFolders: { allowed: b.member_folders, isNew: b.member_folders && fresh(since?.member_folders) },
   }
+}
+
+// ---------------------------------------------------------------------------------------
+// PICKERS-SPEC §7.4: what the viewer's Mac cannot find, one plain line each.
+
+/** A repository is cloned with one line in Terminal; everything else is a sentence. */
+export type MissingLine =
+  | { kind: 'repo'; key: ItemKey; name: string; command: string; todo: string }
+  | { kind: 'org'; key: ItemKey; name: string; todo: string; link: string }
+  | { kind: 'folder' | 'drive'; key: ItemKey; name: string; todo: string }
+
+export interface MissingSources {
+  /** Items of the current boundaries the Mac reported it cannot find. */
+  missing: MissingLine[]
+  /** Items added after the version the Mac last looked for: not known yet. */
+  checking: Array<{ key: ItemKey; name: string }>
+}
+
+export const CLONE_TODO = 'Run it in Terminal inside the folder you picked for projects.'
+const DRIVE_TODO = "Make sure Google Drive for desktop is signed in with your work account; if it still doesn't show, ask a team owner for access to the shared drive."
+
+/** One missing item as a line to act on. */
+export function missingLine(item: SourceItem): MissingLine {
+  const key = itemKey(item)
+  switch (item.kind) {
+    case 'repo':
+      return { kind: 'repo', key, name: repoName(item), command: `git clone https://github.com/${item.org}/${item.repo}.git`, todo: CLONE_TODO }
+    case 'org':
+      return {
+        kind: 'org',
+        key,
+        name: item.org,
+        todo: `No ${item.org} projects found. Clone the ones you work on into the folder you picked for projects.`,
+        link: `https://github.com/orgs/${item.org}/repositories`,
+      }
+    case 'folder':
+      return { kind: 'folder', key, name: folderLabel(item), todo: `${folderLabel(item)} isn't on this Mac. ${DRIVE_TODO}` }
+    case 'drive':
+      return { kind: 'drive', key, name: item.shared_drive, todo: `The shared drive ${item.shared_drive} isn't on this Mac. ${DRIVE_TODO}` }
+  }
+}
+
+/**
+ * The viewer's missing sources: the keys their Mac reported, as items of the current boundaries
+ * (a key of an item removed since is left out), and the items added after the version the Mac
+ * looked for ("checking…"). Empty while nothing is known (an older plugin, no boundaries).
+ */
+export function missingSources(entry: MemberStatusEntry | null, bounds: TeamBoundaries | null | undefined): MissingSources {
+  const src = entry?.sources ?? null
+  if (!src || !boundariesSet(bounds)) return { missing: [], checking: [] }
+  const missing = itemsForKeys(bounds.boundaries, src.missing).map(missingLine)
+  const known = new Set<string>(missing.map((m) => m.key))
+  const checking =
+    src.boundaries_version < bounds.version
+      ? sourceItems(bounds.boundaries)
+          .filter((i) => !known.has(itemKey(i)) && itemSince(i, bounds.since, bounds.version) > src.boundaries_version)
+          .map((i) => ({ key: itemKey(i), name: itemLabel(i) }))
+      : []
+  return { missing, checking }
+}
+
+/** A member's missing sources by name, for an owner's Members panel. */
+export function missingNames(entry: MemberStatusEntry, bounds: TeamBoundaries | null | undefined): string[] {
+  if (!entry.sources || !boundariesSet(bounds)) return []
+  return itemsForKeys(bounds.boundaries, entry.sources.missing).map(itemLabel)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -236,6 +326,20 @@ type Obj = Record<string, unknown>
 const isObj = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
 const count = (v: unknown, max: number) => typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= max
 const MEMBER_RE = /^[a-z][a-z0-9_]{1,31}$/
+/** PICKERS-SPEC §3.3: a key is 1-400 characters with no control or format character, of one of the four kinds. */
+const KEY_RE = /^(?:org|repo|folder|drive):/
+const KEY_FORBIDDEN_RE = /[\p{Cc}\p{Cf}]/u
+
+/** A member's `sources` as read; null for anything else (an older relay or plugin sends none). */
+function readSources(v: unknown): MemberSources | null {
+  if (!isObj(v) || !count(v.boundaries_version, 2 ** 31 - 1) || !Array.isArray(v.missing) || v.missing.length > 140) return null
+  const missing: ItemKey[] = []
+  for (const k of v.missing) {
+    if (typeof k !== 'string' || [...k].length > 400 || !KEY_RE.test(k) || KEY_FORBIDDEN_RE.test(k)) return null
+    if (!missing.includes(k as ItemKey)) missing.push(k as ItemKey)
+  }
+  return { boundaries_version: v.boundaries_version as number, missing }
+}
 
 function readStatus(v: unknown): MemberStatusEntry['status'] | undefined {
   if (v === null) return null
@@ -267,6 +371,7 @@ export function readMembersStatus(raw: unknown): MembersStatus | null {
       status,
       answering: m.answering === true,
       accepted_version: count(m.accepted_version, 2 ** 31 - 1) ? (m.accepted_version as number) : 0,
+      sources: readSources(m.sources),
     })
   }
   return { members, boundaries_version: raw.boundaries_version as number }

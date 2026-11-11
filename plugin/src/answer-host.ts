@@ -65,6 +65,7 @@ import { approvalsSentence, clearApprovalsState, statePath, writeApprovalsState 
 import { openInBrowser } from './console-open.js';
 import type { Boundaries, TeamBoundaries } from './boundaries-types.js';
 import { buildAllowedSet, denyContext, GitCache, homeDir, setSummary, shareNames, validBoundaries, wideningText, type AllowedSet, type DenyCtx } from './boundary-set.js';
+import { DriveLocator, type ItemIdReader } from './drive-locate.js';
 import { listFiles, readGoogle, searchFiles, type GoogleReader, type ToolOutcome } from './boundary-tools.js';
 import { credentialHit, realOr, within } from './deny-list.js';
 import { defaultManifestPath, discoveryPayload, exposedCapabilities } from './exposed.js';
@@ -104,8 +105,8 @@ export const NOT_SET_UP_REPLY = (member: string) => `${member} hasn't set up ans
 export const NO_CAPABILITY_REPLY = (member: string) => `${member}'s background answerer does not run capabilities; ask ${member} directly.`;
 /** M10-SPEC §3: why a Read outside the allowed set is denied (at once, without asking). */
 export const OUTSIDE_SET =
-  "That file is not one you may read for this team: only files git tracks in the team's GitHub repositories, files in its shared drive " +
-  "and the member's own added folders. Use mcp__host__list_files or mcp__host__search_files to find what you can read; do not try to reach it another way.";
+  "That file is not one you may read for this team: only files git tracks in the team's GitHub repositories, files in its shared drives " +
+  "and Drive folders, and the member's own added folders. Use mcp__host__list_files or mcp__host__search_files to find what you can read; do not try to reach it another way.";
 /** M10-SPEC §7.3: why an allowed file was not copied for the answerer. */
 export const TOO_LARGE_READ = `That file is larger than ${MAX_SNAPSHOT_BYTES / (1024 * 1024)} MB, so it cannot be read. Answer without it, and say so.`;
 export const UNSAFE_READ = 'That file changed or is not a regular file, so it cannot be read now. Answer without it, and say so.';
@@ -161,6 +162,8 @@ export type HostOptions = {
   now?: () => number;
   /** M10-SPEC §2a: reads a Google link file (default: google-drive.ts readGoogleFile). */
   googleReader?: GoogleReader;
+  /** PICKERS-SPEC §6.2: reads a folder's Drive for desktop id (default: /usr/bin/xattr; tests: a fake). */
+  driveIdReader?: ItemIdReader;
   /**
    * M11-SPEC §1: the background answerer. Holds the lock as `daemon`, answers in boundary mode
    * only, runs no capability and never holds an approval item.
@@ -274,6 +277,8 @@ export class AnswerHost {
   /** M11-SPEC §1: no new run starts (the background answerer is finishing to restart). */
   private finishing = false;
   private readonly gitCache = new GitCache();
+  /** PICKERS-SPEC §6.2: where the team's picked Drive folders are on this Mac (this host's own cache). */
+  private readonly driveLocator: DriveLocator;
 
   constructor(private readonly o: HostOptions) {
     this.env = o.env;
@@ -288,6 +293,7 @@ export class AnswerHost {
     this.perHour = o.limits?.perHour ?? MAX_RUNS_PER_HOUR;
     this.noticeGapMs = o.limits?.noticeGapMs ?? NOTICE_GAP_MS;
     this.queue.onChange((e) => this.onQueueChange(e.type, e.item, e.outcome));
+    this.driveLocator = new DriveLocator({ home: homeDir(o.env), ...(o.driveIdReader ? { readId: o.driveIdReader } : {}) });
   }
 
   get stopped(): boolean {
@@ -340,7 +346,13 @@ export class AnswerHost {
     const sentence = approvalsSentence(s.approvals_pending);
     const set = this.lastSet;
     // Drive names are owner-written: neutralised like any text that reaches the session.
-    const names = (kind: string) => (set ? set.areas.filter((a) => a.kind === kind).map((a) => singleLine(a.name.replace(/^[a-z]+:/, ''), 200)) : []);
+    const names = (kind: string, folders?: boolean) =>
+      set
+        ? set.areas
+            .filter((a) => a.kind === kind && (folders === undefined || (a.folder !== undefined && !a.folder.whole_drive) === folders))
+            .map((a) => singleLine(a.name.replace(/^[a-z]+:/, ''), 200))
+        : [];
+    const folders = names('drive', true);
     return {
       answering_automatically: s.answering,
       ...(s.why_not ? { answering_note: s.why_not } : {}),
@@ -350,7 +362,14 @@ export class AnswerHost {
         ? {
             boundaries_version: this.boundaries?.version ?? null,
             answering_from: set
-              ? { github_repositories: names('github'), shared_drives: names('drive'), your_folders: names('folder'), files: set.files.size, summary: singleLine(setSummary(set), 600) }
+              ? {
+                  github_repositories: names('github'),
+                  shared_drives: names('drive', false),
+                  ...(folders.length ? { drive_folders: folders } : {}),
+                  your_folders: names('folder'),
+                  files: set.files.size,
+                  summary: singleLine(setSummary(set), 600),
+                }
               : null,
             ...(set && set.notes.length ? { answering_from_notes: set.notes.slice(0, 10) } : {}),
             ...this.acceptanceFields(),
@@ -472,6 +491,7 @@ export class AnswerHost {
       member: { repo_roots: settings.repo_roots, extra_folders: settings.extra_folders },
       env: this.env,
       cache: this.gitCache,
+      locator: this.driveLocator,
     });
     for (const n of set.notes) this.o.log(n);
     this.lastSet = set;

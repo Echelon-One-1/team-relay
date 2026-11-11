@@ -16,6 +16,7 @@ import { setConsoleKey } from '@/api/key'
 import { setTransport } from '@/api/client'
 import { App } from '@/App'
 import { inviteMessage } from '@/lib/setup'
+import { FIXTURE_FOLDER_ID, fixtureBoundaries } from '@/mock/fixtures'
 import { MockRelay, mockStatus } from '@/mock/relay'
 import { renderWithClient, setHidden } from './render'
 
@@ -171,6 +172,8 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     s.relay.setBoundariesAs('demo', 'bob', {
       topic: 'Example Co: payments only.',
       github_orgs: ['example-org', 'payments-org'],
+      github_repos: [],
+      drive_folders: [],
       drives: [],
       member_folders: false,
     })
@@ -278,7 +281,117 @@ describe('live ticks (M11 §6: every 5 s while the page is visible)', () => {
   })
 })
 
+describe("what the viewer's Mac can't find (PICKERS-SPEC §7.4, ACC-021)", () => {
+  const DRIVE_TODO = "Make sure Google Drive for desktop is signed in with your work account; if it still doesn't show, ask a team owner for access to the shared drive."
+
+  it('below step 1: one line per item, a repository with its clone line to copy', async () => {
+    window.history.replaceState(null, '', '/join')
+    server()
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    await setupPanel()
+    const block = await waitFor(() => {
+      const el = step('mac').querySelector('[data-missing-sources]')
+      expect(el).not.toBeNull()
+      return el as HTMLElement
+    })
+    expect(block).toHaveTextContent("Your Mac can't find 1 of the things your team shares. It answers from the rest.")
+    const line = block.querySelector('[data-missing="repo:example-labs/handbook"]') as HTMLElement
+    expect(line).toHaveTextContent("example-labs/handbook isn't on this Mac.")
+    expect(within(line).getByText('git clone https://github.com/example-labs/handbook.git')).toBeInTheDocument()
+    expect(line).toHaveTextContent('Run it in Terminal inside the folder you picked for projects.')
+    await user.click(within(line).getByRole('button', { name: 'Copy clone line for example-labs/handbook' }))
+    expect(await navigator.clipboard.readText()).toBe('git clone https://github.com/example-labs/handbook.git')
+  })
+
+  it('Drive and whole-org guidance; missing items never untick "Set up your Mac"', async () => {
+    window.history.replaceState(null, '', '/join')
+    const s = server()
+    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, {
+      boundaries_version: 2,
+      missing: [`folder:${FIXTURE_FOLDER_ID}`, 'org:example-org', 'drive:example.com/Example Team Drive', 'repo:other-org/not-listed'],
+    })
+    renderWithClient(<App />)
+    await setupPanel()
+    await waitFor(() => expect(step('mac').querySelector('[data-missing-sources]')).toHaveAttribute('data-missing-sources', '3'))
+    expect(doneOf().mac).toBe(true)
+    const block = step('mac').querySelector('[data-missing-sources]') as HTMLElement
+    expect(block).toHaveTextContent("Your Mac can't find 3 of the things your team shares.")
+    expect(block.querySelector(`[data-missing="folder:${FIXTURE_FOLDER_ID}"]`)).toHaveTextContent(`Clients (in Example Team Drive) isn't on this Mac. ${DRIVE_TODO}`)
+    expect(block.querySelector('[data-missing="drive:example.com/Example Team Drive"]')).toHaveTextContent(`The shared drive Example Team Drive isn't on this Mac. ${DRIVE_TODO}`)
+    const org = block.querySelector('[data-missing="org:example-org"]') as HTMLElement
+    expect(org).toHaveTextContent('No example-org projects found. Clone the ones you work on into the folder you picked for projects.')
+    const link = within(org).getByRole('link', { name: /See example-org's projects on GitHub/ })
+    expect(link).toHaveAttribute('href', 'https://github.com/orgs/example-org/repositories')
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    // A key that is not one of the team's items is never shown.
+    expect(block.textContent).not.toMatch(/not-listed/)
+  })
+
+  it('items added after the version the Mac last looked at show as checking', async () => {
+    window.history.replaceState(null, '', '/join')
+    const s = server()
+    s.relay.setBoundariesAs('demo', 'bob', { ...fixtureBoundaries.boundaries!, github_repos: [...fixtureBoundaries.boundaries!.github_repos, { org: 'example-labs', repo: 'tools', id: 7002 }] })
+    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, { boundaries_version: 2, missing: [] })
+    renderWithClient(<App />)
+    await setupPanel()
+    const checking = await waitFor(() => {
+      const el = step('mac').querySelector('[data-checking="repo:example-labs/tools"]')
+      expect(el).not.toBeNull()
+      return el as HTMLElement
+    })
+    expect(checking).toHaveTextContent('example-labs/tools: checking…')
+    expect(step('mac').querySelector('[data-missing]')).toBeNull()
+    expect(step('mac').textContent).not.toMatch(/can't find/)
+  })
+
+  it('nothing shows when the Mac found everything, or has not reported what it found', async () => {
+    window.history.replaceState(null, '', '/join')
+    const s = server()
+    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, { boundaries_version: 2, missing: [] })
+    renderWithClient(<App />)
+    await setupPanel()
+    await waitFor(() => expect(doneOf().mac).toBe(true))
+    expect(step('mac').querySelector('[data-missing-sources]')).toBeNull()
+  })
+})
+
 describe('the Members panel and the invite message (M11 §6)', () => {
+  it("an owner sees each member's missing items by name, behind a disclosure (ACC-022)", async () => {
+    const s = server()
+    s.relay.setMemberStatus('bob', mockStatus(Date.now(), {}), true, 2, { boundaries_version: 2, missing: [`folder:${FIXTURE_FOLDER_ID}`, 'org:example-org'] })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await screen.findByRole('region', { name: 'Members' })
+    const row = (m: string) => panel.querySelector(`[data-member="${m}"]`) as HTMLElement
+    const bob = await waitFor(() => {
+      const el = row('bob').querySelector('[data-missing-count]')
+      expect(el).not.toBeNull()
+      return el as HTMLElement
+    })
+    expect(bob).toHaveAttribute('data-missing-count', '2')
+    expect(bob).toHaveTextContent("can't find 2")
+    await user.click(within(bob).getByText("can't find 2"))
+    expect(within(bob).getByRole('list', { name: 'Not found on their Mac' })).toHaveTextContent('Clients (in Example Team Drive)example-org (whole organisation)')
+    expect(row('alice').querySelector('[data-missing-count]')).toHaveTextContent("can't find 1")
+    expect(row('carol').querySelector('[data-missing-count]')).toBeNull()
+  })
+
+  it("a member sees no one's missing items in the Members panel (ACC-022)", async () => {
+    const s = server()
+    s.relay.role = 'member'
+    s.relay.setMemberStatus('bob', mockStatus(Date.now(), {}), true, 2, { boundaries_version: 2, missing: ['org:example-org'] })
+    renderWithClient(<App />)
+    const panel = await screen.findByRole('region', { name: 'Members' })
+    await waitFor(() => expect(panel.querySelector('[data-setup-progress]')).not.toBeNull())
+    expect(panel.querySelector('[data-missing-count]')).toBeNull()
+    expect(panel.textContent).not.toMatch(/can't find/)
+    // The relay gives a member only their own list (src/mock/relay.ts plays that rule).
+    const statuses = (await (await s.relay.handle('api/members-status', { headers: { 'X-Relay-Team': 'demo' } })).json()) as { members: Array<{ member: string; sources: unknown }> }
+    expect(statuses.members.find((m) => m.member === 'bob')!.sources).toBeNull()
+    expect(statuses.members.find((m) => m.member === 'alice')!.sources).not.toBeNull()
+  })
+
   it("shows each member's progress (set up, or n of 2) and whether they answer now", async () => {
     server()
     renderWithClient(<App />)

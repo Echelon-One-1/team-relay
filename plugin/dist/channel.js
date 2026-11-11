@@ -3888,49 +3888,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base2, relative3, options, skipNormalization) {
+    function resolveComponent(base2, relative4, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base2 = parse3(serialize(base2, options), options);
-        relative3 = parse3(serialize(relative3, options), options);
+        relative4 = parse3(serialize(relative4, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative3.scheme) {
-        target.scheme = relative3.scheme;
-        target.userinfo = relative3.userinfo;
-        target.host = relative3.host;
-        target.port = relative3.port;
-        target.path = removeDotSegments(relative3.path || "");
-        target.query = relative3.query;
+      if (!options.tolerant && relative4.scheme) {
+        target.scheme = relative4.scheme;
+        target.userinfo = relative4.userinfo;
+        target.host = relative4.host;
+        target.port = relative4.port;
+        target.path = removeDotSegments(relative4.path || "");
+        target.query = relative4.query;
       } else {
-        if (relative3.userinfo !== void 0 || relative3.host !== void 0 || relative3.port !== void 0) {
-          target.userinfo = relative3.userinfo;
-          target.host = relative3.host;
-          target.port = relative3.port;
-          target.path = removeDotSegments(relative3.path || "");
-          target.query = relative3.query;
+        if (relative4.userinfo !== void 0 || relative4.host !== void 0 || relative4.port !== void 0) {
+          target.userinfo = relative4.userinfo;
+          target.host = relative4.host;
+          target.port = relative4.port;
+          target.path = removeDotSegments(relative4.path || "");
+          target.query = relative4.query;
         } else {
-          if (!relative3.path) {
+          if (!relative4.path) {
             target.path = base2.path;
-            if (relative3.query !== void 0) {
-              target.query = relative3.query;
+            if (relative4.query !== void 0) {
+              target.query = relative4.query;
             } else {
               target.query = base2.query;
             }
           } else {
-            if (relative3.path[0] === "/") {
-              target.path = removeDotSegments(relative3.path);
+            if (relative4.path[0] === "/") {
+              target.path = removeDotSegments(relative4.path);
             } else {
               if ((base2.userinfo !== void 0 || base2.host !== void 0 || base2.port !== void 0) && !base2.path) {
-                target.path = "/" + relative3.path;
+                target.path = "/" + relative4.path;
               } else if (!base2.path) {
-                target.path = relative3.path;
+                target.path = relative4.path;
               } else {
-                target.path = base2.path.slice(0, base2.path.lastIndexOf("/") + 1) + relative3.path;
+                target.path = base2.path.slice(0, base2.path.lastIndexOf("/") + 1) + relative4.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative3.query;
+            target.query = relative4.query;
           }
           target.userinfo = base2.userinfo;
           target.host = base2.host;
@@ -3938,7 +3938,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base2.scheme;
       }
-      target.fragment = relative3.fragment;
+      target.fragment = relative4.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -7461,6 +7461,7 @@ __export(relay_client_exports, {
   METADATA_BASE: () => METADATA_BASE,
   NotConnected: () => NotConnected,
   REQUEST_ID_RE: () => REQUEST_ID_RE,
+  RETRY_AFTER_MAX_S: () => RETRY_AFTER_MAX_S,
   RelayClient: () => RelayClient,
   RelayError: () => RelayError,
   RelayNetworkError: () => RelayNetworkError,
@@ -7480,12 +7481,18 @@ __export(relay_client_exports, {
   jwtExpiryMs: () => jwtExpiryMs,
   metadataTokenProvider: () => metadataTokenProvider,
   parseRelayUrl: () => parseRelayUrl,
+  parseRetryAfter: () => parseRetryAfter,
   relayClientFromEnv: () => relayClientFromEnv,
   staticTokenProvider: () => staticTokenProvider,
   tokenProviderFromEnv: () => tokenProviderFromEnv
 });
 import { execFile } from "node:child_process";
 import { readFileSync as readFileSync3 } from "node:fs";
+function parseRetryAfter(v) {
+  const t = v?.trim();
+  if (!t || !/^[0-9]{1,10}$/.test(t)) return void 0;
+  return Math.min(RETRY_AFTER_MAX_S, Number(t));
+}
 function isRetryable(err) {
   if (err instanceof RelayNetworkError) return true;
   if (err instanceof RelayError) return err.status >= 500 || err.status === 429;
@@ -7708,7 +7715,7 @@ function relayClientFromEnv(env, extra = {}) {
   const c = connectionFromEnv(env);
   return new RelayClient({ url: c.url, team: c.team, token: c.token, ...extra });
 }
-var REQUEST_ID_RE, MESSAGE_ID_RE, RelayError, RelayNetworkError, DEFAULT_BACKOFF, GCLOUD_AUDIENCE, TOKEN_REFRESH_MARGIN_MS, JWT_RE, ACCOUNT_RE, GCLOUD_OUTPUT_LIMIT, METADATA_BASE, METADATA_IDENTITY_PATH, METADATA_OUTPUT_LIMIT, NotConnected, SIGN_IN_AGAIN, CLIENT_IP_HASH_RE, ON_BEHALF_OF_RE, defaultSleep, RelayClient;
+var REQUEST_ID_RE, MESSAGE_ID_RE, RelayError, RETRY_AFTER_MAX_S, RelayNetworkError, DEFAULT_BACKOFF, GCLOUD_AUDIENCE, TOKEN_REFRESH_MARGIN_MS, JWT_RE, ACCOUNT_RE, GCLOUD_OUTPUT_LIMIT, METADATA_BASE, METADATA_IDENTITY_PATH, METADATA_OUTPUT_LIMIT, NotConnected, SIGN_IN_AGAIN, CLIENT_IP_HASH_RE, ON_BEHALF_OF_RE, defaultSleep, RelayClient;
 var init_relay_client = __esm({
   "src/relay-client.ts"() {
     "use strict";
@@ -7721,14 +7728,18 @@ var init_relay_client = __esm({
       status;
       code;
       detail;
-      constructor(status, code, detail) {
+      /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
+      retryAfter;
+      constructor(status, code, detail, retryAfter) {
         super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
         this.name = "RelayError";
         this.status = status;
         this.code = code;
         this.detail = detail;
+        this.retryAfter = retryAfter;
       }
     };
+    RETRY_AFTER_MAX_S = 3600;
     RelayNetworkError = class extends Error {
       constructor(message) {
         super(message);
@@ -7851,7 +7862,7 @@ var init_relay_client = __esm({
           const obj = json && typeof json === "object" ? json : {};
           const code = typeof obj.error === "string" ? obj.error : `http_${res.status}`;
           const detail = typeof obj.detail === "string" ? obj.detail.slice(0, 500) : "";
-          throw new RelayError(res.status, code, detail);
+          throw new RelayError(res.status, code, detail, parseRetryAfter(res.headers.get("retry-after")));
         }
         return json;
       }
@@ -7966,6 +7977,21 @@ var init_relay_client = __esm({
       /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
       setBoundaries(body, opts) {
         return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
+      }
+      /**
+       * PICKERS-SPEC §3.5 (owners): the GitHub App's install link and the Google Picker's public
+       * settings. Never a key or a token.
+       */
+      sourcesConfig(opts) {
+        return this.call("GET", this.teamPath("sources", "config"), void 0, opts);
+      }
+      /**
+       * PICKERS-SPEC §3.6 (owners): the repositories of the allowed orgs where the relay's GitHub App
+       * is installed. Not configured: 404 github_not_configured; GitHub's rate limit: 503
+       * github_rate_limited with a Retry-After (RelayError.retryAfter).
+       */
+      sourcesGithub(opts) {
+        return this.call("GET", this.teamPath("sources", "github"), void 0, opts);
       }
       /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
       acceptance(opts) {
@@ -12034,10 +12060,10 @@ var require_resolve_block_map = __commonJS({
       let offset = bm.offset;
       let commentEnd = null;
       for (const collItem of bm.items) {
-        const { start, key, sep: sep4, value } = collItem;
+        const { start, key, sep: sep5, value } = collItem;
         const keyProps = resolveProps.resolveProps(start, {
           indicator: "explicit-key-ind",
-          next: key ?? sep4?.[0],
+          next: key ?? sep5?.[0],
           offset,
           onError,
           parentIndent: bm.indent,
@@ -12051,7 +12077,7 @@ var require_resolve_block_map = __commonJS({
             else if ("indent" in key && key.indent !== bm.indent)
               onError(offset, "BAD_INDENT", startColMsg);
           }
-          if (!keyProps.anchor && !keyProps.tag && !sep4) {
+          if (!keyProps.anchor && !keyProps.tag && !sep5) {
             commentEnd = keyProps.end;
             if (keyProps.comment) {
               if (map.comment)
@@ -12075,7 +12101,7 @@ var require_resolve_block_map = __commonJS({
         ctx.atKey = false;
         if (utilMapIncludes.mapIncludes(ctx, map.items, keyNode))
           onError(keyStart, "DUPLICATE_KEY", "Map keys must be unique");
-        const valueProps = resolveProps.resolveProps(sep4 ?? [], {
+        const valueProps = resolveProps.resolveProps(sep5 ?? [], {
           indicator: "map-value-ind",
           next: value,
           offset: keyNode.range[2],
@@ -12091,7 +12117,7 @@ var require_resolve_block_map = __commonJS({
             if (ctx.options.strict && keyProps.start < valueProps.found.offset - 1024)
               onError(keyNode.range, "KEY_OVER_1024_CHARS", "The : indicator must be at most 1024 chars after the start of an implicit block mapping key");
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep4, null, valueProps, onError);
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep5, null, valueProps, onError);
           if (ctx.schema.compat)
             utilFlowIndentCheck.flowIndentCheck(bm.indent, value, onError);
           offset = valueNode.range[2];
@@ -12182,7 +12208,7 @@ var require_resolve_end = __commonJS({
       let comment = "";
       if (end) {
         let hasSpace = false;
-        let sep4 = "";
+        let sep5 = "";
         for (const token of end) {
           const { source, type } = token;
           switch (type) {
@@ -12196,13 +12222,13 @@ var require_resolve_end = __commonJS({
               if (!comment)
                 comment = cb;
               else
-                comment += sep4 + cb;
-              sep4 = "";
+                comment += sep5 + cb;
+              sep5 = "";
               break;
             }
             case "newline":
               if (comment)
-                sep4 += source;
+                sep5 += source;
               hasSpace = true;
               break;
             default:
@@ -12245,18 +12271,18 @@ var require_resolve_flow_collection = __commonJS({
       let offset = fc.offset + fc.start.source.length;
       for (let i = 0; i < fc.items.length; ++i) {
         const collItem = fc.items[i];
-        const { start, key, sep: sep4, value } = collItem;
+        const { start, key, sep: sep5, value } = collItem;
         const props = resolveProps.resolveProps(start, {
           flow: fcName,
           indicator: "explicit-key-ind",
-          next: key ?? sep4?.[0],
+          next: key ?? sep5?.[0],
           offset,
           onError,
           parentIndent: fc.indent,
           startOnNewline: false
         });
         if (!props.found) {
-          if (!props.anchor && !props.tag && !sep4 && !value) {
+          if (!props.anchor && !props.tag && !sep5 && !value) {
             if (i === 0 && props.comma)
               onError(props.comma, "UNEXPECTED_TOKEN", `Unexpected , in ${fcName}`);
             else if (i < fc.items.length - 1)
@@ -12310,8 +12336,8 @@ var require_resolve_flow_collection = __commonJS({
             }
           }
         }
-        if (!isMap && !sep4 && !props.found) {
-          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep4, null, props, onError);
+        if (!isMap && !sep5 && !props.found) {
+          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep5, null, props, onError);
           coll.items.push(valueNode);
           offset = valueNode.range[2];
           if (isBlock(value))
@@ -12323,7 +12349,7 @@ var require_resolve_flow_collection = __commonJS({
           if (isBlock(key))
             onError(keyNode.range, "BLOCK_IN_FLOW", blockMsg);
           ctx.atKey = false;
-          const valueProps = resolveProps.resolveProps(sep4 ?? [], {
+          const valueProps = resolveProps.resolveProps(sep5 ?? [], {
             flow: fcName,
             indicator: "map-value-ind",
             next: value,
@@ -12334,8 +12360,8 @@ var require_resolve_flow_collection = __commonJS({
           });
           if (valueProps.found) {
             if (!isMap && !props.found && ctx.options.strict) {
-              if (sep4)
-                for (const st of sep4) {
+              if (sep5)
+                for (const st of sep5) {
                   if (st === valueProps.found)
                     break;
                   if (st.type === "newline") {
@@ -12352,7 +12378,7 @@ var require_resolve_flow_collection = __commonJS({
             else
               onError(valueProps.start, "MISSING_CHAR", `Missing , or : between ${fcName} items`);
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep4, null, valueProps, onError) : null;
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep5, null, valueProps, onError) : null;
           if (valueNode) {
             if (isBlock(value))
               onError(valueNode.range, "BLOCK_IN_FLOW", blockMsg);
@@ -12532,7 +12558,7 @@ var require_resolve_block_scalar = __commonJS({
           chompStart = i + 1;
       }
       let value = "";
-      let sep4 = "";
+      let sep5 = "";
       let prevMoreIndented = false;
       for (let i = 0; i < contentStart; ++i)
         value += lines[i][0].slice(trimIndent) + "\n";
@@ -12549,24 +12575,24 @@ var require_resolve_block_scalar = __commonJS({
           indent = "";
         }
         if (type === Scalar.Scalar.BLOCK_LITERAL) {
-          value += sep4 + indent.slice(trimIndent) + content;
-          sep4 = "\n";
+          value += sep5 + indent.slice(trimIndent) + content;
+          sep5 = "\n";
         } else if (indent.length > trimIndent || content[0] === "	") {
-          if (sep4 === " ")
-            sep4 = "\n";
-          else if (!prevMoreIndented && sep4 === "\n")
-            sep4 = "\n\n";
-          value += sep4 + indent.slice(trimIndent) + content;
-          sep4 = "\n";
+          if (sep5 === " ")
+            sep5 = "\n";
+          else if (!prevMoreIndented && sep5 === "\n")
+            sep5 = "\n\n";
+          value += sep5 + indent.slice(trimIndent) + content;
+          sep5 = "\n";
           prevMoreIndented = true;
         } else if (content === "") {
-          if (sep4 === "\n")
+          if (sep5 === "\n")
             value += "\n";
           else
-            sep4 = "\n";
+            sep5 = "\n";
         } else {
-          value += sep4 + content;
-          sep4 = " ";
+          value += sep5 + content;
+          sep5 = " ";
           prevMoreIndented = false;
         }
       }
@@ -12749,25 +12775,25 @@ var require_resolve_flow_scalar = __commonJS({
         trimBoth = /^[ \t]+|[ \t]+$/g;
       }
       let res = match[1].replace(trimEnd, "");
-      let sep4 = " ";
+      let sep5 = " ";
       let pos = line.lastIndex;
       while (match = line.exec(source)) {
         const lm = match[1].replace(trimBoth, "");
         if (lm === "") {
-          if (sep4 === "\n")
-            res += sep4;
+          if (sep5 === "\n")
+            res += sep5;
           else
-            sep4 = "\n";
+            sep5 = "\n";
         } else {
-          res += sep4 + lm;
-          sep4 = " ";
+          res += sep5 + lm;
+          sep5 = " ";
         }
         pos = line.lastIndex;
       }
       const last = /[ \t]*(.*)/sy;
       last.lastIndex = pos;
       match = last.exec(source);
-      return res + sep4 + (match?.[1] ?? "");
+      return res + sep5 + (match?.[1] ?? "");
     }
     function doubleQuotedValue(source, onError) {
       let res = "";
@@ -13577,14 +13603,14 @@ var require_cst_stringify = __commonJS({
         }
       }
     }
-    function stringifyItem({ start, key, sep: sep4, value }) {
+    function stringifyItem({ start, key, sep: sep5, value }) {
       let res = "";
       for (const st of start)
         res += st.source;
       if (key)
         res += stringifyToken(key);
-      if (sep4)
-        for (const st of sep4)
+      if (sep5)
+        for (const st of sep5)
           res += st.source;
       if (value)
         res += stringifyToken(value);
@@ -14751,18 +14777,18 @@ var require_parser = __commonJS({
         if (this.type === "map-value-ind") {
           const prev = getPrevProps(this.peek(2));
           const start = getFirstKeyStartProps(prev);
-          let sep4;
+          let sep5;
           if (scalar.end) {
-            sep4 = scalar.end;
-            sep4.push(this.sourceToken);
+            sep5 = scalar.end;
+            sep5.push(this.sourceToken);
             delete scalar.end;
           } else
-            sep4 = [this.sourceToken];
+            sep5 = [this.sourceToken];
           const map = {
             type: "block-map",
             offset: scalar.offset,
             indent: scalar.indent,
-            items: [{ start, key: scalar, sep: sep4 }]
+            items: [{ start, key: scalar, sep: sep5 }]
           };
           this.onKeyLine = true;
           this.stack[this.stack.length - 1] = map;
@@ -14915,15 +14941,15 @@ var require_parser = __commonJS({
                 } else if (isFlowToken(it.key) && !includesToken(it.sep, "newline")) {
                   const start2 = getFirstKeyStartProps(it.start);
                   const key = it.key;
-                  const sep4 = it.sep;
-                  sep4.push(this.sourceToken);
+                  const sep5 = it.sep;
+                  sep5.push(this.sourceToken);
                   delete it.key;
                   delete it.sep;
                   this.stack.push({
                     type: "block-map",
                     offset: this.offset,
                     indent: this.indent,
-                    items: [{ start: start2, key, sep: sep4 }]
+                    items: [{ start: start2, key, sep: sep5 }]
                   });
                 } else if (start.length > 0) {
                   it.sep = it.sep.concat(start, this.sourceToken);
@@ -15117,13 +15143,13 @@ var require_parser = __commonJS({
             const prev = getPrevProps(parent);
             const start = getFirstKeyStartProps(prev);
             fixFlowSeqItems(fc);
-            const sep4 = fc.end.splice(1, fc.end.length);
-            sep4.push(this.sourceToken);
+            const sep5 = fc.end.splice(1, fc.end.length);
+            sep5.push(this.sourceToken);
             const map = {
               type: "block-map",
               offset: fc.offset,
               indent: fc.indent,
-              items: [{ start, key: fc, sep: sep4 }]
+              items: [{ start, key: fc, sep: sep5 }]
             };
             this.onKeyLine = true;
             this.stack[this.stack.length - 1] = map;
@@ -17120,12 +17146,12 @@ function $constructor(name, initializer3, proto, params) {
     inst._zod.traits.add(name);
     initializer3(inst, def);
     if (initialized) {
-      const own2 = Object.getPrototypeOf(inst);
+      const own3 = Object.getPrototypeOf(inst);
       const ctorProto = inst._zod.constr.prototype;
-      let up = own2;
+      let up = own3;
       while (up && up !== ctorProto)
         up = Object.getPrototypeOf(up);
-      const target = up ?? own2;
+      const target = up ?? own3;
       if (!initialized.has(target)) {
         initialized.add(target);
         members(target, protoMembers);
@@ -18550,7 +18576,7 @@ function normalizeDef(def) {
 }
 function handleCatchall(proms, input, payload, ctx, def, inst, abortEarly) {
   const unrecognized = [];
-  const keySet = def.keySet;
+  const keySet2 = def.keySet;
   const _catchall = def.catchall._zod;
   const t = _catchall.def.type;
   const optin = _catchall.optin;
@@ -18562,7 +18588,7 @@ function handleCatchall(proms, input, payload, ctx, def, inst, abortEarly) {
         break;
       seen = payload.issues.length;
     }
-    if (keySet.has(key))
+    if (keySet2.has(key))
       continue;
     if (key === "__proto__") {
       if (t === "never")
@@ -29506,10 +29532,10 @@ var Regexp = class Regexp2 {
         else out += sub.appendTo();
         break;
       case Regexp2.Op.ALTERNATE: {
-        let sep4 = "";
+        let sep5 = "";
         for (let sub of this.subs) {
-          out += sep4;
-          sep4 = "|";
+          out += sep5;
+          sep5 = "|";
           out += sub.appendTo();
         }
         break;
@@ -33669,9 +33695,9 @@ var AnswerDeadlines = class {
 
 // src/answer-host.ts
 import { randomUUID } from "node:crypto";
-import { execFile as execFile7 } from "node:child_process";
+import { execFile as execFile8 } from "node:child_process";
 import { chmodSync as chmodSync5, mkdirSync as mkdirSync6, mkdtempSync as mkdtempSync3, rmSync as rmSync8, writeFileSync as writeFileSync4 } from "node:fs";
-import { basename as basename6, dirname as dirname6, isAbsolute as isAbsolute9, join as join13, resolve as resolvePath } from "node:path";
+import { basename as basename6, dirname as dirname6, isAbsolute as isAbsolute9, join as join14, resolve as resolvePath } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // src/answering-lock.ts
@@ -34297,10 +34323,10 @@ function approvalsSentence(pending) {
 }
 
 // src/boundary-set.ts
-import { execFile as execFile4 } from "node:child_process";
-import { promises as fsp } from "node:fs";
+import { execFile as execFile5 } from "node:child_process";
+import { promises as fsp2 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { basename as basename5, dirname as dirname5, extname, join as join8, normalize as normalize4, relative, sep as sep2 } from "node:path";
+import { basename as basename5, dirname as dirname5, extname, join as join9, normalize as normalize4, relative as relative2, sep as sep3 } from "node:path";
 
 // src/boundaries-rule.ts
 var TOPIC_MAX = 500;
@@ -34308,12 +34334,22 @@ var SHARED_DRIVE_MAX = 100;
 var DOMAIN_MAX = 253;
 var BOUNDARIES_MAX_ORGS = 10;
 var BOUNDARIES_MAX_DRIVES = 10;
+var BOUNDARIES_MAX_REPOS = 100;
+var BOUNDARIES_MAX_FOLDERS = 20;
+var REPO_ID_MAX = Number.MAX_SAFE_INTEGER;
+var FOLDER_NAME_MAX = 255;
+var DRIVE_NAME_MAX = SHARED_DRIVE_MAX;
 var BOUNDARIES_VERSION_MAX = 2 ** 31 - 1;
 var GITHUB_ORG_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+var GITHUB_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+var DRIVE_ITEM_ID_RE = /^[A-Za-z0-9_-]{10,200}$/;
 var DRIVE_DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
-var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
+var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
 var DRIVE_NAME_FORBIDDEN_RE = /[/\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/u;
+var FOLDER_NAME_FORBIDDEN_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/u;
 var EDGE_SPACE_RE = /^[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+var BOUNDARIES_FIELDS = ["topic", "github_orgs", "github_repos", "drive_folders", "drives", "member_folders"];
+var M10_BOUNDARIES_FIELDS = ["topic", "github_orgs", "drives", "member_folders"];
 var chars = (s) => [...s].length;
 var trimText = (s) => s.replace(EDGE_SPACE_RE, "");
 var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -34332,16 +34368,77 @@ function driveNameOk(name) {
   return typeof name === "string" && chars(name) >= 1 && chars(name) <= SHARED_DRIVE_MAX && !DRIVE_NAME_FORBIDDEN_RE.test(name) && name === trimText(name) && name !== "." && name !== "..";
 }
 var versionOk = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= BOUNDARIES_VERSION_MAX;
+var repoNameOk = (name) => typeof name === "string" && GITHUB_REPO_RE.test(name) && !/^\.+$/.test(name);
+var repoIdOk = (id) => id === null || typeof id === "number" && Number.isSafeInteger(id) && id >= 1;
+var driveItemIdOk = (id) => typeof id === "string" && DRIVE_ITEM_ID_RE.test(id);
+function folderNameOk(name, max = FOLDER_NAME_MAX) {
+  return typeof name === "string" && chars(name) >= 1 && chars(name) <= max && !FOLDER_NAME_FORBIDDEN_RE.test(name) && name === trimText(name);
+}
+var pickedDriveNameOk = (name) => name === null || folderNameOk(name, DRIVE_NAME_MAX);
+function repoOk(r) {
+  return isObj(r) && exactKeys(r, ["org", "repo", "id"]) && orgOk(r.org) && repoNameOk(r.repo) && repoIdOk(r.id);
+}
+function folderOk(f) {
+  return isObj(f) && exactKeys(f, ["domain", "drive_id", "folder_id", "folder_name", "drive_name"]) && domainOk(f.domain) && (f.drive_id === null || driveItemIdOk(f.drive_id)) && driveItemIdOk(f.folder_id) && folderNameOk(f.folder_name) && pickedDriveNameOk(f.drive_name);
+}
+var legacyDriveOk = (d) => isObj(d) && exactKeys(d, ["domain", "shared_drive"]) && domainOk(d.domain) && driveNameOk(d.shared_drive);
+var listOk = (v, max, ok) => Array.isArray(v) && v.length <= max && v.every(ok);
+function commonValid(raw) {
+  return topicOk(raw.topic) && listOk(raw.github_orgs, BOUNDARIES_MAX_ORGS, orgOk) && listOk(raw.drives, BOUNDARIES_MAX_DRIVES, legacyDriveOk) && typeof raw.member_folders === "boolean";
+}
 function boundariesValid(raw) {
-  if (!isObj(raw) || !exactKeys(raw, ["topic", "github_orgs", "drives", "member_folders"])) return false;
-  if (!topicOk(raw.topic)) return false;
-  const { github_orgs: orgs, drives } = raw;
-  if (!Array.isArray(orgs) || orgs.length > BOUNDARIES_MAX_ORGS || !orgs.every(orgOk)) return false;
-  if (!Array.isArray(drives) || drives.length > BOUNDARIES_MAX_DRIVES) return false;
-  for (const d of drives) {
-    if (!isObj(d) || !exactKeys(d, ["domain", "shared_drive"]) || !domainOk(d.domain) || !driveNameOk(d.shared_drive)) return false;
+  if (!isObj(raw) || !exactKeys(raw, BOUNDARIES_FIELDS)) return false;
+  return commonValid(raw) && listOk(raw.github_repos, BOUNDARIES_MAX_REPOS, repoOk) && listOk(raw.drive_folders, BOUNDARIES_MAX_FOLDERS, folderOk);
+}
+function readBoundaries(raw) {
+  if (boundariesValid(raw)) return raw;
+  if (!isObj(raw) || !exactKeys(raw, M10_BOUNDARIES_FIELDS) || !commonValid(raw)) return null;
+  const m10 = raw;
+  return { topic: m10.topic, github_orgs: m10.github_orgs, github_repos: [], drive_folders: [], drives: m10.drives, member_folders: m10.member_folders };
+}
+var lowerRepo = (r) => `${r.org.toLowerCase()}/${r.repo.toLowerCase()}`;
+var sameDrive = (a, b) => a.domain === b.domain && a.shared_drive === b.shared_drive;
+function normaliseBoundaries(b) {
+  const orgSeen = /* @__PURE__ */ new Set();
+  const github_orgs = b.github_orgs.filter((o) => !orgSeen.has(o.toLowerCase()) && orgSeen.add(o.toLowerCase()));
+  const repoSeen = /* @__PURE__ */ new Set();
+  const github_repos = b.github_repos.filter((r) => !orgSeen.has(r.org.toLowerCase()) && !repoSeen.has(lowerRepo(r)) && repoSeen.add(lowerRepo(r)));
+  const folderSeen = /* @__PURE__ */ new Set();
+  const drive_folders = b.drive_folders.filter((f) => !folderSeen.has(f.folder_id) && folderSeen.add(f.folder_id));
+  const drives = b.drives.filter((d, i) => b.drives.findIndex((x) => sameDrive(x, d)) === i);
+  return {
+    topic: trimText(b.topic),
+    github_orgs,
+    github_repos: github_repos.map((r) => ({ org: r.org, repo: r.repo, id: r.id })),
+    drive_folders: drive_folders.map((f) => ({ domain: f.domain, drive_id: f.drive_id, folder_id: f.folder_id, folder_name: f.folder_name, drive_name: f.drive_name })),
+    drives: drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive })),
+    member_folders: b.member_folders
+  };
+}
+var orgKey = (org) => `org:${org.toLowerCase()}`;
+var repoKey = (r) => `repo:${lowerRepo(r)}`;
+var folderKey = (f) => `folder:${f.folder_id}`;
+var driveKey = (d) => `drive:${d.domain}/${d.shared_drive}`;
+function itemKey(item) {
+  switch (item.kind) {
+    case "org":
+      return orgKey(item.org);
+    case "repo":
+      return repoKey(item);
+    case "folder":
+      return folderKey(item);
+    case "drive":
+      return driveKey(item);
   }
-  return typeof raw.member_folders === "boolean";
+}
+function boundaryItems(b) {
+  const n = normaliseBoundaries(b);
+  return [
+    ...n.github_orgs.map((org) => ({ kind: "org", org })),
+    ...n.github_repos.map((r) => ({ kind: "repo", ...r })),
+    ...n.drive_folders.map((f) => ({ kind: "folder", ...f })),
+    ...n.drives.map((d) => ({ kind: "drive", ...d }))
+  ];
 }
 
 // src/deny-list.ts
@@ -34466,17 +34563,275 @@ function credentialHit(p, ctx) {
   return null;
 }
 
+// src/drive-locate.ts
+import { execFile as execFile4 } from "node:child_process";
+import { promises as fsp } from "node:fs";
+import { join as join6, relative, sep as sep2 } from "node:path";
+var DRIVEFS_ITEM_ID_ATTR = "com.google.drivefs.item-id#S";
+var XATTR_BIN = "/usr/bin/xattr";
+var XATTR_TIMEOUT_MS = 5e3;
+var READS_AT_ONCE = 4;
+function xattrItemId(home2) {
+  return (path) => new Promise((resolve) => {
+    try {
+      execFile4(
+        XATTR_BIN,
+        ["-p", DRIVEFS_ITEM_ID_ATTR, path],
+        { env: { PATH: "/usr/bin:/bin", HOME: home2 }, timeout: XATTR_TIMEOUT_MS, maxBuffer: 4096, encoding: "utf8", windowsHide: true, shell: false },
+        (err, stdout) => {
+          const id = err ? "" : String(stdout).trim();
+          resolve(DRIVE_ITEM_ID_RE.test(id) ? id : null);
+        }
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+var DEFAULT_LOCATE_LIMITS = {
+  rootsPerMount: 50,
+  depth: 8,
+  hintDirs: 5e3,
+  blindReads: 300,
+  blindMs: 1e4,
+  verifyMs: 6e4,
+  notFoundMs: 10 * 6e4
+};
+var ACCOUNT_RE2 = /^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+)$/;
+var byName = (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+async function realOrNull(p) {
+  try {
+    return await fsp.realpath(p);
+  } catch {
+    return null;
+  }
+}
+async function listDirs(dir) {
+  try {
+    return (await fsp.readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory() && !e.name.startsWith(".")).sort(byName);
+  } catch {
+    return [];
+  }
+}
+async function driveMounts(home2, domain) {
+  const want = domain.toLowerCase();
+  const cloud = await realOrNull(join6(home2, "Library", "CloudStorage"));
+  if (!cloud) return [];
+  const out = [];
+  for (const e of await listDirs(cloud)) {
+    const m = /^GoogleDrive-(.+)$/.exec(e.name);
+    const am = m ? ACCOUNT_RE2.exec(m[1]) : null;
+    if (!m || !am || am[1].toLowerCase() !== want) continue;
+    const shared = join6(cloud, e.name, "Shared drives");
+    try {
+      const st = await fsp.lstat(shared);
+      if (!st.isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    if (await realOrNull(shared) !== shared) continue;
+    out.push({ account: m[1], shared });
+  }
+  return out;
+}
+async function mountsSignature(home2) {
+  const cloud = await realOrNull(join6(home2, "Library", "CloudStorage"));
+  if (!cloud) return "";
+  const parts = [];
+  for (const e of await listDirs(cloud)) {
+    if (!e.name.startsWith("GoogleDrive-")) continue;
+    const roots = (await listDirs(join6(cloud, e.name, "Shared drives"))).map((r) => r.name);
+    parts.push(JSON.stringify([e.name, roots]));
+  }
+  return parts.join("\n");
+}
+function limited(fn, n) {
+  let running = 0;
+  const waiting = [];
+  return async (path) => {
+    if (running >= n) await new Promise((r) => waiting.push(r));
+    running++;
+    try {
+      return await fn(path);
+    } catch {
+      return null;
+    } finally {
+      running--;
+      waiting.shift()?.();
+    }
+  };
+}
+var DriveLocator = class {
+  home;
+  readId;
+  now;
+  limits;
+  cache = /* @__PURE__ */ new Map();
+  notFound = /* @__PURE__ */ new Map();
+  entriesKey = null;
+  mountsKey = null;
+  constructor(o) {
+    this.home = o.home;
+    this.readId = limited(o.readId ?? xattrItemId(o.home), READS_AT_ONCE);
+    this.now = o.now ?? Date.now;
+    this.limits = { ...DEFAULT_LOCATE_LIMITS, ...o.limits };
+  }
+  /**
+   * Where each entry is on this Mac (by folder_id; an entry not found is not in the map).
+   * `force`: every cached path is checked again now (before a status report).
+   */
+  async locate(entries, opts = {}) {
+    const entriesKey = JSON.stringify(entries.map((e) => [e.domain, e.drive_id, e.folder_id, e.folder_name]));
+    const mountsKey = await mountsSignature(this.home);
+    if (entriesKey !== this.entriesKey || mountsKey !== this.mountsKey) this.notFound.clear();
+    this.entriesKey = entriesKey;
+    this.mountsKey = mountsKey;
+    const budget = { hintDirs: this.limits.hintDirs, blindReads: this.limits.blindReads, blindUntil: null, roots: /* @__PURE__ */ new Map(), mounts: /* @__PURE__ */ new Map() };
+    const out = /* @__PURE__ */ new Map();
+    for (const e of entries) {
+      if (out.has(e.folder_id) || !DRIVE_ITEM_ID_RE.test(e.folder_id) || e.drive_id !== null && !DRIVE_ITEM_ID_RE.test(e.drive_id)) continue;
+      const cached2 = this.cache.get(e.folder_id);
+      if (cached2) {
+        if (cached2.domain === e.domain && (e.drive_id === null || e.drive_id === cached2.drive_root_id)) {
+          if (!opts.force && this.now() - cached2.verifiedAt < this.limits.verifyMs) {
+            out.set(e.folder_id, strip(cached2));
+            continue;
+          }
+          if (await this.verify(cached2, budget)) {
+            cached2.verifiedAt = this.now();
+            out.set(e.folder_id, strip(cached2));
+            continue;
+          }
+        }
+        this.cache.delete(e.folder_id);
+      }
+      const missedAt = this.notFound.get(e.folder_id);
+      if (missedAt !== void 0 && this.now() - missedAt < this.limits.notFoundMs) continue;
+      const found = await this.search(e, budget);
+      if (found) {
+        this.notFound.delete(e.folder_id);
+        this.cache.set(e.folder_id, { ...found, verifiedAt: this.now() });
+        out.set(e.folder_id, found);
+      } else {
+        this.notFound.set(e.folder_id, this.now());
+      }
+    }
+    return out;
+  }
+  async mounts(domain, budget) {
+    let m = budget.mounts.get(domain);
+    if (!m) {
+      m = await driveMounts(this.home, domain);
+      budget.mounts.set(domain, m);
+    }
+    return m;
+  }
+  /** The shared drive roots of one mount and their ids, read once per `locate`. */
+  async roots(mount, budget) {
+    let r = budget.roots.get(mount.shared);
+    if (!r) {
+      const dirs = (await listDirs(mount.shared)).slice(0, this.limits.rootsPerMount).map((d) => join6(mount.shared, d.name));
+      r = await Promise.all(dirs.map(async (path) => ({ path, id: await this.readId(path) })));
+      budget.roots.set(mount.shared, r);
+    }
+    return r;
+  }
+  /** Whether a cached place is still the folder (see the module comment). */
+  async verify(c, budget) {
+    if (!(await this.mounts(c.domain, budget)).some((m) => m.shared === c.shared && m.account === c.account)) return false;
+    const rel = relative(c.shared, c.path);
+    if (!rel || rel.startsWith("..") || rel.split(sep2).some((s) => s === "" || s.startsWith("."))) return false;
+    if (join6(c.shared, rel.split(sep2)[0]) !== c.drive_root) return false;
+    for (const p of c.path === c.drive_root ? [c.path] : [c.drive_root, c.path]) {
+      try {
+        const st = await fsp.lstat(p);
+        if (!st.isDirectory()) return false;
+      } catch {
+        return false;
+      }
+      if (await realOrNull(p) !== p) return false;
+    }
+    if (await this.readId(c.path) !== c.folder_id) return false;
+    return c.path === c.drive_root || await this.readId(c.drive_root) === c.drive_root_id;
+  }
+  async search(e, budget) {
+    for (const mount of await this.mounts(e.domain, budget)) {
+      const roots = await this.roots(mount, budget);
+      const found = (root, path) => ({
+        folder_id: e.folder_id,
+        domain: e.domain,
+        account: mount.account,
+        shared: mount.shared,
+        drive_root: root.path,
+        drive_root_id: root.id,
+        path
+      });
+      const withId = roots.filter((r) => r.id !== null);
+      if (e.drive_id !== null) {
+        const root = withId.find((r) => r.id === e.drive_id);
+        if (!root) continue;
+        if (e.folder_id === e.drive_id) return found(root, root.path);
+        const p = await this.walk([root], e, budget, "hint") ?? await this.walk([root], e, budget, "blind");
+        if (p) return found(root, p.path);
+      } else {
+        const whole = withId.find((r) => r.id === e.folder_id);
+        if (whole) return found(whole, whole.path);
+        const p = await this.walk(withId, e, budget, "hint");
+        if (p) return found(p.root, p.path);
+      }
+    }
+    return null;
+  }
+  /**
+   * Breadth-first below the roots, directories only, never through a symlink or a dot name, at
+   * most `depth` levels: 'hint' reads the id of each directory named as the entry; 'blind' reads
+   * every directory's id. The first whose id is the folder's, and is its own real path, is it.
+   */
+  async walk(roots, e, budget, mode) {
+    const want = e.folder_name.normalize("NFC");
+    if (mode === "blind") budget.blindUntil ??= this.now() + this.limits.blindMs;
+    const queue = roots.map((root) => ({ root, dir: root.path, depth: 0 }));
+    const isIt = async (path) => await this.readId(path) === e.folder_id && await realOrNull(path) === path;
+    while (queue.length) {
+      const { root, dir, depth } = queue.shift();
+      if (mode === "hint") {
+        if (budget.hintDirs <= 0) return null;
+        budget.hintDirs--;
+      }
+      const children = (await listDirs(dir)).map((d) => ({ name: d.name, path: join6(dir, d.name) }));
+      if (mode === "hint") {
+        for (const c of children) if (c.name.normalize("NFC") === want && await isIt(c.path)) return { root, path: c.path };
+      } else {
+        for (let i = 0; i < children.length; ) {
+          if (budget.blindReads <= 0 || this.now() > budget.blindUntil) return null;
+          const batch = children.slice(i, i + Math.min(READS_AT_ONCE, budget.blindReads));
+          budget.blindReads -= batch.length;
+          i += batch.length;
+          const ids = await Promise.all(batch.map((c) => this.readId(c.path)));
+          for (const [k, c] of batch.entries()) if (ids[k] === e.folder_id && await realOrNull(c.path) === c.path) return { root, path: c.path };
+        }
+      }
+      if (depth + 1 < this.limits.depth) for (const c of children) queue.push({ root, dir: c.path, depth: depth + 1 });
+    }
+    return null;
+  }
+};
+function strip(c) {
+  const { verifiedAt: _v, ...f } = c;
+  return f;
+}
+
 // src/member-folders.ts
 import { randomBytes as randomBytes8 } from "node:crypto";
 import { chmodSync as chmodSync3, closeSync as closeSync3, fsyncSync as fsyncSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync8, renameSync as renameSync5, rmSync as rmSync6, writeSync as writeSync3 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute7, join as join7, normalize as normalize3 } from "node:path";
+import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute7, join as join8, normalize as normalize3 } from "node:path";
 init_relay_client_core();
 
 // src/scope.ts
 import { existsSync, readdirSync, statSync as statSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute6, join as join6, normalize as normalize2 } from "node:path";
+import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute6, join as join7, normalize as normalize2 } from "node:path";
 init_credentials();
 function relayCredentialDirs(env) {
   const dirs = [configDir(env)];
@@ -34511,7 +34866,7 @@ function folderSafety(cwd, env) {
   if (path === "/") return refuse("it is the root directory");
   if (path === homeReal || normalize2(cwd) === normalize2(home2)) return refuse("it is your home directory");
   if (within(homeReal, path) || within(normalize2(home2), path)) return refuse("it contains your home directory");
-  const configDirs = [join6(homeReal, ".claude"), join6(homeReal, ".claude-team-relay"), ...relayCredentialDirs(env).map(realOr)];
+  const configDirs = [join7(homeReal, ".claude"), join7(homeReal, ".claude-team-relay"), ...relayCredentialDirs(env).map(realOr)];
   const claudeConfig = env.CLAUDE_CONFIG_DIR?.trim();
   if (claudeConfig && isAbsolute6(claudeConfig)) configDirs.push(realOr(claudeConfig));
   for (const d of configDirs) {
@@ -34541,14 +34896,14 @@ function homeEntries(homeReal) {
   }
   const wanted = /* @__PURE__ */ new Set(["Library", ...names.filter((n) => n.startsWith(".") && n !== "." && n !== "..")]);
   return [...wanted].map((name) => {
-    const path = join6(homeReal, name);
+    const path = join7(homeReal, name);
     return { name, path, real: realOr(path) };
   });
 }
 function inGitWorkTree(path, homeReal) {
   for (let d = path; ; d = dirname3(d)) {
     if (d === "/" || within(homeReal, d)) return false;
-    if (existsSync(join6(d, ".git"))) return true;
+    if (existsSync(join7(d, ".git"))) return true;
     if (dirname3(d) === d) return false;
   }
 }
@@ -34566,14 +34921,14 @@ var MemberFoldersError = class extends Error {
   }
 };
 function memberFoldersPath(env) {
-  return join7(configDir(env), MEMBER_FOLDERS_FILE);
+  return join8(configDir(env), MEMBER_FOLDERS_FILE);
 }
 function home(env) {
   return env.HOME?.trim() || homedir4();
 }
 function expandPath(raw, env) {
   if (raw === "~") return normalize3(home(env));
-  if (raw.startsWith("~/")) return normalize3(join7(home(env), raw.slice(2)));
+  if (raw.startsWith("~/")) return normalize3(join8(home(env), raw.slice(2)));
   if (isAbsolute7(raw)) return normalize3(raw);
   return null;
 }
@@ -34607,12 +34962,12 @@ function parseMemberFolders(raw, env, what = "the folders file") {
   }
   return out;
 }
-function sameDrive(a, b) {
+function sameDrive2(a, b) {
   return a.domain === b.domain && a.shared_drive === b.shared_drive;
 }
 function parseAccepted(raw) {
   if (!isObj2(raw)) throw new MemberFoldersError("accepted is not a JSON object");
-  onlyKeys(raw, ["version", "github_orgs", "drives", "member_folders"], "accepted");
+  onlyKeys(raw, ["version", "github_orgs", "github_repos", "drive_folders", "drives", "member_folders"], "accepted");
   const v = raw.version;
   if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1 || v > BOUNDARIES_VERSION_MAX) throw new MemberFoldersError("accepted.version must be a whole number from 1");
   if (!Array.isArray(raw.github_orgs) || raw.github_orgs.length > BOUNDARIES_MAX_ORGS) throw new MemberFoldersError("accepted.github_orgs must be a list of at most 10 org names");
@@ -34629,10 +34984,24 @@ function parseAccepted(raw) {
     if (!domainOk(d.domain)) throw new MemberFoldersError("accepted.drives has a domain that is not a lower-case DNS name");
     if (!driveNameOk(d.shared_drive)) throw new MemberFoldersError("accepted.drives has a shared drive name that cannot be used");
     const drive = { domain: d.domain, shared_drive: d.shared_drive };
-    if (!drives.some((x) => sameDrive(x, drive))) drives.push(drive);
+    if (!drives.some((x) => sameDrive2(x, drive))) drives.push(drive);
   }
   if (typeof raw.member_folders !== "boolean") throw new MemberFoldersError("accepted.member_folders must be true or false");
-  return { version: v, github_orgs: orgs, drives, member_folders: raw.member_folders };
+  const rawRepos = raw.github_repos ?? [];
+  if (!Array.isArray(rawRepos) || rawRepos.length > BOUNDARIES_MAX_REPOS) throw new MemberFoldersError("accepted.github_repos must be a list of at most 100 repositories");
+  const repos = [];
+  for (const r of rawRepos) {
+    if (!repoOk(r)) throw new MemberFoldersError("accepted.github_repos has an entry that is not a GitHub repository");
+    if (!repos.some((x) => repoKey(x) === repoKey(r))) repos.push({ org: r.org, repo: r.repo, id: r.id });
+  }
+  const rawFolders = raw.drive_folders ?? [];
+  if (!Array.isArray(rawFolders) || rawFolders.length > BOUNDARIES_MAX_FOLDERS) throw new MemberFoldersError("accepted.drive_folders must be a list of at most 20 folders");
+  const folders = [];
+  for (const f of rawFolders) {
+    if (!folderOk(f)) throw new MemberFoldersError("accepted.drive_folders has an entry that is not a shared-drive folder");
+    if (!folders.some((x) => x.folder_id === f.folder_id)) folders.push({ domain: f.domain, drive_id: f.drive_id, folder_id: f.folder_id, folder_name: f.folder_name, drive_name: f.drive_name });
+  }
+  return { version: v, github_orgs: orgs, github_repos: repos, drive_folders: folders, drives, member_folders: raw.member_folders };
 }
 function parseTeamSettings(raw, env, team = "a team") {
   if (!isObj2(raw)) throw new MemberFoldersError(`the settings for ${team} are not a JSON object`);
@@ -34744,7 +35113,7 @@ function writeMemberSettings(path, value, env) {
   } catch (err) {
     if (err instanceof MemberFoldersError) throw err;
   }
-  const tmp = join7(dir, `.${basename3(path)}.${randomBytes8(8).toString("hex")}.tmp`);
+  const tmp = join8(dir, `.${basename3(path)}.${randomBytes8(8).toString("hex")}.tmp`);
   let fd = null;
   try {
     fd = openSync3(tmp, "wx", 384);
@@ -34776,60 +35145,90 @@ function changeMemberFolders(current, list, op, raw, env) {
   if (current[list].length >= MAX_FOLDERS) throw new MemberFoldersError(`at most ${MAX_FOLDERS} entries in ${list}`);
   return { value: { ...current, [list]: [...current[list], raw] }, changed: true, resolved: path };
 }
+var own2 = (o, key) => o && Object.prototype.hasOwnProperty.call(o, key) ? o[key] : void 0;
 function sinceOf(tb) {
   const s = tb.since ?? null;
+  const item = (key) => {
+    if (!s) return void 0;
+    const at = key.indexOf(":");
+    const kind = key.slice(0, at);
+    const rest = key.slice(at + 1);
+    if (kind === "org") return own2(s.github_orgs, rest);
+    if (kind === "repo") return own2(s.github_repos, rest);
+    if (kind === "folder") return own2(s.drive_folders, rest);
+    return s.drives.find((d) => driveKey(d) === key)?.since;
+  };
   return {
     version: tb.version,
-    // Own keys only: an org may be named like an Object.prototype member ("constructor").
-    org: (o) => {
-      const key = o.toLowerCase();
-      return s && Object.prototype.hasOwnProperty.call(s.github_orgs, key) ? s.github_orgs[key] ?? tb.version : tb.version;
-    },
-    drive: (d) => s?.drives.find((x) => sameDrive(x, d))?.since ?? tb.version,
+    item: (key) => item(key) ?? tb.version,
     memberFolders: () => s?.member_folders ?? tb.version
   };
 }
+var keySet = (a) => /* @__PURE__ */ new Set([...a.github_orgs.map(orgKey), ...a.github_repos.map(repoKey), ...a.drive_folders.map(folderKey), ...a.drives.map(driveKey)]);
+var wholeDrives = (a) => new Set(a.drive_folders.filter((f) => f.drive_id !== null && f.folder_id === f.drive_id).map((f) => f.folder_id));
+function holds(keys, wholes, item) {
+  if (keys.has(itemKey(item))) return true;
+  if (item.kind === "repo") return keys.has(orgKey(item.org));
+  if (item.kind === "folder") return item.drive_id !== null && wholes.has(item.drive_id);
+  return false;
+}
+function widening(items, member_folders) {
+  const w = { github_orgs: [], github_repos: [], drive_folders: [], drives: [], member_folders };
+  for (const i of items) {
+    if (i.kind === "org") w.github_orgs.push(i.org);
+    else if (i.kind === "repo") w.github_repos.push({ org: i.org, repo: i.repo, id: i.id });
+    else if (i.kind === "folder") w.drive_folders.push({ domain: i.domain, drive_id: i.drive_id, folder_id: i.folder_id, folder_name: i.folder_name, drive_name: i.drive_name });
+    else w.drives.push({ domain: i.domain, shared_drive: i.shared_drive });
+  }
+  return w;
+}
+var widens = (w) => w.github_orgs.length > 0 || w.github_repos.length > 0 || w.drive_folders.length > 0 || w.drives.length > 0 || w.member_folders;
 function effectiveBoundaries(current, acceptedRaw, since) {
   const accepted = acceptedRaw ? narrowAccepted(current, acceptedRaw, since)?.accepted ?? acceptedRaw : null;
-  const orgs = new Set((accepted?.github_orgs ?? []).map((o) => o.toLowerCase()));
-  const acceptedDrives = accepted?.drives ?? [];
-  const added = {
-    github_orgs: current.github_orgs.filter((o) => !orgs.has(o.toLowerCase())),
-    drives: current.drives.filter((d) => !acceptedDrives.some((a) => sameDrive(a, d))),
-    member_folders: current.member_folders && accepted?.member_folders !== true
-  };
-  const widens = added.github_orgs.length > 0 || added.drives.length > 0 || added.member_folders;
+  const keys = accepted ? keySet(accepted) : /* @__PURE__ */ new Set();
+  const wholes = accepted ? wholeDrives(accepted) : /* @__PURE__ */ new Set();
+  const stale = accepted !== null && accepted.version > since.version;
+  const isIn = (i) => accepted !== null && !stale && since.item(itemKey(i)) <= accepted.version && holds(keys, wholes, i);
+  const items = boundaryItems(current);
+  const inside = items.filter(isIn);
+  const kept = widening(inside, current.member_folders && accepted?.member_folders === true);
+  const added = widening(
+    items.filter((i) => !isIn(i)),
+    current.member_folders && accepted?.member_folders !== true
+  );
   return {
-    boundaries: {
-      topic: current.topic,
-      github_orgs: current.github_orgs.filter((o) => orgs.has(o.toLowerCase())),
-      drives: current.drives.filter((d) => acceptedDrives.some((a) => sameDrive(a, d))),
-      member_folders: current.member_folders && accepted?.member_folders === true
-    },
+    boundaries: { topic: current.topic, ...kept },
     notAccepted: accepted === null,
-    pending: widens ? added : null
+    pending: widens(added) ? added : null
   };
 }
 function narrowAccepted(current, accepted, since) {
   if (!accepted) return null;
   const stale = accepted.version > since.version;
   const covered = (n) => !stale && n <= accepted.version;
-  const orgs = new Set(current.github_orgs.map((o) => o.toLowerCase()));
-  const keep = (o) => orgs.has(o.toLowerCase()) && covered(since.org(o));
-  const listed = (d) => current.drives.some((c) => sameDrive(c, d)) && covered(since.drive(d));
-  const folders = current.member_folders && covered(since.memberFolders());
-  const dropped = {
-    github_orgs: accepted.github_orgs.filter((o) => !keep(o)),
-    drives: accepted.drives.filter((d) => !listed(d)),
-    member_folders: accepted.member_folders && !folders
-  };
-  if (dropped.github_orgs.length === 0 && dropped.drives.length === 0 && !dropped.member_folders) return null;
+  const keys = keySet(accepted);
+  const wholes = wholeDrives(accepted);
+  const kept = boundaryItems(current).filter((i) => covered(since.item(itemKey(i))) && holds(keys, wholes, i));
+  const keptKeys = new Set(kept.map(itemKey));
+  const folders = accepted.member_folders && current.member_folders && covered(since.memberFolders());
+  const next = { version: accepted.version, ...widening(kept, folders) };
+  const droppedItems = [
+    ...accepted.github_orgs.map((org) => ({ kind: "org", org })),
+    ...accepted.github_repos.map((r) => ({ kind: "repo", ...r })),
+    ...accepted.drive_folders.map((f) => ({ kind: "folder", ...f })),
+    ...accepted.drives.map((d) => ({ kind: "drive", ...d }))
+  ].filter((i) => !keptKeys.has(itemKey(i)));
+  const dropped = widening(droppedItems, accepted.member_folders && !folders);
+  const same = keptKeys.size === keys.size && [...keys].every((k) => keptKeys.has(k));
+  if (!widens(dropped) && same) return null;
+  const asAccepted = (list, key, from) => list.map((x) => from.find((y) => key(y) === key(x)) ?? x);
   return {
     accepted: {
-      version: accepted.version,
-      github_orgs: accepted.github_orgs.filter(keep),
-      drives: accepted.drives.filter(listed),
-      member_folders: accepted.member_folders && folders
+      ...next,
+      github_orgs: next.github_orgs.map((o) => accepted.github_orgs.find((a) => a.toLowerCase() === o.toLowerCase()) ?? o),
+      github_repos: asAccepted(next.github_repos, repoKey, accepted.github_repos),
+      drive_folders: asAccepted(next.drive_folders, folderKey, accepted.drive_folders),
+      drives: asAccepted(next.drives, driveKey, accepted.drives)
     },
     dropped
   };
@@ -34843,11 +35242,14 @@ function acceptedAtVersion(current, version2, since) {
   }
 }
 function acceptedFrom(current, version2) {
+  const n = normaliseBoundaries(current);
   return parseAccepted({
     version: version2,
-    github_orgs: current.github_orgs,
-    drives: current.drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive })),
-    member_folders: current.member_folders
+    github_orgs: n.github_orgs,
+    github_repos: n.github_repos,
+    drive_folders: n.drive_folders,
+    drives: n.drives,
+    member_folders: n.member_folders
   });
 }
 
@@ -34915,6 +35317,11 @@ var ORIGIN_RES = [
   /^git@github\.com:([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/i,
   /^ssh:\/\/git@github\.com(?::22)?\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/i
 ];
+function githubSourceMatcher(s) {
+  const orgs = new Set(s.github_orgs.map((o) => o.toLowerCase()));
+  const repos = new Set(s.github_repos.map((r) => repoKey(r)));
+  return (o) => orgs.has(o.org.toLowerCase()) || repos.has(repoKey(o));
+}
 function parseGithubOrigin(url) {
   const u = url.trim();
   for (const re of ORIGIN_RES) {
@@ -34933,7 +35340,7 @@ function gitEnv(env) {
   };
 }
 var runGit = (cwd, args, env) => new Promise((resolve) => {
-  execFile4(
+  execFile5(
     "git",
     ["-C", cwd, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
     { env: gitEnv(env), timeout: 3e4, maxBuffer: 64 * 1024 * 1024, encoding: "utf8", windowsHide: true },
@@ -34952,14 +35359,14 @@ var GitCache = class {
   }
 };
 async function gitDirOf(tree) {
-  const dotgit = join8(tree, ".git");
+  const dotgit = join9(tree, ".git");
   try {
-    const st = await fsp.lstat(dotgit);
+    const st = await fsp2.lstat(dotgit);
     if (st.isDirectory()) return dotgit;
     if (!st.isFile() || st.size > 4096) return null;
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(await fsp.readFile(dotgit, "utf8"));
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(await fsp2.readFile(dotgit, "utf8"));
     if (!m) return null;
-    return m[1].startsWith("/") ? m[1] : join8(tree, m[1]);
+    return m[1].startsWith("/") ? m[1] : join9(tree, m[1]);
   } catch {
     return null;
   }
@@ -34968,13 +35375,13 @@ async function gitCacheKey(tree) {
   const dir = await gitDirOf(tree);
   if (!dir) return null;
   try {
-    const head = (await fsp.readFile(join8(dir, "HEAD"), "utf8")).slice(0, 300);
+    const head = (await fsp2.readFile(join9(dir, "HEAD"), "utf8")).slice(0, 300);
     let ref = "";
     const m = /^ref:\s*(\S+)/.exec(head);
     if (m && /^refs\/[A-Za-z0-9._/-]+$/.test(m[1]) && !m[1].includes("..")) {
-      ref = await fsp.readFile(join8(dir, m[1]), "utf8").catch(() => "");
+      ref = await fsp2.readFile(join9(dir, m[1]), "utf8").catch(() => "");
     }
-    const idx = await fsp.stat(join8(dir, "index"));
+    const idx = await fsp2.stat(join9(dir, "index"));
     return `${head}|${ref.trim()}|${idx.mtimeMs}|${idx.size}|${idx.ino}`;
   } catch {
     return null;
@@ -34995,16 +35402,16 @@ async function trackedFiles(dir, env, git, cache) {
   const files = [];
   for (const rel of out.split("\0")) {
     if (!rel) continue;
-    const abs = join8(topReal, rel);
+    const abs = join9(topReal, rel);
     if (abs === dir || !within(abs, dir)) continue;
-    files.push(relative(dir, abs));
+    files.push(relative2(dir, abs));
   }
   if (cache && key) cache.set(dir, key, files);
   return files;
 }
 async function canonical(path) {
   try {
-    return await fsp.realpath(path);
+    return await fsp2.realpath(path);
   } catch {
     return null;
   }
@@ -35041,7 +35448,7 @@ async function keepFiles(candidates, ctx, opts) {
         const real = await canonical(p);
         if (real !== p) return null;
         try {
-          const st = await fsp.stat(real);
+          const st = await fsp2.stat(real);
           if (!st.isFile()) return null;
           if (opts.maxBytes !== void 0 && st.size > opts.maxBytes && !isGoogleLinkName(real)) return null;
         } catch {
@@ -35079,14 +35486,14 @@ async function walk(root, limits) {
     }
     let entries;
     try {
-      entries = await fsp.readdir(dir, { withFileTypes: true });
+      entries = await fsp2.readdir(dir, { withFileTypes: true });
     } catch {
       continue;
     }
     entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     for (const e of entries) {
       if (e.name.startsWith(".")) continue;
-      const p = join8(dir, e.name);
+      const p = join9(dir, e.name);
       if (e.isDirectory()) {
         if (!SKIP_DIRS.has(e.name) && depth < limits.walkDepth) queue.push({ dir: p, depth: depth + 1 });
       } else if (e.isFile()) {
@@ -35110,7 +35517,7 @@ async function findWorkTrees(root, depth, maxDirs) {
     seen++;
     let entries;
     try {
-      entries = await fsp.readdir(dir, { withFileTypes: true });
+      entries = await fsp2.readdir(dir, { withFileTypes: true });
     } catch {
       continue;
     }
@@ -35118,21 +35525,21 @@ async function findWorkTrees(root, depth, maxDirs) {
     if (d >= depth) continue;
     entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     for (const e of entries) {
-      if (e.isDirectory() && !e.name.startsWith(".") && !SKIP_DIRS.has(e.name)) queue.push({ dir: join8(dir, e.name), depth: d + 1 });
+      if (e.isDirectory() && !e.name.startsWith(".") && !SKIP_DIRS.has(e.name)) queue.push({ dir: join9(dir, e.name), depth: d + 1 });
     }
   }
   return found;
 }
-var ACCOUNT_RE2 = /^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+)$/;
+var ACCOUNT_RE3 = /^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+)$/;
 async function driveRoots(drive, home2) {
   const name = drive.shared_drive;
   if (!name || name === "." || name === ".." || name.includes("/") || /[\u0000-\u001f\u007f]/.test(name)) return [];
   const domain = drive.domain.toLowerCase();
-  const cloud = await canonical(join8(home2, "Library", "CloudStorage"));
+  const cloud = await canonical(join9(home2, "Library", "CloudStorage"));
   if (!cloud) return [];
   let entries;
   try {
-    entries = await fsp.readdir(cloud, { withFileTypes: true });
+    entries = await fsp2.readdir(cloud, { withFileTypes: true });
   } catch {
     return [];
   }
@@ -35142,13 +35549,13 @@ async function driveRoots(drive, home2) {
     const m = /^GoogleDrive-(.+)$/.exec(e.name);
     if (!m) continue;
     const account = m[1];
-    const am = ACCOUNT_RE2.exec(account);
+    const am = ACCOUNT_RE3.exec(account);
     if (!am || am[1].toLowerCase() !== domain) continue;
-    const shared = join8(cloud, e.name, "Shared drives");
-    const root = join8(shared, name);
+    const shared = join9(cloud, e.name, "Shared drives");
+    const root = join9(shared, name);
     try {
-      const a = await fsp.lstat(shared);
-      const b = await fsp.lstat(root);
+      const a = await fsp2.lstat(shared);
+      const b = await fsp2.lstat(root);
       if (!a.isDirectory() || !b.isDirectory()) continue;
     } catch {
       continue;
@@ -35169,10 +35576,11 @@ async function buildAllowedSet(input) {
   const notes = [];
   const areas = [];
   const budget = { left: limits.totalFiles };
-  const orgs = new Set(boundaries.github_orgs.map((o) => o.toLowerCase()));
+  const matches = githubSourceMatcher(boundaries);
+  const github = boundaries.github_orgs.length > 0 || boundaries.github_repos.length > 0;
   const member = "error" in input.member ? null : input.member;
   if ("error" in input.member) notes.push(`your folders file cannot be used (${input.member.error})`);
-  if (member && orgs.size > 0) {
+  if (member && github) {
     const trees = /* @__PURE__ */ new Set();
     for (const raw of member.repo_roots) {
       const { path, reason } = memberFolderProblem(raw, env);
@@ -35189,15 +35597,38 @@ async function buildAllowedSet(input) {
       if (gd === null || `${normalize4(gd)}/`.includes("/.git/modules/")) continue;
       const origin = await git(tree, ["config", "--local", "--get", "remote.origin.url"], env);
       const parsed = origin === null ? null : parseGithubOrigin(origin);
-      if (!parsed || !orgs.has(parsed.org.toLowerCase())) continue;
+      if (!parsed || !matches(parsed)) continue;
       const rel = await trackedFiles(tree, env, git, cache);
       if (rel === null) continue;
       const kept = await keepFiles(
-        rel.map((r) => join8(tree, r)),
+        rel.map((r) => join9(tree, r)),
         ctx,
         { budget }
       );
       areas.push({ kind: "github", name: `github:${parsed.org}/${parsed.repo}`, root: tree, files: kept.files, repo: parsed, truncated: kept.truncated });
+    }
+  }
+  if (boundaries.drive_folders.length > 0) {
+    const locator = input.locator ?? new DriveLocator({ home: home2 });
+    const found = await locator.locate(boundaries.drive_folders);
+    const entries = boundaries.drive_folders.filter((e, i) => boundaries.drive_folders.findIndex((x) => x.folder_id === e.folder_id) === i).flatMap((e) => {
+      const f = found.get(e.folder_id);
+      return f ? [{ e, f }] : [];
+    }).sort((a, b) => a.f.path < b.f.path ? -1 : a.f.path > b.f.path ? 1 : 0);
+    const walked = [];
+    for (const { e, f } of entries) {
+      if (walked.some((root) => within(f.path, root))) continue;
+      walked.push(f.path);
+      const w = await walk(f.path, limits);
+      const kept = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
+      areas.push({
+        kind: "drive",
+        name: `drive:${e.folder_name}`,
+        root: f.path,
+        files: kept.files,
+        folder: { domain: e.domain, folder_id: e.folder_id, drive_root_id: f.drive_root_id, whole_drive: f.path === f.drive_root, folder_name: e.folder_name },
+        truncated: w.truncated || kept.truncated
+      });
     }
   }
   for (const drive of boundaries.drives) {
@@ -35223,7 +35654,7 @@ async function buildAllowedSet(input) {
       if (inside?.trim() === "true") {
         const rel = await trackedFiles(root, env, git, null);
         if (rel === null) continue;
-        kept = await keepFiles(rel.map((r) => join8(root, r)), ctx, { budget });
+        kept = await keepFiles(rel.map((r) => join9(root, r)), ctx, { budget });
       } else {
         const w = await walk(root, limits);
         const k = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
@@ -35255,7 +35686,7 @@ function shareNames(set) {
   const order = ["drive", "github", "folder"];
   const names = [];
   for (const kind of order) {
-    const raws = set.areas.filter((x) => x.kind === kind).map((a) => kind === "github" && a.repo ? a.repo.repo : kind === "drive" && a.drive ? a.drive.shared_drive : basename5(a.root)).sort();
+    const raws = set.areas.filter((x) => x.kind === kind).map((a) => kind === "github" && a.repo ? a.repo.repo : kind === "drive" && a.drive ? a.drive.shared_drive : kind === "drive" && a.folder ? a.folder.folder_name : basename5(a.root)).sort();
     for (const raw of raws) {
       const n = shareName(raw);
       if (SHARE_NAME_RE.test(n) && !names.includes(n)) names.push(n);
@@ -35269,7 +35700,8 @@ function setSummary(set) {
   const by = (k) => set.areas.filter((a) => a.kind === k);
   const parts = [];
   const gh = by("github");
-  const dr = by("drive");
+  const dr = by("drive").filter((a) => !a.folder || a.folder.whole_drive);
+  const df = by("drive").filter((a) => a.folder && !a.folder.whole_drive);
   const fo = by("folder");
   const list = (as) => {
     const names = as.slice(0, 8).map((a) => a.name.replace(/^[a-z]+:/, ""));
@@ -35277,19 +35709,33 @@ function setSummary(set) {
   };
   parts.push(gh.length ? `${gh.length} GitHub ${gh.length === 1 ? "repository" : "repositories"} (${list(gh)})` : "no GitHub repositories");
   parts.push(dr.length ? `${dr.length === 1 ? "the shared drive" : `${dr.length} shared drives`} ${list(dr)}` : "no shared drive");
+  if (df.length) parts.push(`${df.length === 1 ? "the Drive folder" : `${df.length} Drive folders`} ${list(df)}`);
   if (fo.length) parts.push(`${fo.length} of your folders (${list(fo)})`);
   return `${parts.join(", ")}; ${set.files.size} files`;
 }
 function areaRelative(area, path) {
-  return relative(area.root, path).split(sep2).join("/");
+  return relative2(area.root, path).split(sep3).join("/");
 }
 function quotedOwnerText(text, limit) {
   const flat = neutraliseChannelTags(text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim());
   return JSON.stringify(flat.length <= limit ? flat : flat.slice(0, limit));
 }
+function someOf(names, max) {
+  return `${names.slice(0, max).join(", ")}${names.length > max ? ` and ${names.length - max} more` : ""}`;
+}
+function folderText(f, withDomain) {
+  const where = f.drive_id !== null && f.folder_id === f.drive_id ? " (a whole shared drive" : f.drive_name !== null ? ` (in ${quotedOwnerText(f.drive_name, 100)}` : " (in a shared drive";
+  return `${quotedOwnerText(f.folder_name, 255)}${where}${withDomain ? `, ${f.domain}` : ""})`;
+}
+var repoNames = (repos) => someOf(repos.map((r) => `${r.org}/${r.repo}`), 10);
 function wideningText(w) {
   const parts = [];
   if (w.github_orgs.length) parts.push(`${w.github_orgs.length === 1 ? "the GitHub org" : "the GitHub orgs"} ${w.github_orgs.join(", ")}`);
+  if (w.github_repos.length) parts.push(`${w.github_repos.length === 1 ? "the GitHub repository" : "the GitHub repositories"} ${repoNames(w.github_repos)}`);
+  if (w.drive_folders.length) {
+    const names = someOf(w.drive_folders.map((f) => folderText(f, true)), 10);
+    parts.push(`${w.drive_folders.length === 1 ? "the Drive folder" : "the Drive folders"} ${names}`);
+  }
   if (w.drives.length) {
     const names = w.drives.map((d) => `${quotedOwnerText(d.shared_drive, 100)} (${d.domain})`).join(", ");
     parts.push(`${w.drives.length === 1 ? "the shared drive" : "the shared drives"} ${names}`);
@@ -35301,31 +35747,49 @@ var isObj3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function validBoundaries(v) {
   if (!isObj3(v) || !versionOk(v.version)) return false;
   if (v.boundaries === null) return v.since === void 0 || v.since === null;
-  return boundariesValid(v.boundaries) && sinceValid(v.since, v.version);
+  const b = readBoundaries(v.boundaries);
+  if (!b || !sinceValid(v.since, v.version)) return false;
+  v.boundaries = b;
+  if (isObj3(v.since)) v.since = { github_orgs: v.since.github_orgs, github_repos: v.since.github_repos ?? {}, drive_folders: v.since.drive_folders ?? {}, drives: v.since.drives, member_folders: v.since.member_folders };
+  return true;
 }
 function sinceValid(v, version2) {
   if (v === void 0 || v === null) return true;
   const inRange = (n) => versionOk(n) && n >= 1 && n <= version2;
   const keys = (o, want) => Object.keys(o).length === want.length && want.every((k) => Object.prototype.hasOwnProperty.call(o, k));
-  if (!isObj3(v) || !keys(v, ["github_orgs", "drives", "member_folders"])) return false;
+  if (!isObj3(v) || !(keys(v, ["github_orgs", "drives", "member_folders"]) || keys(v, ["github_orgs", "github_repos", "drive_folders", "drives", "member_folders"]))) return false;
   const orgs = v.github_orgs;
   if (!isObj3(orgs) || Object.keys(orgs).length > BOUNDARIES_MAX_ORGS) return false;
   if (!Object.entries(orgs).every(([o, n]) => orgOk(o) && o === o.toLowerCase() && inRange(n))) return false;
+  if (v.github_repos !== void 0) {
+    const repos = v.github_repos;
+    if (!isObj3(repos) || Object.keys(repos).length > BOUNDARIES_MAX_REPOS) return false;
+    const repoKeyOk = (k) => {
+      const at = k.indexOf("/");
+      return at > 0 && k === k.toLowerCase() && orgOk(k.slice(0, at)) && repoNameOk(k.slice(at + 1));
+    };
+    if (!Object.entries(repos).every(([k, n]) => repoKeyOk(k) && inRange(n))) return false;
+  }
+  if (v.drive_folders !== void 0) {
+    const folders = v.drive_folders;
+    if (!isObj3(folders) || Object.keys(folders).length > BOUNDARIES_MAX_FOLDERS) return false;
+    if (!Object.entries(folders).every(([k, n]) => driveItemIdOk(k) && inRange(n))) return false;
+  }
   if (!Array.isArray(v.drives) || v.drives.length > BOUNDARIES_MAX_DRIVES) return false;
   if (!v.drives.every((d) => isObj3(d) && keys(d, ["domain", "shared_drive", "since"]) && domainOk(d.domain) && driveNameOk(d.shared_drive) && inRange(d.since))) return false;
   return v.member_folders === null || inRange(v.member_folders);
 }
 
 // src/boundary-tools.ts
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 
 // src/google-drive.ts
 init_credentials();
-import { execFile as execFile5 } from "node:child_process";
+import { execFile as execFile6 } from "node:child_process";
 import { createHash as createHash3 } from "node:crypto";
 import { closeSync as closeSync4, constants as fsConstants, fstatSync, openSync as openSync4, readSync, realpathSync as realpathSync2 } from "node:fs";
 import { homedir as homedir6 } from "node:os";
-import { extname as extname2, isAbsolute as isAbsolute8, join as join9, relative as relative2, sep as sep3 } from "node:path";
+import { extname as extname2, isAbsolute as isAbsolute8, join as join10, relative as relative3, sep as sep4 } from "node:path";
 var DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
 var KEYCHAIN_SERVICE = "team-relay-drive";
 var GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -35366,7 +35830,7 @@ var KeychainError = class extends Error {
 var SECURITY = "/usr/bin/security";
 var ITEM_NOT_FOUND = 44;
 var execSecurity = (args, stdin) => new Promise((resolve) => {
-  const child = execFile5(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8" }, (err, stdout) => {
+  const child = execFile6(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8" }, (err, stdout) => {
     const code = err ? typeof err.code === "number" ? err.code : 1 : 0;
     resolve({ code, stdout: String(stdout ?? "") });
   });
@@ -35601,28 +36065,39 @@ var Session = class {
   }
 };
 function cloudStorageRoot() {
-  return join9(homedir6(), "Library", "CloudStorage");
+  return join10(homedir6(), "Library", "CloudStorage");
 }
-function readLinkFile(linkPath, drive, root) {
+var isFolderArea = (a) => "root" in a;
+var below = (rel) => rel !== "" && rel !== ".." && !rel.startsWith(`..${sep4}`) && !isAbsolute8(rel);
+function readLinkFile(linkPath, area, root) {
   if (!isGoogleLinkFile(linkPath)) throw new DriveReadError("not a Google file");
   if (!isAbsolute8(linkPath)) throw new DriveReadError("not in the team drive");
   let realRoot;
   let realFile;
+  let realArea = null;
   try {
     realRoot = realpathSync2(root);
     realFile = realpathSync2(linkPath);
+    if (isFolderArea(area)) realArea = realpathSync2(area.root);
   } catch {
     throw new DriveReadError("not in the team drive");
   }
   if (!isGoogleLinkFile(realFile)) throw new DriveReadError("not a Google file");
   const ext = extname2(realFile).toLowerCase();
   if (ext !== extname2(linkPath).toLowerCase()) throw new DriveReadError("not a Google file");
-  const rel = relative2(realRoot, realFile);
-  if (!rel || rel.startsWith("..") || isAbsolute8(rel)) throw new DriveReadError("not in the team drive");
-  const segs = rel.split(sep3);
+  const rel = relative3(realRoot, realFile);
+  if (!below(rel)) throw new DriveReadError("not in the team drive");
+  const segs = rel.split(sep4);
   const mount = /^GoogleDrive-(.+)$/.exec(segs[0] ?? "");
   const account = mount?.[1];
-  if (segs.length < 4 || !account || !emailInDomain(account, drive.domain) || segs[1] !== "Shared drives" || (segs[2] ?? "").normalize("NFC") !== drive.shared_drive.normalize("NFC")) {
+  if (segs.length < 4 || !account || !emailInDomain(account, area.domain) || segs[1] !== "Shared drives") throw new DriveReadError("not in the team drive");
+  if (isFolderArea(area)) {
+    const areaRel = relative3(realRoot, realArea);
+    const areaSegs = areaRel.split(sep4);
+    if (!below(areaRel) || areaSegs.length < 3 || areaSegs[0] !== segs[0] || areaSegs[1] !== "Shared drives" || !below(relative3(realArea, realFile))) {
+      throw new DriveReadError("not in the team drive");
+    }
+  } else if ((segs[2] ?? "").normalize("NFC") !== area.shared_drive.normalize("NFC")) {
     throw new DriveReadError("not in the team drive");
   }
   let fd;
@@ -35667,11 +36142,34 @@ function readLinkFile(linkPath, drive, root) {
     throw new DriveReadError("the link file has an invalid resource_key");
   }
   const email2 = o.email;
-  if (email2 !== void 0 && email2 !== null && email2 !== "" && (typeof email2 !== "string" || !emailInDomain(email2, drive.domain))) {
+  if (email2 !== void 0 && email2 !== null && email2 !== "" && (typeof email2 !== "string" || !emailInDomain(email2, area.domain))) {
     throw new DriveReadError("not in the team drive");
   }
   const t = GOOGLE_TYPES[ext];
   return { docId, resourceKey, kind: t.kind, googleMime: t.mime };
+}
+var MAX_ANCESTRY_LEVELS = 20;
+var NOT_IN_FOLDER = "not in the picked Drive folder";
+function oneParent(parents) {
+  if (!Array.isArray(parents) || parents.length !== 1) return null;
+  const p = parents[0];
+  return typeof p === "string" && DOC_ID_RE.test(p) ? p : null;
+}
+async function reachesFolder(s, parents, driveId, folderId) {
+  let current = oneParent(parents);
+  for (let level = 1; level <= MAX_ANCESTRY_LEVELS; level++) {
+    if (current === null || current === driveId) return false;
+    if (current === folderId) return true;
+    if (level === MAX_ANCESTRY_LEVELS) return false;
+    const q = new URLSearchParams({ supportsAllDrives: "true", fields: "id,parents,driveId" });
+    const r = await s.get(`${DRIVE_API}files/${encodeURIComponent(current)}?${q.toString()}`);
+    if (r.status === 0) throw new GoogleHttpError(0);
+    if (r.status !== 200) return false;
+    const m = jsonOf(r);
+    if (!m || m.id !== current || m.driveId !== driveId) return false;
+    current = oneParent(m.parents);
+  }
+  return false;
 }
 async function resolveSharedDrive(s, name) {
   const want = name.normalize("NFC");
@@ -35791,12 +36289,22 @@ async function defaultRelay() {
   const { relayClientFromEnv: relayClientFromEnv2 } = await Promise.resolve().then(() => (init_relay_client(), relay_client_exports));
   return relayClientFromEnv2(process.env, { attempts: 1, timeoutMs: 1e4 });
 }
-async function readGoogleFile(linkPath, drive, deps = {}) {
+function areaOk(a) {
+  if (typeof a !== "object" || a === null) return null;
+  const o = a;
+  if (!isDomain(o.domain)) return null;
+  if ("root" in o) {
+    const idOk = (v) => typeof v === "string" && DOC_ID_RE.test(v);
+    return typeof o.root === "string" && isAbsolute8(o.root) && idOk(o.drive_root_id) && idOk(o.folder_id) ? { domain: o.domain, root: o.root, drive_root_id: o.drive_root_id, folder_id: o.folder_id } : null;
+  }
+  const n = o.shared_drive;
+  return typeof n === "string" && n.length > 0 && n.length <= 100 && !/[/\u0000-\u001f\u007f]/.test(n) ? { domain: o.domain, shared_drive: n } : null;
+}
+async function readGoogleFile(linkPath, given, deps = {}) {
   try {
     if (!isGoogleLinkFile(linkPath)) return { ok: false, reason: "not a Google file" };
-    if (!drive || !isDomain(drive.domain) || typeof drive.shared_drive !== "string" || drive.shared_drive.length === 0 || drive.shared_drive.length > 100 || /[/\u0000-\u001f\u007f]/.test(drive.shared_drive)) {
-      return { ok: false, reason: "not in the team drive" };
-    }
+    const drive = areaOk(given);
+    if (!drive) return { ok: false, reason: "not in the team drive" };
     const link = readLinkFile(linkPath, drive, deps.cloudStorageRoot ?? cloudStorageRoot());
     const keychain = deps.keychain === void 0 ? defaultKeychain() : deps.keychain;
     if (!keychain) return { ok: false, reason: "Google files can only be read on macOS (the Drive connection lives in the macOS Keychain)" };
@@ -35810,8 +36318,9 @@ async function readGoogleFile(linkPath, drive, deps = {}) {
     const doFetch = deps.fetch ?? ((u, i) => fetch(u, i));
     const relay = deps.relay ?? await defaultRelay();
     const s = new Session(doFetch, relay, account, refresh, deps.now ?? Date.now);
-    const driveId = await resolveSharedDrive(s, drive.shared_drive);
-    const q = new URLSearchParams({ supportsAllDrives: "true", fields: "id,name,mimeType,driveId" });
+    const driveId = isFolderArea(drive) ? drive.drive_root_id : await resolveSharedDrive(s, drive.shared_drive);
+    const folderId = isFolderArea(drive) && drive.folder_id !== drive.drive_root_id ? drive.folder_id : null;
+    const q = new URLSearchParams({ supportsAllDrives: "true", fields: folderId ? "id,name,mimeType,driveId,parents" : "id,name,mimeType,driveId" });
     const headers = link.resourceKey ? { "X-Goog-Drive-Resource-Keys": `${link.docId}/${link.resourceKey}` } : {};
     const meta2 = await s.get(`${DRIVE_API}files/${encodeURIComponent(link.docId)}?${q.toString()}`, { headers });
     if (meta2.status !== 200) throw new GoogleHttpError(meta2.status);
@@ -35819,6 +36328,7 @@ async function readGoogleFile(linkPath, drive, deps = {}) {
     if (!m || m.id !== link.docId) return { ok: false, reason: "Google answered with something unexpected" };
     if (typeof m.driveId !== "string" || m.driveId !== driveId) return { ok: false, reason: "not in the team drive" };
     if (m.mimeType !== link.googleMime) return { ok: false, reason: "not a Google file" };
+    if (folderId && !await reachesFolder(s, m.parents, driveId, folderId)) return { ok: false, reason: NOT_IN_FOLDER };
     return await exportFile(s, link);
   } catch (err) {
     if (err instanceof DriveReadError || err instanceof GoogleHttpError) return { ok: false, reason: err.message };
@@ -36084,8 +36594,8 @@ function screenDraft(text, data) {
 
 // src/snapshot.ts
 import { randomBytes as randomBytes9 } from "node:crypto";
-import { constants as constants2, promises as fsp2 } from "node:fs";
-import { extname as extname3, join as join10 } from "node:path";
+import { constants as constants2, promises as fsp3 } from "node:fs";
+import { extname as extname3, join as join11 } from "node:path";
 var MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
 var MAX_RUN_SNAPSHOT_BYTES = 100 * 1024 * 1024;
 function snapshotDirPrefix(pid = process.pid) {
@@ -36101,7 +36611,7 @@ async function openAllowed(input) {
   await input.beforeOpen?.(real);
   let fh;
   try {
-    fh = await fsp2.open(real, constants2.O_RDONLY | constants2.O_NOFOLLOW | constants2.O_NONBLOCK);
+    fh = await fsp3.open(real, constants2.O_RDONLY | constants2.O_NOFOLLOW | constants2.O_NONBLOCK);
   } catch {
     return { ok: false, why: "unsafe" };
   }
@@ -36112,7 +36622,7 @@ async function openAllowed(input) {
     if (st.size > BigInt(input.maxBytes)) return { ok: false, why: "too_large" };
     const again = await canonical(real);
     if (again !== real || !set.files.has(again) || alwaysOut(again, ctx)) return { ok: false, why: "unsafe" };
-    const now = await fsp2.stat(real, { bigint: true }).catch(() => null);
+    const now = await fsp3.stat(real, { bigint: true }).catch(() => null);
     if (!now || now.dev !== st.dev || now.ino !== st.ino) return { ok: false, why: "unsafe" };
     keep = true;
     return { ok: true, fh, st };
@@ -36157,8 +36667,8 @@ async function snapshotRead(input) {
       const body = await readCapped2(fh, reserved);
       if (body === null) return { ok: false, why: "unsafe" };
       const ext = extname3(real);
-      const copy = join10(run3.dir, `${randomBytes9(16).toString("hex")}${EXT_RE.test(ext) ? ext : ""}`);
-      await fsp2.writeFile(copy, body, { flag: "wx", mode: 384 });
+      const copy = join11(run3.dir, `${randomBytes9(16).toString("hex")}${EXT_RE.test(ext) ? ext : ""}`);
+      await fsp3.writeFile(copy, body, { flag: "wx", mode: 384 });
       used = body.length;
       run3.copies.set(key, { path: copy, bytes: body.length });
       return { ok: true, path: copy, source: real, bytes: body.length };
@@ -36184,7 +36694,7 @@ async function removeStaleSnapshotDirs(root, startedAt) {
   if (me === null) return 0;
   let names;
   try {
-    names = await fsp2.readdir(root);
+    names = await fsp3.readdir(root);
   } catch {
     return 0;
   }
@@ -36192,12 +36702,12 @@ async function removeStaleSnapshotDirs(root, startedAt) {
   for (const name of names) {
     const m = SNAPSHOT_DIR_RE.exec(name);
     if (!m || !processGone(Number(m[1]))) continue;
-    const path = join10(root, name);
-    const st = await fsp2.lstat(path).catch(() => null);
+    const path = join11(root, name);
+    const st = await fsp3.lstat(path).catch(() => null);
     if (!st || st.isSymbolicLink() || !st.isDirectory() || st.uid !== me || (st.mode & 511) !== 448) continue;
     if (!(st.mtimeMs < startedAt)) continue;
     try {
-      await fsp2.rm(path, { recursive: true, force: true });
+      await fsp3.rm(path, { recursive: true, force: true });
       removed++;
     } catch {
     }
@@ -36356,19 +36866,26 @@ async function searchFiles(set, args, opts) {
     result: { results, files_searched: searched, ...skipped ? { files_skipped: skipped } : {}, ...stopped ? { truncated: true, note: stopped } : {} }
   };
 }
+function googleArea(area) {
+  if (area.kind !== "drive") return null;
+  if (area.folder) return { domain: area.folder.domain, root: area.root, drive_root_id: area.folder.drive_root_id, folder_id: area.folder.folder_id };
+  if (area.drive) return { domain: area.drive.domain, shared_drive: area.drive.shared_drive };
+  return null;
+}
 async function readGoogle(set, args, ctx, deps) {
   const raw = args.path;
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 4096) return { ok: false, message: "path must be the absolute path of a .gdoc, .gsheet or .gslides file from list_files" };
-  const given = raw.startsWith("/") ? raw : join11(deps.cwd, raw);
+  const given = raw.startsWith("/") ? raw : join12(deps.cwd, raw);
   if (!isGoogleLinkFile(given)) return { ok: false, message: "read_google_file reads only Google Docs, Sheets and Slides (.gdoc, .gsheet, .gslides); use Read for other files" };
   const real = await inSet(set, given, ctx);
   const area = real ? set.files.get(real) : void 0;
-  if (!real || !area || area.kind !== "drive" || !area.drive) {
+  const target = area ? googleArea(area) : null;
+  if (!real || !target) {
     return { ok: false, message: "That file is outside the team's shared drive, so it cannot be read." };
   }
   const { reader, home: _home, cwd: _cwd, ...rest } = deps;
-  const res = await (reader ?? readGoogleFile)(real, { domain: area.drive.domain, shared_drive: area.drive.shared_drive }, {
-    cloudStorageRoot: join11(deps.home, "Library", "CloudStorage"),
+  const res = await (reader ?? readGoogleFile)(real, target, {
+    cloudStorageRoot: join12(deps.home, "Library", "CloudStorage"),
     ...rest
   });
   if (!res.ok) return { ok: false, message: `This Google file cannot be read (${res.reason}). Answer without it, and say so.` };
@@ -36666,7 +37183,7 @@ import { createHash as createHash4, randomBytes as randomBytes11, timingSafeEqua
 import { chmodSync as chmodSync4, mkdtempSync as mkdtempSync2, rmSync as rmSync7 } from "node:fs";
 import { createConnection, createServer as createServer3 } from "node:net";
 import { tmpdir as tmpdir2 } from "node:os";
-import { join as join12 } from "node:path";
+import { join as join13 } from "node:path";
 var MAX_LINE = 1024 * 1024;
 var SOCKET_FILE = "host.sock";
 var digest2 = (s) => createHash4("sha256").update(s, "utf8").digest();
@@ -36698,9 +37215,9 @@ var HostSocket = class {
   current = null;
   sockets = /* @__PURE__ */ new Set();
   constructor(opts = {}) {
-    this.dir = mkdtempSync2(join12(opts.tmpRoot ?? tmpdir2(), "trh-"));
+    this.dir = mkdtempSync2(join13(opts.tmpRoot ?? tmpdir2(), "trh-"));
     chmodSync4(this.dir, 448);
-    this.path = join12(this.dir, SOCKET_FILE);
+    this.path = join13(this.dir, SOCKET_FILE);
   }
   async listen() {
     const server = createServer3((sock) => this.accept(sock));
@@ -36781,7 +37298,7 @@ var HostSocket = class {
 };
 
 // src/notify-desktop.ts
-import { execFile as execFile6 } from "node:child_process";
+import { execFile as execFile7 } from "node:child_process";
 var NOTICE_TITLE = "Team relay";
 var NOTICE_TEXT = "Team relay: your answering session is waiting for your permission";
 var CAP_MS = 3e3;
@@ -36832,7 +37349,7 @@ async function run2() {
   const cmd = notifyCommand(process.platform);
   if (!cmd) return;
   await new Promise((resolve) => {
-    execFile6(cmd.file, cmd.args, { timeout: CAP_MS - 500, windowsHide: true }, () => resolve());
+    execFile7(cmd.file, cmd.args, { timeout: CAP_MS - 500, windowsHide: true }, () => resolve());
   });
 }
 if (process.argv[1] && /notify-desktop\.(js|ts)$/.test(process.argv[1])) {
@@ -36857,7 +37374,7 @@ var WITHHELD_REPLY = (member) => `This answer may contain a credential, so it wa
 var BUSY_REPLY = "Too many questions right now; try again later.";
 var NOT_SET_UP_REPLY = (member) => `${member} hasn't set up answering for this team yet.`;
 var NO_CAPABILITY_REPLY = (member) => `${member}'s background answerer does not run capabilities; ask ${member} directly.`;
-var OUTSIDE_SET = "That file is not one you may read for this team: only files git tracks in the team's GitHub repositories, files in its shared drive and the member's own added folders. Use mcp__host__list_files or mcp__host__search_files to find what you can read; do not try to reach it another way.";
+var OUTSIDE_SET = "That file is not one you may read for this team: only files git tracks in the team's GitHub repositories, files in its shared drives and Drive folders, and the member's own added folders. Use mcp__host__list_files or mcp__host__search_files to find what you can read; do not try to reach it another way.";
 var TOO_LARGE_READ = `That file is larger than ${MAX_SNAPSHOT_BYTES / (1024 * 1024)} MB, so it cannot be read. Answer without it, and say so.`;
 var UNSAFE_READ = "That file changed or is not a regular file, so it cannot be read now. Answer without it, and say so.";
 var RUN_CAP_READ = `This answer has already read ${MAX_RUN_SNAPSHOT_BYTES / (1024 * 1024)} MB of files, the most one answer may, so this file cannot be read. Answer with what you have, and say so.`;
@@ -36871,7 +37388,7 @@ var NOTICE_GAP_MS = 5 * 6e4;
 var WITHDRAW_MS = 1500;
 function ownDist() {
   const here = dirname6(fileURLToPath4(import.meta.url));
-  return basename6(here) === "src" ? join13(here, "..", "dist") : here;
+  return basename6(here) === "src" ? join14(here, "..", "dist") : here;
 }
 function singleLine(text, limit) {
   const flat = neutraliseChannelTags(text).replace(/\s+/g, " ").trim();
@@ -36892,6 +37409,7 @@ var AnswerHost = class {
     this.perHour = o.limits?.perHour ?? MAX_RUNS_PER_HOUR;
     this.noticeGapMs = o.limits?.noticeGapMs ?? NOTICE_GAP_MS;
     this.queue.onChange((e) => this.onQueueChange(e.type, e.item, e.outcome));
+    this.driveLocator = new DriveLocator({ home: homeDir(o.env), ...o.driveIdReader ? { readId: o.driveIdReader } : {} });
   }
   o;
   queue;
@@ -36941,6 +37459,8 @@ var AnswerHost = class {
   /** M11-SPEC §1: no new run starts (the background answerer is finishing to restart). */
   finishing = false;
   gitCache = new GitCache();
+  /** PICKERS-SPEC §6.2: where the team's picked Drive folders are on this Mac (this host's own cache). */
+  driveLocator;
   get stopped() {
     return this.controller.signal.aborted;
   }
@@ -36983,7 +37503,8 @@ var AnswerHost = class {
     const s = this.status();
     const sentence = approvalsSentence(s.approvals_pending);
     const set = this.lastSet;
-    const names = (kind) => set ? set.areas.filter((a) => a.kind === kind).map((a) => singleLine(a.name.replace(/^[a-z]+:/, ""), 200)) : [];
+    const names = (kind, folders2) => set ? set.areas.filter((a) => a.kind === kind && (folders2 === void 0 || (a.folder !== void 0 && !a.folder.whole_drive) === folders2)).map((a) => singleLine(a.name.replace(/^[a-z]+:/, ""), 200)) : [];
+    const folders = names("drive", true);
     return {
       answering_automatically: s.answering,
       ...s.why_not ? { answering_note: s.why_not } : {},
@@ -36991,7 +37512,14 @@ var AnswerHost = class {
       answering_folder: s.folder,
       ...s.mode === "boundaries" ? {
         boundaries_version: this.boundaries?.version ?? null,
-        answering_from: set ? { github_repositories: names("github"), shared_drives: names("drive"), your_folders: names("folder"), files: set.files.size, summary: singleLine(setSummary(set), 600) } : null,
+        answering_from: set ? {
+          github_repositories: names("github"),
+          shared_drives: names("drive", false),
+          ...folders.length ? { drive_folders: folders } : {},
+          your_folders: names("folder"),
+          files: set.files.size,
+          summary: singleLine(setSummary(set), 600)
+        } : null,
         ...set && set.notes.length ? { answering_from_notes: set.notes.slice(0, 10) } : {},
         ...this.acceptanceFields(),
         answering_rules: "Inside the boundaries answers go out on their own; reads of anything else are denied at once; off-topic questions get a fixed decline. Change your folders with /team-relay:folders."
@@ -37097,7 +37625,8 @@ var AnswerHost = class {
       boundaries: eff.boundaries,
       member: { repo_roots: settings.repo_roots, extra_folders: settings.extra_folders },
       env: this.env,
-      cache: this.gitCache
+      cache: this.gitCache,
+      locator: this.driveLocator
     });
     for (const n of set.notes) this.o.log(n);
     this.lastSet = set;
@@ -37520,11 +38049,11 @@ var AnswerHost = class {
       await this.publishShares(this.scope.qualifies && this.scope.share ? [this.scope.share] : []);
     }
     if (this.stopped) return false;
-    const runDir = mkdtempSync3(join13(socket.dir, "run-"));
+    const runDir = mkdtempSync3(join14(socket.dir, "run-"));
     let snapshots = null;
     if (boundary) {
       try {
-        snapshots = mkdtempSync3(join13(dirname6(socket.dir), snapshotDirPrefix()));
+        snapshots = mkdtempSync3(join14(dirname6(socket.dir), snapshotDirPrefix()));
         chmodSync5(snapshots, 448);
       } catch (err) {
         rmSync8(runDir, { recursive: true, force: true });
@@ -37961,7 +38490,7 @@ function relayServerEnv(connection, env, runDir) {
   const c = connection;
   const out = { RELAY_URL: c.url, RELAY_TEAM: c.team, RELAY_AUTH: c.mode };
   const denyFiles = [];
-  const toolEvent = { relay_url: c.url, relay_team: c.team, relay_auth: c.mode, state_dir: join13(runDir, "state") };
+  const toolEvent = { relay_url: c.url, relay_team: c.team, relay_auth: c.mode, state_dir: join14(runDir, "state") };
   if (c.mode === "credential" && c.credentialsFile) {
     out.RELAY_CREDENTIALS_FILE = c.credentialsFile;
     toolEvent.credentials_file = c.credentialsFile;
@@ -37969,7 +38498,7 @@ function relayServerEnv(connection, env, runDir) {
   } else if (c.mode === "token") {
     let file = c.tokenFile;
     if (!file && c.token) {
-      file = join13(runDir, "token");
+      file = join14(runDir, "token");
       writeFileSync4(file, `${c.token}
 `, { mode: 384, flag: "wx" });
     }
@@ -37991,12 +38520,12 @@ function relayServerEnv(connection, env, runDir) {
 function planRun(p) {
   const { runDir, env, scope } = p;
   const boundary = p.boundaries ?? null;
-  const stateDir = join13(runDir, "state");
+  const stateDir = join14(runDir, "state");
   mkdirSync6(stateDir, { mode: 448 });
   const relay = relayServerEnv(p.connection, env, runDir);
   let cwd = scope.path;
   if (!scope.qualifies || boundary) {
-    cwd = join13(runDir, "work");
+    cwd = join14(runDir, "work");
     mkdirSync6(cwd, { mode: 448 });
   }
   const denyDirs = [p.socket.dir, ...relayCredentialDirs(env)];
@@ -38018,20 +38547,20 @@ function planRun(p) {
         for (const [k, v] of Object.entries(env)) {
           if (/^CAP_[A-Z][A-Z0-9_]*_(ENABLED|RUNNER)$/.test(k) && typeof v === "string") capEnv[k] = v;
         }
-        capabilities = { script: join13(p.dist, "capabilities.js"), env: capEnv };
+        capabilities = { script: join14(p.dist, "capabilities.js"), env: capEnv };
       }
     } catch (err) {
       p.log?.(`capabilities not offered to this answer (${describeError(err)})`);
     }
   }
   const token = p.token ?? newToken();
-  const mcpConfig = join13(runDir, "mcp.json");
-  const settings = join13(runDir, "settings.json");
-  const toolEventFile = relay.toolEvent ? join13(runDir, "tool-event.json") : null;
-  const readTrailFile = join13(runDir, "read-trail.json");
+  const mcpConfig = join14(runDir, "mcp.json");
+  const settings = join14(runDir, "settings.json");
+  const toolEventFile = relay.toolEvent ? join14(runDir, "tool-event.json") : null;
+  const readTrailFile = join14(runDir, "read-trail.json");
   const write = (path, value) => writeFileSync4(path, `${JSON.stringify(value, null, 2)}
 `, { mode: 384, flag: "wx" });
-  write(mcpConfig, childMcpConfig({ node: p.node, answerTools: join13(p.dist, "answer-tools.js"), socket: p.socket.path, token, capabilities, boundaries: boundary !== null }));
+  write(mcpConfig, childMcpConfig({ node: p.node, answerTools: join14(p.dist, "answer-tools.js"), socket: p.socket.path, token, capabilities, boundaries: boundary !== null }));
   if (toolEventFile) write(toolEventFile, relay.toolEvent);
   write(readTrailFile, { socket: p.socket.path, token });
   write(
@@ -38040,9 +38569,9 @@ function planRun(p) {
       scope,
       denyFiles: relay.denyFiles,
       denyDirs,
-      readTrailHook: { node: p.node, script: join13(p.dist, "read-trail.js"), config: readTrailFile },
+      readTrailHook: { node: p.node, script: join14(p.dist, "read-trail.js"), config: readTrailFile },
       boundaries: boundary !== null,
-      ...toolEventFile ? { toolEventHook: { node: p.node, script: join13(p.dist, "tool-event.js"), config: toolEventFile } } : {}
+      ...toolEventFile ? { toolEventHook: { node: p.node, script: join14(p.dist, "tool-event.js"), config: toolEventFile } } : {}
     })
   );
   const model = env.TEAM_RELAY_ANSWER_MODEL?.trim() || void 0;
@@ -38079,7 +38608,7 @@ function draftReasons(d) {
 function defaultNotify(text) {
   const cmd = notifyCommand(process.platform, text);
   if (!cmd) return;
-  execFile7(cmd.file, cmd.args, { timeout: 3e3, windowsHide: true }, () => {
+  execFile8(cmd.file, cmd.args, { timeout: 3e3, windowsHide: true }, () => {
   });
 }
 
@@ -38117,7 +38646,10 @@ function teamPart(tb, otherTeam = false) {
     team_boundaries: {
       version: tb.version,
       github_orgs: b.github_orgs,
+      // PICKERS-SPEC §2: single repositories and picked Drive folders, when the team has any.
+      ...b.github_repos.length > 0 ? { github_repos: b.github_repos.map((r) => `${r.org}/${r.repo}`) } : {},
       // Owner-written names: data, quoted.
+      ...b.drive_folders.length > 0 ? { drive_folders: b.drive_folders.map((x) => folderText(x, true)) } : {},
       shared_drives: b.drives.map((d) => `${quotedOwnerText(d.shared_drive, 100)} (${d.domain})`),
       member_folders_allowed: b.member_folders
     }

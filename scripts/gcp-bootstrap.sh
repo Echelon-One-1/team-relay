@@ -6,6 +6,10 @@
 #        TEAM_CONFIG=config/team.local.yaml bash scripts/gcp-bootstrap.sh
 #        OAUTH_CLIENT_FILE=<web client JSON> DRIVE_CLIENT_FILE=<desktop client JSON> \
 #          bash scripts/gcp-bootstrap.sh
+#        GITHUB_APP_ID=<app id> GITHUB_APP_SLUG=<app slug> GITHUB_APP_KEY_FILE=<.pem> \
+#          bash scripts/gcp-bootstrap.sh
+#        PICKER_CLIENT_ID=<web client id> PICKER_API_KEY=<browser API key> \
+#          bash scripts/gcp-bootstrap.sh
 #
 # Every resource is namespaced team-relay*. Nothing here reads, writes or grants anything on
 # other resources that may share the project, and nothing here shares a service account,
@@ -45,6 +49,55 @@ if [[ ! -f "$TEAM_CONFIG" ]]; then
   exit 1
 fi
 
+# PICKERS-SPEC §4.2: the GitHub App's three settings go together, and so do the Picker's two;
+# all are checked before anything changes.
+GITHUB_SET=0
+for name in GITHUB_APP_ID GITHUB_APP_SLUG GITHUB_APP_KEY_FILE; do
+  if [[ -n "${!name:-}" ]]; then GITHUB_SET=$((GITHUB_SET + 1)); fi
+done
+if [[ "$GITHUB_SET" != 0 && "$GITHUB_SET" != 3 ]]; then
+  echo "error: GITHUB_APP_ID, GITHUB_APP_SLUG and GITHUB_APP_KEY_FILE go together" >&2
+  exit 1
+fi
+if [[ -n "${PICKER_CLIENT_ID:-}" && -z "${PICKER_API_KEY:-}" ]] ||
+    [[ -z "${PICKER_CLIENT_ID:-}" && -n "${PICKER_API_KEY:-}" ]]; then
+  echo "error: PICKER_CLIENT_ID and PICKER_API_KEY go together" >&2
+  exit 1
+fi
+if [[ "$GITHUB_SET" == 3 ]]; then
+  if [[ ! "$GITHUB_APP_ID" =~ ^[0-9]{1,12}$ ]]; then
+    echo "error: GITHUB_APP_ID must be the app's numeric id (1 to 12 digits)" >&2
+    exit 1
+  fi
+  if [[ ! "$GITHUB_APP_SLUG" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]]; then
+    echo "error: GITHUB_APP_SLUG must be the last part of the app's public link, such as example-relay-sources" >&2
+    exit 1
+  fi
+  # An unencrypted RSA key of 2048 bits or more, as the relay requires. Only the size of its
+  # public half is read; the key itself is never printed.
+  if [[ ! -f "$GITHUB_APP_KEY_FILE" ]] ||
+      ! openssl rsa -in "$GITHUB_APP_KEY_FILE" -passin pass: -check -noout >/dev/null 2>&1; then
+    echo "error: GITHUB_APP_KEY_FILE must be the app's unencrypted RSA private key (.pem)" >&2
+    exit 1
+  fi
+  KEY_BITS="$(openssl rsa -in "$GITHUB_APP_KEY_FILE" -passin pass: -pubout 2>/dev/null |
+    openssl rsa -pubin -noout -text 2>/dev/null | sed -n 's/.*(\([0-9][0-9]*\) bit).*/\1/p' | head -1)"
+  if [[ -z "$KEY_BITS" || "$KEY_BITS" -lt 2048 ]]; then
+    echo "error: GITHUB_APP_KEY_FILE must be an RSA key of 2048 bits or more" >&2
+    exit 1
+  fi
+fi
+if [[ -n "${PICKER_CLIENT_ID:-}" ]]; then
+  if [[ ! "$PICKER_CLIENT_ID" =~ ^[A-Za-z0-9.-]{1,200}\.apps\.googleusercontent\.com$ ]]; then
+    echo "error: PICKER_CLIENT_ID must be the picker's Web OAuth client id (ending .apps.googleusercontent.com)" >&2
+    exit 1
+  fi
+  if [[ ! "$PICKER_API_KEY" =~ ^AIza[0-9A-Za-z_-]{35}$ ]]; then
+    echo "error: PICKER_API_KEY must be a Google API key (AIza and 35 more characters)" >&2
+    exit 1
+  fi
+fi
+
 OPERATOR="${OPERATOR:-$(gcloud config get-value account 2>/dev/null || true)}"
 if [[ -z "$OPERATOR" || "$OPERATOR" == "(unset)" ]]; then
   echo "error: no active gcloud account and no OPERATOR set" >&2
@@ -67,10 +120,12 @@ has_binding() {  # stdin: csv role,member rows; $1 role; $2 member
 echo "1. services"
 ENABLED="$(gcloud services list --enabled --project="$PROJECT" --format='value(config.name)')"
 # compute: the load balancer of scripts/deploy-lb.sh (M10-SPEC §5). cloudresourcemanager: the
-# IAP access step reads and changes IAM policies through it (M11-SPEC §7).
+# IAP access step reads and changes IAM policies through it (M11-SPEC §7). picker and drive: the
+# console's Drive folder picker (PICKERS-SPEC §5), which runs on the owner's own Google sign-in.
 for api in run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
     secretmanager.googleapis.com firestore.googleapis.com iam.googleapis.com iap.googleapis.com \
-    compute.googleapis.com cloudresourcemanager.googleapis.com; do
+    compute.googleapis.com cloudresourcemanager.googleapis.com picker.googleapis.com \
+    drive.googleapis.com; do
   if grep -qx "$api" <<<"$ENABLED"; then
     echo "   ${api}: exists"
   else
@@ -408,6 +463,96 @@ if gcloud secrets describe "$DRIVE_SECRET" --project="$PROJECT" >/dev/null 2>&1;
 else
   echo "   secret ${DRIVE_SECRET}: skipped (set DRIVE_CLIENT_FILE=<Desktop client JSON> to create it)"
 fi
+
+# A JSON secret readable by the relay's runtime only, from $2 (sent on stdin, never printed):
+# created, updated when it differs, or left as it is.
+store_runtime_secret() {  # $1 secret name, $2 the value
+  local current
+  if gcloud secrets describe "$1" --project="$PROJECT" >/dev/null 2>&1; then
+    current="$(gcloud secrets versions access latest --secret="$1" --project="$PROJECT" \
+      2>/dev/null || true)"
+    if [[ "$current" == "$2" ]]; then
+      echo "   secret $1: exists (current)"
+    else
+      printf '%s' "$2" | gcloud secrets versions add "$1" --project="$PROJECT" --data-file=- \
+        --quiet >/dev/null
+      echo "   secret $1: updated (redeploy the relay)"
+    fi
+  else
+    printf '%s' "$2" | gcloud secrets create "$1" --project="$PROJECT" \
+      --replication-policy=user-managed --locations="$REGION" --data-file=- --quiet >/dev/null
+    echo "   secret $1: created"
+  fi
+}
+
+runtime_accessor() {  # $1 secret name, $2 how to create it when it does not exist
+  if gcloud secrets describe "$1" --project="$PROJECT" >/dev/null 2>&1; then
+    if gcloud secrets get-iam-policy "$1" --project="$PROJECT" --flatten='bindings[].members' \
+        --format='csv[no-heading](bindings.role,bindings.members)' |
+        has_binding roles/secretmanager.secretAccessor "serviceAccount:${RUNTIME_EMAIL}"; then
+      echo "   accessor on $1: exists"
+    else
+      gcloud secrets add-iam-policy-binding "$1" --project="$PROJECT" \
+        --member="serviceAccount:${RUNTIME_EMAIL}" --role=roles/secretmanager.secretAccessor \
+        --quiet >/dev/null
+      echo "   accessor on $1: created"
+    fi
+  else
+    echo "   secret $1: skipped ($2)"
+  fi
+}
+
+# ------------------------------------------------------- 11. GitHub App (PICKERS-SPEC §4.2)
+# The read-only GitHub App owners pick repositories from: its id, its slug and its private key,
+# stored as the JSON secret team-relay-github-app ({"app_id", "slug", "private_key"}), readable
+# by the relay's runtime only. The key is never printed; delete the .pem afterwards (or keep it
+# only in a password manager). Optional: without it owners paste repository links. While it
+# exists, scripts/deploy.sh needs GITHUB_ORGS.
+GITHUB_SECRET="team-relay-github-app"
+echo "11. GitHub App"
+if [[ "$GITHUB_SET" == 3 ]]; then
+  WANTED_GITHUB="$(python3 - "$GITHUB_APP_ID" "$GITHUB_APP_SLUG" "$GITHUB_APP_KEY_FILE" <<'PYEOF'
+import json, sys
+with open(sys.argv[3], encoding="ascii") as key:
+    pem = key.read()
+print(json.dumps({"app_id": sys.argv[1], "slug": sys.argv[2], "private_key": pem},
+                 sort_keys=True, separators=(",", ":")))
+PYEOF
+)"
+  store_runtime_secret "$GITHUB_SECRET" "$WANTED_GITHUB"
+  unset WANTED_GITHUB
+fi
+runtime_accessor "$GITHUB_SECRET" \
+  "set GITHUB_APP_ID, GITHUB_APP_SLUG and GITHUB_APP_KEY_FILE to create it"
+
+# ------------------------------------------------------- 12. Drive picker (PICKERS-SPEC §5)
+# The Google Picker's settings: its own Web OAuth client id (JavaScript origin
+# https://PUBLIC_HOST), the browser API key (restricted to the Picker API and the console's host)
+# and this project's number, read here. Public by design (Google restricts them); stored as
+# team-relay-picker ({"client_id", "api_key", "app_id"}) so the relay hands them to owners only.
+# Optional: without it owners paste Drive folder links.
+PICKER_SECRET="team-relay-picker"
+echo "12. Drive picker"
+if [[ -n "${PICKER_CLIENT_ID:-}" ]]; then
+  PICKER_APP_ID="$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')"
+  if [[ ! "$PICKER_APP_ID" =~ ^[0-9]{6,20}$ ]]; then
+    echo "error: could not read the project number of ${PROJECT}" >&2
+    exit 1
+  fi
+  # Through the environment, never argv (a command line shows in ps).
+  WANTED_PICKER="$(TR_PICKER_CLIENT_ID="$PICKER_CLIENT_ID" TR_PICKER_API_KEY="$PICKER_API_KEY" \
+    TR_PICKER_APP_ID="$PICKER_APP_ID" python3 - <<'PYEOF'
+import json, os
+print(json.dumps({"client_id": os.environ["TR_PICKER_CLIENT_ID"],
+                  "api_key": os.environ["TR_PICKER_API_KEY"],
+                  "app_id": os.environ["TR_PICKER_APP_ID"]},
+                 sort_keys=True, separators=(",", ":")))
+PYEOF
+)"
+  store_runtime_secret "$PICKER_SECRET" "$WANTED_PICKER"
+  unset WANTED_PICKER
+fi
+runtime_accessor "$PICKER_SECRET" "set PICKER_CLIENT_ID and PICKER_API_KEY to create it"
 
 echo
 if [[ -n "${PUBLIC_HOST:-}" ]]; then

@@ -58,7 +58,7 @@ function fakeKeychain(initial: Record<string, string> = {}): Keychain & { items:
 
 type Call = { url: URL; method: string; headers: Record<string, string>; body: string; redirect: RequestInit['redirect'] };
 
-type FileMeta = { mimeType: string; driveId?: string };
+type FileMeta = { mimeType: string; driveId?: string; parents?: string[] };
 
 class FakeGoogle {
   calls: Call[] = [];
@@ -135,7 +135,9 @@ class FakeGoogle {
       if (this.status[`meta ${id}`]) return json(this.status[`meta ${id}`]!, { error: { message: `nope ${auth}` } });
       const f = this.files[id];
       if (!f) return json(404, { error: { message: 'File not found' } });
-      return json(200, { id, name: 'Synthetic', mimeType: f.mimeType, ...(f.driveId ? { driveId: f.driveId } : {}) });
+      // Only the fields asked for (as Drive does): `parents` only when `fields` names it.
+      const fields = (url.searchParams.get('fields') ?? '').split(',');
+      return json(200, { id, name: 'Synthetic', mimeType: f.mimeType, ...(f.driveId ? { driveId: f.driveId } : {}), ...(f.parents && fields.includes('parents') ? { parents: f.parents } : {}) });
     }
     if (url.host === 'sheets.googleapis.com') {
       if (this.sheetsApi === 'disabled') return json(403, { error: { status: 'PERMISSION_DENIED', message: 'Sheets API has not been used' } });
@@ -434,6 +436,152 @@ describe('readGoogleFile (ACC-7)', () => {
     google.drivesPages = [[{ id: OTHER_DRIVE_ID, name: 'Other' }], [{ id: '0AX', name: `${DRIVE_NAME} ` }]];
     const r = await read(link('Plan.gdoc', linkJson(DOC_ID)));
     expect(r).toEqual({ ok: false, reason: 'the team drive is not visible to the connected Google account' });
+  });
+});
+
+describe('readGoogleFile in a picked folder (PICKERS-SPEC §6.2, ACC-014)', () => {
+  const FOLDER = 'application/vnd.google-apps.folder';
+  const DOCUMENT = 'application/vnd.google-apps.document';
+  // The picked folder "Clients" (top level of the team drive), a subfolder of it, and a sibling.
+  const CLIENTS_ID = '1ClientsFolderAbCdEfGhIjKlMnOpQrSt';
+  const DEEP_ID = '1DeepFolderAbCdEfGhIjKlMnOpQrStUvW';
+  const SIBLING_ID = '1SiblingFolderAbCdEfGhIjKlMnOpQrSt';
+  const PLANTED_ID = '1PlantedDocAbCdEfGhIjKlMnOpQrStUvW';
+  beforeEach(() => {
+    google.files[CLIENTS_ID] = { mimeType: FOLDER, driveId: TEAM_DRIVE_ID, parents: [TEAM_DRIVE_ID] };
+    google.files[DEEP_ID] = { mimeType: FOLDER, driveId: TEAM_DRIVE_ID, parents: [CLIENTS_ID] };
+    google.files[SIBLING_ID] = { mimeType: FOLDER, driveId: TEAM_DRIVE_ID, parents: [TEAM_DRIVE_ID] };
+    google.files[DOC_ID] = { mimeType: DOCUMENT, driveId: TEAM_DRIVE_ID, parents: [DEEP_ID] };
+    // A Doc of the same shared drive outside the folder, reached through a link file planted inside it.
+    google.files[PLANTED_ID] = { mimeType: DOCUMENT, driveId: TEAM_DRIVE_ID, parents: [SIBLING_ID] };
+    google.exports[`${PLANTED_ID} text/markdown`] = '# Outside\n';
+  });
+  const area = (root = teamDir(), drive_root_id = TEAM_DRIVE_ID, folder_id = CLIENTS_ID) => ({ domain: DOMAIN, root, drive_root_id, folder_id });
+  const readIn = (path: string, a: ReturnType<typeof area>) => readGoogleFile(path, a, { fetch: google.fetch as typeof fetch, relay, now: () => now, keychain, cloudStorageRoot: root });
+  const listedDrives = () => google.calls.some((c) => c.url.pathname === '/drive/v3/drives');
+  const exported = () => google.calls.some((c) => c.url.pathname.endsWith('/export'));
+  /** The files.get calls, in order, as `id fields`. */
+  const gets = () => google.calls.filter((c) => /^\/drive\/v3\/files\/[^/]+$/.test(c.url.pathname)).map((c) => `${decodeURIComponent(c.url.pathname.split('/').at(-1)!)} ${c.url.searchParams.get('fields')}`);
+
+  it("a Doc in a subfolder of the picked folder is read: its ancestry reaches the folder, and drives are never listed by name", async () => {
+    const p = link('Plan.gdoc', linkJson(DOC_ID), join(teamDir(), 'Deep'));
+    const r = await readIn(p, area());
+    expect(r).toEqual({ ok: true, text: '# Plan\n\nSynthetic document body.\n', mime: 'text/markdown', truncated: false });
+    // The file, then its parent; the walk stops at the picked folder (never read itself).
+    expect(gets()).toEqual([`${DOC_ID} id,name,mimeType,driveId,parents`, `${DEEP_ID} id,parents,driveId`]);
+    expect(google.calls.filter((c) => /^\/drive\/v3\/files\//.test(c.url.pathname)).every((c) => c.url.searchParams.get('supportsAllDrives') === 'true')).toBe(true);
+    expect(listedDrives()).toBe(false);
+    assertClean(r);
+    // A Doc directly in the folder needs no parent read at all.
+    google.calls.length = 0;
+    google.files[DOC_ID]!.parents = [CLIENTS_ID];
+    expect((await readIn(p, area())).ok).toBe(true);
+    expect(gets()).toEqual([`${DOC_ID} id,name,mimeType,driveId,parents`]);
+  });
+
+  it('a link file planted in the folder that points at a Doc elsewhere in the same drive is denied, before any export', async () => {
+    const r = await readIn(link('Planted.gdoc', linkJson(PLANTED_ID)), area());
+    expect(r).toEqual({ ok: false, reason: 'not in the picked Drive folder' });
+    expect(exported()).toBe(false);
+    // The walk went up to the drive root, which it does not read.
+    expect(gets()).toEqual([`${PLANTED_ID} id,name,mimeType,driveId,parents`, `${SIBLING_ID} id,parents,driveId`]);
+  });
+
+  it('the walk is capped at 20 levels: a folder deeper than that is denied', async () => {
+    // DOC_ID sits 25 folders below the picked folder.
+    const chain = Array.from({ length: 25 }, (_, i) => `1ChainFolder${String(i).padStart(2, '0')}AbCdEfGhIjKlMnOp`);
+    chain.forEach((id, i) => (google.files[id] = { mimeType: FOLDER, driveId: TEAM_DRIVE_ID, parents: [i === 0 ? CLIENTS_ID : chain[i - 1]!] }));
+    google.files[DOC_ID]!.parents = [chain.at(-1)!];
+    const r = await readIn(link('Plan.gdoc', linkJson(DOC_ID)), area());
+    expect(r).toEqual({ ok: false, reason: 'not in the picked Drive folder' });
+    expect(exported()).toBe(false);
+    expect(gets().length).toBe(20);
+    // At 19 folders below it (20 levels up to it), it is read.
+    google.calls.length = 0;
+    google.files[DOC_ID]!.parents = [chain[18]!];
+    expect((await readIn(link('Plan.gdoc', linkJson(DOC_ID)), area())).ok).toBe(true);
+  });
+
+  it('a parent that cannot be read, or that is in another drive, or a file with no or several parents, is denied', async () => {
+    const p = link('Plan.gdoc', linkJson(DOC_ID), join(teamDir(), 'Deep'));
+    google.status[`meta ${DEEP_ID}`] = 404;
+    expect(await readIn(p, area())).toEqual({ ok: false, reason: 'not in the picked Drive folder' });
+    google.status[`meta ${DEEP_ID}`] = 403;
+    expect(await readIn(p, area())).toEqual({ ok: false, reason: 'not in the picked Drive folder' });
+    delete google.status[`meta ${DEEP_ID}`];
+    google.files[DEEP_ID]!.driveId = OTHER_DRIVE_ID;
+    expect(await readIn(p, area())).toEqual({ ok: false, reason: 'not in the picked Drive folder' });
+    google.files[DEEP_ID]!.driveId = TEAM_DRIVE_ID;
+    google.files[DEEP_ID]!.parents = [];
+    expect(await readIn(p, area())).toEqual({ ok: false, reason: 'not in the picked Drive folder' });
+    google.files[DEEP_ID]!.parents = [CLIENTS_ID];
+    google.files[DOC_ID]!.parents = [DEEP_ID, SIBLING_ID];
+    expect(await readIn(p, area())).toEqual({ ok: false, reason: 'not in the picked Drive folder' });
+    google.files[DOC_ID]!.parents = ['../bad'];
+    expect(await readIn(p, area())).toEqual({ ok: false, reason: 'not in the picked Drive folder' });
+    delete google.files[DOC_ID]!.parents;
+    expect(await readIn(p, area())).toEqual({ ok: false, reason: 'not in the picked Drive folder' });
+    expect(exported()).toBe(false);
+    // A network failure on a parent read is Google not answering (and nothing is exported either).
+    google.files[DOC_ID]!.parents = [DEEP_ID];
+    const failing = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes(`/files/${DEEP_ID}`)) throw new TypeError('fetch failed');
+      return google.fetch(input, init);
+    }) as typeof fetch;
+    expect(await readGoogleFile(p, area(), { fetch: failing, relay, now: () => now, keychain, cloudStorageRoot: root })).toEqual({ ok: false, reason: 'Google did not answer' });
+    expect(exported()).toBe(false);
+  });
+
+  it("a whole-drive area keeps the driveId check only: one files.get, no parents asked for", async () => {
+    const driveRoot = join(root, `GoogleDrive-alice@${DOMAIN}`, 'Shared drives', DRIVE_NAME);
+    const whole = area(driveRoot, TEAM_DRIVE_ID, TEAM_DRIVE_ID);
+    // Even the Doc outside "Clients" is in the drive, so it is read.
+    const r = await readIn(link('Planted.gdoc', linkJson(PLANTED_ID), join(driveRoot, 'Other')), whole);
+    expect(r).toEqual({ ok: true, text: '# Outside\n', mime: 'text/markdown', truncated: false });
+    expect(gets()).toEqual([`${PLANTED_ID} id,name,mimeType,driveId`]);
+    expect(listedDrives()).toBe(false);
+    google.calls.length = 0;
+    expect(await readIn(link('Elsewhere.gdoc', linkJson(ELSEWHERE_ID), driveRoot), whole)).toEqual({ ok: false, reason: 'not in the team drive' });
+    expect(exported()).toBe(false);
+  });
+
+  it("the file's driveId must equal the drive root's local id: another drive is denied before the walk", async () => {
+    const p = link('Plan.gdoc', linkJson(DOC_ID), join(teamDir(), 'Deep'));
+    expect(await readIn(p, area(teamDir(), OTHER_DRIVE_ID))).toEqual({ ok: false, reason: 'not in the team drive' });
+    expect(gets()).toEqual([`${DOC_ID} id,name,mimeType,driveId,parents`]);
+    google.calls.length = 0;
+    expect(await readIn(link('Elsewhere.gdoc', linkJson(ELSEWHERE_ID)), area())).toEqual({ ok: false, reason: 'not in the team drive' });
+    expect(exported()).toBe(false);
+    expect(listedDrives()).toBe(false);
+  });
+
+  it('a link file outside the picked folder is denied without asking Google, even in the same shared drive', async () => {
+    const driveRoot = join(root, `GoogleDrive-alice@${DOMAIN}`, 'Shared drives', DRIVE_NAME);
+    const sibling = link('Plan.gdoc', linkJson(DOC_ID), join(driveRoot, 'Other'));
+    const atRoot = link('Top.gdoc', linkJson(DOC_ID), driveRoot);
+    mkdirSync(teamDir(), { recursive: true });
+    // A symlink inside the folder that leads out of it.
+    const hop = join(teamDir(), 'Hop.gdoc');
+    symlinkSync(sibling, hop);
+    // A prefix of the folder's name is not the folder.
+    const prefix = link('Plan.gdoc', linkJson(DOC_ID), `${teamDir()}2`);
+    for (const p of [sibling, atRoot, hop, prefix]) expect(await readIn(p, area()), p).toEqual({ ok: false, reason: 'not in the team drive' });
+    expect(google.calls).toEqual([]);
+  });
+
+  it("an area that is not inside a shared drive of an account in the domain is refused, and so is a malformed one", async () => {
+    const other = join(root, 'GoogleDrive-alice@other.example', 'Shared drives', DRIVE_NAME, 'Clients');
+    const p = link('Plan.gdoc', { ...linkJson(DOC_ID), email: 'alice@other.example' }, other);
+    expect(await readIn(p, area(other))).toEqual({ ok: false, reason: 'not in the team drive' });
+    const mine = join(root, `GoogleDrive-alice@${DOMAIN}`, 'My Drive', 'Clients');
+    expect(await readIn(link('Plan.gdoc', linkJson(DOC_ID), mine), area(mine))).toEqual({ ok: false, reason: 'not in the team drive' });
+    const inFolder = link('Plan.gdoc', linkJson(DOC_ID));
+    expect(await readIn(inFolder, area('relative/Clients'))).toEqual({ ok: false, reason: 'not in the team drive' });
+    expect(await readIn(inFolder, area(teamDir(), 'no/id'))).toEqual({ ok: false, reason: 'not in the team drive' });
+    expect(await readIn(inFolder, area(teamDir(), TEAM_DRIVE_ID, 'no/id'))).toEqual({ ok: false, reason: 'not in the team drive' });
+    const { folder_id: _f, ...noFolder } = area();
+    expect(await readGoogleFile(inFolder, noFolder as ReturnType<typeof area>, { fetch: google.fetch as typeof fetch, relay, now: () => now, keychain, cloudStorageRoot: root })).toEqual({ ok: false, reason: 'not in the team drive' });
+    expect(google.calls).toEqual([]);
   });
 });
 

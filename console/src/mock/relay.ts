@@ -20,8 +20,11 @@ import type {
   ActivityRequest,
   Directory,
   DirectoryMember,
+  GithubListing,
   InboxSummary,
+  ItemKey,
   MemberSetupStatus,
+  MemberSources,
   MemberStatusEntry,
   MembersStatus,
   MyRequest,
@@ -32,6 +35,7 @@ import type {
   BoundariesSince,
   Roster,
   RosterMember,
+  SourcesConfig,
   TeamBoundaries,
   Teams,
 } from '@/api/types'
@@ -44,12 +48,15 @@ import {
   fixtureMe,
   fixtureAdminTeams,
   fixtureBoundaries,
+  fixtureGithubListing,
   fixtureOpsBoundaries,
+  fixtureSourcesConfig,
   fixtureRequests,
   fixtureRoster,
   fixtureTeams,
 } from './fixtures'
-import { boundariesValid, versionOk } from '@/lib/boundaries'
+import { boundariesValid, toBoundaries, versionOk } from '@/lib/boundaries'
+import { folderKey, itemKey, itemKeys, orgKey, repoKey, sourceItems } from '@/lib/sources'
 
 export const CYCLE_MS = 100_000
 /** The relay keeps an equal-updated_at group whole on a page, up to this many (M2 §7.10). */
@@ -579,7 +586,13 @@ export class MockRelay {
   /** M11 §2: the viewer's acceptance per team; a team not here was never accepted. */
   private accepted = new Map<string, Acceptance>([['demo', { version: 1, accepted_at: '2026-09-20T12:00:00Z' }]])
   /** M11 §3: each member's status on `demo` (tests change them with setMemberStatus). */
-  private statuses = new Map<string, { status: MemberSetupStatus | null; answering: boolean; accepted?: number }>()
+  private statuses = new Map<string, { status: MemberSetupStatus | null; answering: boolean; accepted?: number; sources?: MemberSources | null }>()
+  /**
+   * PICKERS-SPEC §3.5-§3.6: what GET /api/sources/config and /api/sources/github answer (owners
+   * only); null is a relay without the route (404). Tests change them.
+   */
+  sourcesConfig: SourcesConfig | null = structuredClone(fixtureSourcesConfig)
+  githubListing: GithubListing | { status: number; body: unknown; retryAfter?: number } | null = structuredClone(fixtureGithubListing)
   /** M11 §4: questions asked from the console, per team, with each recipient's full answer. */
   private asked: Array<{ team: string; script: Script; answers: Record<string, string> }> = []
   private readonly shift: number
@@ -808,11 +821,17 @@ export class MockRelay {
       return json({ error: 'invalid_body', detail: 'These boundaries break the rule the relay checks (M10 §7.5).' }, 400)
     }
     if (b.version !== current.version) return this.refuse(409, 'version_conflict', 'The boundaries changed since you read them.')
+    // PICKERS-SPEC §2.1: a legacy name-matched drive can be kept, never added.
+    const stored = current.boundaries?.drives ?? []
+    if (!b.boundaries.drives.every((d) => stored.some((x) => x.domain === d.domain && x.shared_drive === d.shared_drive))) {
+      return this.refuse(400, 'legacy_drive', 'Pick shared-drive folders instead of typing drive names.')
+    }
+    const stores = toBoundaries(b.boundaries)
     const next: TeamBoundaries = {
       team,
       version: current.version + 1,
-      boundaries: structuredClone(b.boundaries),
-      since: nextSince(current, current.version + 1, b.boundaries),
+      boundaries: stores,
+      since: nextSince(current, current.version + 1, stores),
       updated_at: new Date(this.now()).toISOString(),
       updated_by: team === 'demo' ? this.viewer : mine.member,
     }
@@ -827,11 +846,30 @@ export class MockRelay {
     this.bounds.set(team, { team, version, boundaries, since: nextSince(current ?? null, version, boundaries), updated_at: new Date(this.now()).toISOString(), updated_by: member })
   }
 
+  // --- PICKERS-SPEC §3.5-§3.6: what an owner picks sources from ---------------------------
+
+  private sourcesCall(team: string, p: string): Response {
+    const mine = this.account.teams.find((t) => t.team === team)!
+    const owner = team === 'demo' ? this.viewerRole() === 'owner' : mine.role === 'owner'
+    if (this.sourcesConfig === null) return json({ error: 'not_found' }, 404)
+    if (!owner) return this.refuse(403, 'forbidden', 'Only team owners can do this.')
+    if (p === '/api/sources/config') return json(this.sourcesConfig)
+    if (!this.sourcesConfig.github.configured) return json({ error: 'not_found' }, 404)
+    const l = this.githubListing
+    if (l === null) return json({ error: 'not_found' }, 404)
+    if ('status' in l) {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (l.retryAfter !== undefined) headers['Retry-After'] = String(l.retryAfter)
+      return new Response(JSON.stringify(l.body), { status: l.status, headers })
+    }
+    return json(l)
+  }
+
   // --- M11: acceptance, members' status, asking ------------------------------------------
 
   /** Sets what a member's Mac last reported on `demo` (tests and the dev view). */
-  setMemberStatus(member: string, status: MemberSetupStatus | null, answering: boolean, accepted?: number): void {
-    this.statuses.set(member, { status, answering, ...(accepted !== undefined ? { accepted } : {}) })
+  setMemberStatus(member: string, status: MemberSetupStatus | null, answering: boolean, accepted?: number, sources?: MemberSources | null): void {
+    this.statuses.set(member, { status, answering, ...(accepted !== undefined ? { accepted } : {}), ...(sources !== undefined ? { sources } : {}) })
   }
 
   private memberStatus(team: string): MembersStatus {
@@ -843,21 +881,28 @@ export class MockRelay {
     if (team !== 'demo') {
       const roster = (this.quiet.get(team) ?? []).filter((m) => m.status !== 'invited')
       return {
-        members: roster.map((m) => ({ member: m.member, status: null, answering: false, accepted_version: m.member === mine.member ? viewerAccepted : 0 })),
+        members: roster.map((m) => ({ member: m.member, status: null, answering: false, accepted_version: m.member === mine.member ? viewerAccepted : 0, sources: null })),
         boundaries_version: version,
       }
     }
-    const defaults: Record<string, { status: MemberSetupStatus | null; answering: boolean; accepted?: number }> = {
-      alice: { status: mockStatus(now, { drive: false }), answering: true },
-      bob: { status: mockStatus(now, {}), answering: true, accepted: version },
+    // PICKERS-SPEC §3.3: alice's Mac has not found the handbook repository; bob's finds everything.
+    const defaults: Record<string, { status: MemberSetupStatus | null; answering: boolean; accepted?: number; sources?: MemberSources | null }> = {
+      alice: { status: mockStatus(now, { drive: false }), answering: true, sources: { boundaries_version: version, missing: ['repo:example-labs/handbook'] } },
+      bob: { status: mockStatus(now, {}), answering: true, accepted: version, sources: { boundaries_version: version, missing: [] } },
       carol: { status: null, answering: false, accepted: 0 },
     }
+    // PICKERS-SPEC §3.4: kept only when they are items of the current boundaries; owners get
+    // everyone's, anyone else only their own.
+    const owner = this.viewerRole() === 'owner'
+    const items = new Set<string>(bounds?.boundaries ? itemKeys(bounds.boundaries) : [])
     const members: MemberStatusEntry[] = this.rosterEntries
       .filter((m) => m.status !== 'invited')
       .map((m) => {
         const s = this.statuses.get(m.member) ?? defaults[m.member] ?? { status: null, answering: false }
         const accepted = m.member === this.viewer ? viewerAccepted : (s.accepted ?? 0)
-        return { member: m.member, status: s.status, answering: s.answering, accepted_version: accepted }
+        const src = s.sources ?? null
+        const sources = src && (owner || m.member === this.viewer) ? { boundaries_version: src.boundaries_version, missing: src.missing.filter((k): k is ItemKey => items.has(k)) } : null
+        return { member: m.member, status: s.status, answering: s.answering, accepted_version: accepted, sources }
       })
     return { members, boundaries_version: version }
   }
@@ -1118,6 +1163,11 @@ export class MockRelay {
       if (typeof init?.body === 'string' && init.body !== '') body = JSON.parse(init.body)
       return this.boundariesCall(team, method, body)
     }
+    if (p === '/api/sources/config' || p === '/api/sources/github') {
+      if (!this.reachable) return json({ error: 'relay_unreachable' }, 502)
+      if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405)
+      return this.sourcesCall(team, p)
+    }
     if (p === '/api/acceptance' || p === '/api/members-status' || p === '/api/my-requests' || p === '/api/ask') {
       if (!this.reachable) return json({ error: 'relay_unreachable' }, 502)
       let body: unknown = undefined
@@ -1158,23 +1208,36 @@ export class MockRelay {
 }
 
 /**
- * M10 §7.1, as the relay keeps it: an item the previous version holds keeps its `since`
- * (orgs without case, drives on domain and name); one added, or added back after a removal,
- * gets `version`; member folders likewise while allowed.
+ * M10 §7.1 and PICKERS-SPEC §2.3, as the relay keeps it, on the document as stored: an item the
+ * previous version holds keeps its `since`; a repository of an org that was whole keeps the
+ * org's; a folder of a drive that was whole keeps the drive's; anything else (new, or added
+ * back after a removal) gets `version`; member folders likewise while allowed.
  */
 function nextSince(prev: TeamBoundaries | null, version: number, next: Boundaries): BoundariesSince {
-  const p = prev?.boundaries ? (prev.since ?? null) : null
-  const org = (o: string) => {
-    const key = o.toLowerCase()
-    return p && Object.prototype.hasOwnProperty.call(p.github_orgs, key) ? (p.github_orgs[key] ?? version) : version
+  const pb = prev?.boundaries ?? null
+  const ps = pb ? (prev?.since ?? null) : null
+  const held = new Map<string, number>()
+  if (pb) {
+    for (const it of sourceItems(pb)) {
+      const k = itemKey(it)
+      const own = (o: Record<string, number> | undefined, key: string) => (o && Object.prototype.hasOwnProperty.call(o, key) ? o[key] : undefined)
+      const n =
+        it.kind === 'org'
+          ? own(ps?.github_orgs, it.org.toLowerCase())
+          : it.kind === 'repo'
+            ? own(ps?.github_repos, `${it.org.toLowerCase()}/${it.repo.toLowerCase()}`)
+            : it.kind === 'folder'
+              ? own(ps?.drive_folders, it.folder_id)
+              : ps?.drives.find((x) => x.domain === it.domain && x.shared_drive === it.shared_drive)?.since
+      held.set(k, n ?? prev?.version ?? version)
+    }
   }
+  const wholeDrive = (id: string | null) => (id !== null && pb?.drive_folders.some((x) => x.folder_id === id && x.drive_id === id) ? held.get(folderKey({ folder_id: id })) : undefined)
   return {
-    github_orgs: Object.fromEntries(next.github_orgs.map((o) => [o.toLowerCase(), org(o)])),
-    drives: next.drives.map((d) => ({
-      domain: d.domain,
-      shared_drive: d.shared_drive,
-      since: p?.drives.find((x) => x.domain === d.domain && x.shared_drive === d.shared_drive)?.since ?? version,
-    })),
-    member_folders: next.member_folders ? (p?.member_folders ?? version) : null,
+    github_orgs: Object.fromEntries(next.github_orgs.map((o) => [o.toLowerCase(), held.get(orgKey(o)) ?? version])),
+    github_repos: Object.fromEntries(next.github_repos.map((r) => [`${r.org.toLowerCase()}/${r.repo.toLowerCase()}`, held.get(repoKey(r)) ?? held.get(orgKey(r.org)) ?? version])),
+    drive_folders: Object.fromEntries(next.drive_folders.map((f) => [f.folder_id, held.get(folderKey(f)) ?? wholeDrive(f.drive_id) ?? version])),
+    drives: next.drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive, since: held.get(`drive:${d.domain}/${d.shared_drive}`) ?? version })),
+    member_folders: next.member_folders ? (pb?.member_folders ? (ps?.member_folders ?? prev?.version ?? version) : version) : null,
   }
 }

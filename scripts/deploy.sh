@@ -32,6 +32,20 @@
 # The Drive OAuth client (M10-SPEC §2a), when the secret team-relay-drive-client exists
 # (gcp-bootstrap.sh with DRIVE_CLIENT_FILE), is mounted at /secrets/drive-oauth/client.json.
 #
+# Owner-picked sources (docs/PICKERS-SPEC.md §4.2): the read-only GitHub App, when the secret
+# team-relay-github-app exists (gcp-bootstrap.sh with GITHUB_APP_ID, GITHUB_APP_SLUG and
+# GITHUB_APP_KEY_FILE), is mounted at /secrets/github-app/app.json, and the Google Picker's
+# settings, when team-relay-picker exists (gcp-bootstrap.sh with PICKER_CLIENT_ID and
+# PICKER_API_KEY), at /secrets/picker/picker.json. GITHUB_ORGS (comma-separated GitHub org logins,
+# e.g. example-org) becomes RELAY_GITHUB_ORGS, the only orgs owners may pick from and the only
+# installations the relay lists; it is required while the app's secret exists. ALLOWED_SHARED_DRIVES
+# (comma-separated shared drive ids) becomes RELAY_ALLOWED_SHARED_DRIVES; unset, any shared drive
+# of ALLOWED_DOMAINS.
+#
+# A setting the live service has and this deploy would remove (a variable unset here, or a secret
+# no longer found) stops the deploy, naming it, unless CONFIRM_REMOVE=<NAME>[,<NAME>] names it:
+# a missing line in config/deploy.local.env never silently changes what the relay allows.
+#
 # Membership lives in the relay's roster and owners change it in the console (M6-SPEC).
 # config/team.local.yaml holds the teams, their seed members (at least one owner each),
 # limits and delegates; after changing it, run scripts/gcp-bootstrap.sh (a new secret
@@ -124,6 +138,39 @@ if [[ -n "$BRAND" ]] && ! (LC_ALL=C; [[ "$BRAND" =~ $BRAND_RE ]]); then
   exit 1
 fi
 
+# PICKERS-SPEC §2.1: the relay-wide allowlists of owner-picked sources, checked as the relay
+# checks them (a value it refuses would stop the new revision from starting).
+comma_list() {  # $1 setting name, $2 raw value, $3 entry regex, $4 example; prints the clean list
+  local raw="$2" entry out="" entries
+  if [[ -z "${raw//[[:space:],]/}" ]]; then
+    if [[ -n "$raw" ]]; then
+      echo "error: $1 must be comma-separated, such as $4" >&2
+      return 1
+    fi
+    return 0
+  fi
+  IFS=',' read -r -a entries <<<"$raw"
+  for entry in "${entries[@]}"; do
+    entry="${entry#"${entry%%[![:space:]]*}"}"
+    entry="${entry%"${entry##*[![:space:]]}"}"
+    if [[ -z "$entry" || ! "$entry" =~ $3 ]]; then
+      echo "error: $1 must be comma-separated, such as $4" >&2
+      return 1
+    fi
+    out="${out:+${out},}${entry}"
+  done
+  printf '%s' "$out"
+}
+GITHUB_ORG_RE='^[A-Za-z0-9][A-Za-z0-9-]{0,38}$'
+SHARED_DRIVE_RE='^[A-Za-z0-9_-]{10,200}$'
+ORGS="$(comma_list GITHUB_ORGS "${GITHUB_ORGS:-}" "$GITHUB_ORG_RE" example-org,example-labs)"
+SHARED_DRIVES="$(comma_list ALLOWED_SHARED_DRIVES "${ALLOWED_SHARED_DRIVES:-}" "$SHARED_DRIVE_RE" \
+  0AExampleDriveId0PVA)"
+
+# CONFIRM_REMOVE: the settings this deploy may remove from the live service.
+CONFIRM_RE='^[A-Z][A-Z0-9_]{0,99}$'
+CONFIRMED="$(comma_list CONFIRM_REMOVE "${CONFIRM_REMOVE:-}" "$CONFIRM_RE" RELAY_BRAND_NAME)"
+
 if [[ -n "$(git status --porcelain -- relay schema)" ]]; then
   echo "error: relay/ or schema/ has uncommitted changes; the image is tagged by commit" >&2
   exit 1
@@ -151,15 +198,40 @@ else
   PROXY_HOPS=1
 fi
 
-echo "Building ${IMAGE}"
-gcloud builds submit \
-  --project="$PROJECT" \
-  --region="$REGION" \
-  --service-account="projects/${PROJECT}/serviceAccounts/${BUILDER_EMAIL}" \
-  --gcs-source-staging-dir="gs://${BUILD_BUCKET}/source" \
-  --gcs-log-dir="gs://${BUILD_BUCKET}/logs" \
-  --config=relay/cloudbuild.yaml \
-  --substitutions="_IMAGE=${IMAGE}" .
+# What the service runs with now: the names of its settings, never their values. A service not
+# deployed yet has none; any other failure to read it stops here, before anything is built.
+# A failed listing is a failure too, never "not deployed yet".
+if LIVE_ENV="$(gcloud run services describe "$SERVICE" --project="$PROJECT" --region="$REGION" \
+    --format='value(spec.template.spec.containers[0].env[].name)' 2>/dev/null)"; then
+  LIVE_ENV="$(tr -s ';,' '\n' <<<"$LIVE_ENV")"
+elif LISTED="$(gcloud run services list --project="$PROJECT" --region="$REGION" \
+    --filter="metadata.name=${SERVICE}" --format='value(metadata.name)')" \
+    && [[ -z "$LISTED" ]]; then
+  LIVE_ENV=""
+else
+  echo "error: cannot read the settings of the live ${SERVICE}; run the gcloud-auth-refresh skill" >&2
+  exit 1
+fi
+
+latest_version() {  # $1 secret; prints its newest enabled version, or nothing when it has none
+  gcloud secrets versions list "$1" --project="$PROJECT" --filter='state:ENABLED' \
+    --sort-by='~createTime' --limit=1 --format='value(name.basename())' 2>/dev/null || true
+}
+
+# The Drive OAuth client (M10-SPEC §2a), the GitHub App and the Picker's settings (PICKERS-SPEC
+# §4.2) are optional: each is mounted when its secret exists.
+DRIVE_SECRET="team-relay-drive-client"
+DRIVE_VERSION="$(latest_version "$DRIVE_SECRET")"
+GITHUB_SECRET="team-relay-github-app"
+GITHUB_VERSION="$(latest_version "$GITHUB_SECRET")"
+PICKER_SECRET="team-relay-picker"
+PICKER_VERSION="$(latest_version "$PICKER_SECRET")"
+if [[ -n "$GITHUB_VERSION" && -z "$ORGS" ]]; then
+  echo "error: the GitHub App's secret ${GITHUB_SECRET} exists, so GITHUB_ORGS must name the orgs" >&2
+  echo "       owners may pick repositories from (e.g. GITHUB_ORGS=example-org); the relay lists" >&2
+  echo "       only those orgs' installations and refuses to start without it" >&2
+  exit 1
+fi
 
 # The team config's current numeric version, pinned on the revision: every instance of one
 # revision runs the same allowlist, and a membership change is a new secret version plus a
@@ -171,15 +243,7 @@ if [[ -z "$SECRET_VERSION" ]]; then
   exit 1
 fi
 
-# The Drive OAuth client (M10-SPEC §2a) is optional: mounted when the secret exists.
-DRIVE_SECRET="team-relay-drive-client"
-DRIVE_VERSION="$(gcloud secrets versions list "$DRIVE_SECRET" --project="$PROJECT" \
-  --filter='state:ENABLED' --sort-by='~createTime' --limit=1 --format='value(name.basename())' 2>/dev/null || true)"
 
-# The digest, so the revision runs exactly what was built.
-DIGEST="$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT" \
-  --format='value(image_summary.digest)')"
-IMAGE_BY_DIGEST="${IMAGE%:*}@${DIGEST}"
 
 OAUTH_SECRET="team-relay-oauth-client"
 OAUTH_VERSION="$(gcloud secrets versions list "$OAUTH_SECRET" --project="$PROJECT" \
@@ -237,12 +301,75 @@ else
   REMOVE_VARS+=(RELAY_DRIVE_CLIENT_FILE)
   DRIVE_NOTE="no drive client"
 fi
+if [[ -n "$GITHUB_VERSION" ]]; then
+  SECRETS="${SECRETS},/secrets/github-app/app.json=${GITHUB_SECRET}:${GITHUB_VERSION}"
+  ENV_VARS="${ENV_VARS};RELAY_GITHUB_APP_FILE=/secrets/github-app/app.json"
+  GITHUB_NOTE="github app v${GITHUB_VERSION}"
+else
+  # Not configured: sources/github answers 404 github_not_configured; owners paste links.
+  REMOVE_VARS+=(RELAY_GITHUB_APP_FILE)
+  GITHUB_NOTE="no github app"
+fi
+if [[ -n "$PICKER_VERSION" ]]; then
+  SECRETS="${SECRETS},/secrets/picker/picker.json=${PICKER_SECRET}:${PICKER_VERSION}"
+  ENV_VARS="${ENV_VARS};RELAY_PICKER_FILE=/secrets/picker/picker.json"
+  PICKER_NOTE="drive picker v${PICKER_VERSION}"
+else
+  # Not configured: the console offers pasting Drive folder links only.
+  REMOVE_VARS+=(RELAY_PICKER_FILE)
+  PICKER_NOTE="no drive picker"
+fi
+if [[ -n "$ORGS" ]]; then
+  ENV_VARS="${ENV_VARS};RELAY_GITHUB_ORGS=${ORGS}"
+  ORGS_NOTE="github orgs ${ORGS}"
+else
+  REMOVE_VARS+=(RELAY_GITHUB_ORGS)
+  ORGS_NOTE="any github org"
+fi
+if [[ -n "$SHARED_DRIVES" ]]; then
+  ENV_VARS="${ENV_VARS};RELAY_ALLOWED_SHARED_DRIVES=${SHARED_DRIVES}"
+  SHARED_NOTE="listed shared drives only"
+else
+  REMOVE_VARS+=(RELAY_ALLOWED_SHARED_DRIVES)
+  SHARED_NOTE="any shared drive"
+fi
+
+# A setting the live service has is removed only when CONFIRM_REMOVE names it.
+REFUSED=()
+for name in ${REMOVE_VARS[@]+"${REMOVE_VARS[@]}"}; do
+  if grep -qx "$name" <<<"$LIVE_ENV" && ! tr ',' '\n' <<<"$CONFIRMED" | grep -qx "$name"; then
+    REFUSED+=("$name")
+  fi
+done
+if [[ ${#REFUSED[@]} -gt 0 ]]; then
+  for name in "${REFUSED[@]}"; do
+    echo "error: the live ${SERVICE} has ${name} and this deploy would remove it (unset here, or" >&2
+    echo "       its secret not found). Set it again, or run with CONFIRM_REMOVE=${name} to remove it." >&2
+  done
+  exit 1
+fi
+
 REMOVE_FLAG=()
 if [[ ${#REMOVE_VARS[@]} -gt 0 ]]; then
   REMOVE_FLAG=("--remove-env-vars=$(IFS=','; echo "${REMOVE_VARS[*]}")")
 fi
 
-echo "Deploying ${SERVICE} (${IMAGE_BY_DIGEST}, team config v${SECRET_VERSION}, oauth v${OAUTH_VERSION}, ${DRIVE_NOTE}, ${DOMAINS_NOTE}, ${SETUP_NOTE}, ${BRAND_NOTE}, ingress ${INGRESS})"
+echo "Building ${IMAGE}"
+gcloud builds submit \
+  --project="$PROJECT" \
+  --region="$REGION" \
+  --service-account="projects/${PROJECT}/serviceAccounts/${BUILDER_EMAIL}" \
+  --gcs-source-staging-dir="gs://${BUILD_BUCKET}/source" \
+  --gcs-log-dir="gs://${BUILD_BUCKET}/logs" \
+  --config=relay/cloudbuild.yaml \
+  --substitutions="_IMAGE=${IMAGE}" .
+
+# The digest, so the revision runs exactly what was built.
+DIGEST="$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT" \
+  --format='value(image_summary.digest)')"
+IMAGE_BY_DIGEST="${IMAGE%:*}@${DIGEST}"
+
+echo "Deploying ${SERVICE} (${IMAGE_BY_DIGEST}, team config v${SECRET_VERSION}, oauth v${OAUTH_VERSION}, ${DRIVE_NOTE}, ${GITHUB_NOTE}, ${PICKER_NOTE}, ${ORGS_NOTE}, ${SHARED_NOTE}, ${DOMAINS_NOTE}, ${SETUP_NOTE}, ${BRAND_NOTE}, ingress ${INGRESS})"
 gcloud run deploy "$SERVICE" \
   --project="$PROJECT" \
   --region="$REGION" \

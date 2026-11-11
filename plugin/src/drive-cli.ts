@@ -8,13 +8,14 @@
 import { EMAIL_RE } from './credentials.js';
 import { DriveConnectError, MAC_ONLY, driveDisconnect, driveStatus, startDriveConnect, teamDriveDomain } from './drive-login.js';
 import { DriveReadError, KeychainError, defaultKeychain, fetchDriveClient, type FetchLike, type Keychain } from './google-drive.js';
-import type { TeamBoundaries } from './boundaries-types.js';
+import { validBoundaries } from './boundary-set.js';
 
 export const USAGE = 'usage: /team-relay:drive [status | connect [your-email] | disconnect]';
 
 export type DriveCliRelay = {
   driveClient(): Promise<{ client_id: string; client_secret: string }>;
-  boundaries(): Promise<TeamBoundaries>;
+  /** The team's boundaries document, checked here (an M10-shaped one is read too). */
+  boundaries(): Promise<unknown>;
 };
 
 export type DriveCliDeps = {
@@ -65,13 +66,15 @@ export async function runDriveCli(argv: string[], deps: DriveCliDeps = {}): Prom
     } catch {
       return { exitCode: 1, line: 'Not signed in to the team relay: run /team-relay:login first.' };
     }
-    let boundaries: TeamBoundaries;
+    let tb: unknown;
     try {
-      boundaries = await relay.boundaries();
+      tb = await relay.boundaries();
     } catch {
-      return { exitCode: 1, line: 'The team relay did not give your team\'s boundaries; try again later.' };
+      tb = null;
     }
-    const domain = teamDriveDomain(boundaries.boundaries?.drives, parsed.email);
+    if (!validBoundaries(tb)) return { exitCode: 1, line: 'The team relay did not give your team\'s boundaries; try again later.' };
+    // PICKERS-SPEC §6.2: the picked Drive folders and the legacy drives name the domains.
+    const domain = teamDriveDomain(tb.boundaries ? [...tb.boundaries.drive_folders, ...tb.boundaries.drives] : [], parsed.email);
     const client = await fetchDriveClient(relay);
     const flow = await startDriveConnect({
       domain,

@@ -10,7 +10,16 @@ import { readFileSync } from 'node:fs';
 import { credentialFileExists, credentialsPath, normaliseRelayUrl, readCredential } from './credentials.js';
 import { MEMBER_RE, TEAM_RE, parseRelayUrl } from './relay-client-core.js';
 import { defaultRelayUrl } from './relay-default.js';
-import type { Acceptance, MemberStatusBody, MembersStatus, MyRequest, SetBoundariesBody, TeamBoundaries } from './boundaries-types.js';
+import type {
+  Acceptance,
+  GithubListing,
+  MemberStatusBody,
+  MembersStatus,
+  MyRequest,
+  SetBoundariesBody,
+  SourcesConfig,
+  TeamBoundaries,
+} from './boundaries-types.js';
 
 export { MEMBER_RE, TEAM_RE, parseRelayUrl };
 export const REQUEST_ID_RE = /^rq_[0-9a-f]{32}$/;
@@ -84,13 +93,26 @@ export class RelayError extends Error {
   readonly status: number;
   readonly code: string;
   readonly detail: string;
-  constructor(status: number, code: string, detail: string) {
+  /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
+  readonly retryAfter: number | undefined;
+  constructor(status: number, code: string, detail: string, retryAfter?: number) {
     super(`relay ${status} ${code}${detail ? `: ${detail}` : ''}`);
     this.name = 'RelayError';
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.retryAfter = retryAfter;
   }
+}
+
+/** PICKERS-SPEC §4.3: the longest Retry-After kept (the relay caps GitHub's at an hour). */
+export const RETRY_AFTER_MAX_S = 3600;
+
+/** A Retry-After header in whole seconds (the only form the relay sends), capped; anything else is none. */
+export function parseRetryAfter(v: string | null): number | undefined {
+  const t = v?.trim();
+  if (!t || !/^[0-9]{1,10}$/.test(t)) return undefined;
+  return Math.min(RETRY_AFTER_MAX_S, Number(t));
 }
 
 /** The relay could not be reached, or answered with something that is not JSON. */
@@ -633,7 +655,7 @@ export class RelayClient {
       const obj = (json && typeof json === 'object' ? json : {}) as { error?: unknown; detail?: unknown };
       const code = typeof obj.error === 'string' ? obj.error : `http_${res.status}`;
       const detail = typeof obj.detail === 'string' ? obj.detail.slice(0, 500) : '';
-      throw new RelayError(res.status, code, detail);
+      throw new RelayError(res.status, code, detail, parseRetryAfter(res.headers.get('retry-after')));
     }
     return json as T;
   }
@@ -765,6 +787,23 @@ export class RelayClient {
   /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
   setBoundaries(body: SetBoundariesBody, opts?: CallOptions) {
     return this.call<TeamBoundaries>('PUT', this.teamPath('boundaries'), body, { attempts: 1, ...opts });
+  }
+
+  /**
+   * PICKERS-SPEC §3.5 (owners): the GitHub App's install link and the Google Picker's public
+   * settings. Never a key or a token.
+   */
+  sourcesConfig(opts?: CallOptions) {
+    return this.call<SourcesConfig>('GET', this.teamPath('sources', 'config'), undefined, opts);
+  }
+
+  /**
+   * PICKERS-SPEC §3.6 (owners): the repositories of the allowed orgs where the relay's GitHub App
+   * is installed. Not configured: 404 github_not_configured; GitHub's rate limit: 503
+   * github_rate_limited with a Retry-After (RelayError.retryAfter).
+   */
+  sourcesGithub(opts?: CallOptions) {
+    return this.call<GithubListing>('GET', this.teamPath('sources', 'github'), undefined, opts);
   }
 
   /** M11-SPEC §2: the boundaries version this member accepted (0: never). */

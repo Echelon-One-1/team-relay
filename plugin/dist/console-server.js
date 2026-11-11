@@ -14809,14 +14809,27 @@ var SHARED_DRIVE_MAX = 100;
 var DOMAIN_MAX = 253;
 var BOUNDARIES_MAX_ORGS = 10;
 var BOUNDARIES_MAX_DRIVES = 10;
+var BOUNDARIES_MAX_REPOS = 100;
+var BOUNDARIES_MAX_FOLDERS = 20;
+var REPO_NAME_MAX = 100;
+var REPO_ID_MAX = Number.MAX_SAFE_INTEGER;
+var FOLDER_NAME_MAX = 255;
+var DRIVE_NAME_MAX = SHARED_DRIVE_MAX;
 var BOUNDARIES_VERSION_MAX = 2 ** 31 - 1;
 var GITHUB_ORG_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+var GITHUB_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+var DRIVE_ITEM_ID_RE = /^[A-Za-z0-9_-]{10,200}$/;
 var DRIVE_DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
-var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
+var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
 var DRIVE_NAME_FORBIDDEN_RE = /[/\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/u;
+var FOLDER_NAME_FORBIDDEN_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/u;
 var EDGE_SPACE_RE = /^[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+var BOUNDARIES_FIELDS = ["topic", "github_orgs", "github_repos", "drive_folders", "drives", "member_folders"];
 var chars = (s) => [...s].length;
 var trimText = (s) => s.replace(EDGE_SPACE_RE, "");
+var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var exactKeys = (o, keys) => Object.keys(o).length === keys.length && keys.every((k) => Object.prototype.hasOwnProperty.call(o, k));
+var own = (o, key) => o && Object.prototype.hasOwnProperty.call(o, key) ? o[key] : void 0;
 function topicOk(topic) {
   if (typeof topic !== "string") return false;
   const t = trimText(topic);
@@ -14831,20 +14844,123 @@ function driveNameOk(name) {
   return typeof name === "string" && chars(name) >= 1 && chars(name) <= SHARED_DRIVE_MAX && !DRIVE_NAME_FORBIDDEN_RE.test(name) && name === trimText(name) && name !== "." && name !== "..";
 }
 var versionOk = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= BOUNDARIES_VERSION_MAX;
-function nextSince(prev, version, next) {
-  const p = prev?.boundaries ? prev.since ?? null : null;
-  const org = (o) => {
-    const key = o.toLowerCase();
-    return p && Object.prototype.hasOwnProperty.call(p.github_orgs, key) ? p.github_orgs[key] ?? version : version;
-  };
+var repoNameOk = (name) => typeof name === "string" && GITHUB_REPO_RE.test(name) && !/^\.+$/.test(name);
+var repoIdOk = (id) => id === null || typeof id === "number" && Number.isSafeInteger(id) && id >= 1;
+var driveItemIdOk = (id) => typeof id === "string" && DRIVE_ITEM_ID_RE.test(id);
+function folderNameOk(name, max = FOLDER_NAME_MAX) {
+  return typeof name === "string" && chars(name) >= 1 && chars(name) <= max && !FOLDER_NAME_FORBIDDEN_RE.test(name) && name === trimText(name);
+}
+var pickedDriveNameOk = (name) => name === null || folderNameOk(name, DRIVE_NAME_MAX);
+function repoOk(r) {
+  return isObj(r) && exactKeys(r, ["org", "repo", "id"]) && orgOk(r.org) && repoNameOk(r.repo) && repoIdOk(r.id);
+}
+function folderOk(f) {
+  return isObj(f) && exactKeys(f, ["domain", "drive_id", "folder_id", "folder_name", "drive_name"]) && domainOk(f.domain) && (f.drive_id === null || driveItemIdOk(f.drive_id)) && driveItemIdOk(f.folder_id) && folderNameOk(f.folder_name) && pickedDriveNameOk(f.drive_name);
+}
+var legacyDriveOk = (d) => isObj(d) && exactKeys(d, ["domain", "shared_drive"]) && domainOk(d.domain) && driveNameOk(d.shared_drive);
+var listOk = (v, max, ok) => Array.isArray(v) && v.length <= max && v.every(ok);
+function commonValid(raw) {
+  return topicOk(raw.topic) && listOk(raw.github_orgs, BOUNDARIES_MAX_ORGS, orgOk) && listOk(raw.drives, BOUNDARIES_MAX_DRIVES, legacyDriveOk) && typeof raw.member_folders === "boolean";
+}
+function boundariesValid(raw) {
+  if (!isObj(raw) || !exactKeys(raw, BOUNDARIES_FIELDS)) return false;
+  return commonValid(raw) && listOk(raw.github_repos, BOUNDARIES_MAX_REPOS, repoOk) && listOk(raw.drive_folders, BOUNDARIES_MAX_FOLDERS, folderOk);
+}
+var lowerRepo = (r) => `${r.org.toLowerCase()}/${r.repo.toLowerCase()}`;
+var sameDrive = (a, b) => a.domain === b.domain && a.shared_drive === b.shared_drive;
+function normaliseBoundaries(b) {
+  const orgSeen = /* @__PURE__ */ new Set();
+  const github_orgs = b.github_orgs.filter((o) => !orgSeen.has(o.toLowerCase()) && orgSeen.add(o.toLowerCase()));
+  const repoSeen = /* @__PURE__ */ new Set();
+  const github_repos = b.github_repos.filter((r) => !orgSeen.has(r.org.toLowerCase()) && !repoSeen.has(lowerRepo(r)) && repoSeen.add(lowerRepo(r)));
+  const folderSeen = /* @__PURE__ */ new Set();
+  const drive_folders = b.drive_folders.filter((f) => !folderSeen.has(f.folder_id) && folderSeen.add(f.folder_id));
+  const drives = b.drives.filter((d, i) => b.drives.findIndex((x) => sameDrive(x, d)) === i);
   return {
-    github_orgs: Object.fromEntries(next.github_orgs.map((o) => [o.toLowerCase(), org(o)])),
-    drives: next.drives.map((d) => ({
-      domain: d.domain,
-      shared_drive: d.shared_drive,
-      since: p?.drives.find((x) => x.domain === d.domain && x.shared_drive === d.shared_drive)?.since ?? version
-    })),
-    member_folders: next.member_folders ? p?.member_folders ?? version : null
+    topic: trimText(b.topic),
+    github_orgs,
+    github_repos: github_repos.map((r) => ({ org: r.org, repo: r.repo, id: r.id })),
+    drive_folders: drive_folders.map((f) => ({ domain: f.domain, drive_id: f.drive_id, folder_id: f.folder_id, folder_name: f.folder_name, drive_name: f.drive_name })),
+    drives: drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive })),
+    member_folders: b.member_folders
+  };
+}
+function legacyDrivesOk(stored, sent) {
+  return sent.every((d) => (stored ?? []).some((s) => sameDrive(s, d)));
+}
+var orgKey = (org) => `org:${org.toLowerCase()}`;
+var repoKey = (r) => `repo:${lowerRepo(r)}`;
+var folderKey = (f) => `folder:${f.folder_id}`;
+var driveKey = (d) => `drive:${d.domain}/${d.shared_drive}`;
+function itemKey(item) {
+  switch (item.kind) {
+    case "org":
+      return orgKey(item.org);
+    case "repo":
+      return repoKey(item);
+    case "folder":
+      return folderKey(item);
+    case "drive":
+      return driveKey(item);
+  }
+}
+function boundaryItems(b) {
+  const n = normaliseBoundaries(b);
+  return [
+    ...n.github_orgs.map((org) => ({ kind: "org", org })),
+    ...n.github_repos.map((r) => ({ kind: "repo", ...r })),
+    ...n.drive_folders.map((f) => ({ kind: "folder", ...f })),
+    ...n.drives.map((d) => ({ kind: "drive", ...d }))
+  ];
+}
+function itemKeys(b) {
+  return boundaryItems(b).map(itemKey);
+}
+function knownItemKeys(b, keys) {
+  const known = new Set(itemKeys(b));
+  const out = [];
+  for (const k of keys) {
+    if (known.has(k)) {
+      known.delete(k);
+      out.push(k);
+    }
+  }
+  return out;
+}
+function sinceByKey(b, since, version) {
+  const out = /* @__PURE__ */ new Map();
+  for (const item of boundaryItems(b)) {
+    let n;
+    if (since) {
+      if (item.kind === "org") n = own(since.github_orgs, item.org.toLowerCase());
+      else if (item.kind === "repo") n = own(since.github_repos, lowerRepo(item));
+      else if (item.kind === "folder") n = own(since.drive_folders, item.folder_id);
+      else n = since.drives.find((x) => sameDrive(x, item))?.since;
+    }
+    out.set(itemKey(item), n ?? version);
+  }
+  return out;
+}
+function nextSince(prev, version, next) {
+  const pb = prev?.boundaries ? { github_repos: [], drive_folders: [], ...prev.boundaries } : null;
+  const ps = pb ? prev?.since ?? null : null;
+  const held = pb ? sinceByKey(pb, ps, prev?.version ?? version) : /* @__PURE__ */ new Map();
+  const n = normaliseBoundaries({ github_repos: [], drive_folders: [], ...next });
+  const github_orgs = {};
+  const github_repos = {};
+  const drive_folders = {};
+  for (const o of n.github_orgs) github_orgs[o.toLowerCase()] = held.get(orgKey(o)) ?? version;
+  for (const r of n.github_repos) github_repos[lowerRepo(r)] = held.get(repoKey(r)) ?? held.get(orgKey(r.org)) ?? version;
+  for (const f of n.drive_folders) {
+    const whole = f.drive_id !== null && pb?.drive_folders.some((x) => x.folder_id === f.drive_id && x.drive_id === f.drive_id) ? held.get(folderKey({ folder_id: f.drive_id })) : void 0;
+    drive_folders[f.folder_id] = held.get(folderKey(f)) ?? whole ?? version;
+  }
+  return {
+    github_orgs,
+    github_repos,
+    drive_folders,
+    drives: n.drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive, since: held.get(driveKey(d)) ?? version })),
+    member_folders: !n.member_folders ? null : pb?.member_folders ? ps?.member_folders ?? prev?.version ?? version : version
   };
 }
 
@@ -21815,11 +21931,55 @@ var RosterRefusal = class extends Error {
   code;
   detail;
 };
+var DEMO_DRIVE_ID = "0AExampleDriveId0PVA";
+var DEMO_DELIVERY_DRIVE_ID = "0AExampleDeliveryPVA";
+var DEMO_FOLDER_ID = "1ExampleFolderIdxxxxxxxxxxxxxxxxx";
 var DEMO_BOUNDARIES = {
   topic: "Example Co: the orders and payments services, their runbooks, deploys and incidents, and how the team works.",
   github_orgs: ["example-org"],
-  drives: [{ domain: "example.com", shared_drive: "Example Team Drive" }],
+  github_repos: [{ org: "example-labs", repo: "api", id: 123456 }],
+  drive_folders: [
+    { domain: "example.com", drive_id: DEMO_DRIVE_ID, folder_id: DEMO_DRIVE_ID, folder_name: "Example Team Drive", drive_name: "Example Team Drive" },
+    { domain: "example.com", drive_id: DEMO_DELIVERY_DRIVE_ID, folder_id: DEMO_FOLDER_ID, folder_name: "Clients", drive_name: "Example Delivery Drive" }
+  ],
+  drives: [{ domain: "example.com", shared_drive: "Example Archive" }],
   member_folders: true
+};
+var DEMO_SOURCES_CONFIG = {
+  github: { configured: true, install_url: "https://github.com/apps/example-relay-sources/installations/new" },
+  google_picker: null
+};
+var DEMO_GITHUB = {
+  installations: [
+    {
+      account: "example-labs",
+      state: "ok",
+      repository_selection: "selected",
+      repos: [
+        { name: "api", id: 123456, private: true, archived: false },
+        { name: "ml-notebooks", id: 123457, private: false, archived: false }
+      ],
+      truncated: false
+    },
+    {
+      account: "example-org",
+      state: "ok",
+      repository_selection: "all",
+      repos: [
+        { name: "old-site", id: 100104, private: false, archived: true },
+        { name: "orders-service", id: 100101, private: true, archived: false },
+        { name: "payments", id: 100102, private: true, archived: false },
+        { name: "runbooks", id: 100103, private: true, archived: false }
+      ],
+      truncated: false
+    },
+    { account: "example-sandbox", state: "suspended", repository_selection: "all", repos: [], truncated: false }
+  ]
+};
+var DEMO_MISSING = {
+  alice: [`folder:${DEMO_FOLDER_ID}`],
+  bob: [],
+  carol: ["org:example-org", "repo:example-labs/api"]
 };
 var ROSTER_MAX = 50;
 var DEMO_REPLIES = {
@@ -21932,12 +22092,19 @@ var DemoTeam = class {
       self_test: { ok: o.selfOk ?? true, at: iso(now - 2 * 36e5), reason: o.reason ?? null },
       seen_at: iso(now - o.seenAgo)
     });
+    const owner = this.viewerRole() === "owner";
+    const sources = (member, version) => {
+      if (!owner && member !== this.viewer) return null;
+      const b = this.bounds.boundaries;
+      return { boundaries_version: version, missing: b ? knownItemKeys(b, DEMO_MISSING[member] ?? []) : [] };
+    };
     const entry = (member) => {
       const accepted = member === this.viewer ? this.accepted.version : 0;
-      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted };
+      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted, sources: null };
       const s = member === "bob" ? status({ seenAgo: 25e3 }) : member === "carol" ? status({ signedIn: false, roots: 0, clones: 0, selfOk: false, reason: "Claude Code is not signed in.", seenAgo: 9 * 6e4 }) : status({ drive: false, seenAgo: 4e4 });
       const version = member === "bob" ? this.bounds.version : accepted;
-      return { member, status: s, answering: now - Date.parse(s.seen_at) < 18e4, accepted_version: version };
+      const looked = member === "carol" ? Math.max(0, this.bounds.version - 1) : this.bounds.version;
+      return { member, status: s, answering: now - Date.parse(s.seen_at) < 18e4, accepted_version: version, sources: sources(member, looked) };
     };
     return { members: active.map(entry), boundaries_version: this.bounds.version };
   }
@@ -21997,22 +22164,41 @@ var DemoTeam = class {
   boundaries() {
     return structuredClone(this.bounds);
   }
-  /** PUT /v1/teams/{team}/boundaries (M10-SPEC §1): owners, at the current version. */
+  /**
+   * PUT /v1/teams/{team}/boundaries (M10-SPEC §1, PICKERS-SPEC §3.2): owners, at the current
+   * version; a legacy drive the stored document does not hold is 400 legacy_drive. Stored as the
+   * relay stores it (normaliseBoundaries), with `since` by PICKERS-SPEC §2.3.
+   */
   setBoundaries(body) {
     if (this.viewerRole() !== "owner") throw new RosterRefusal(403, "forbidden", "Only team owners can set the boundaries.");
+    if (!boundariesValid(body.boundaries)) throw new RosterRefusal(400, "invalid_body", "The boundaries do not pass the rule.");
+    if (!legacyDrivesOk(this.bounds.boundaries?.drives ?? null, body.boundaries.drives)) {
+      throw new RosterRefusal(400, "legacy_drive", "Pick shared-drive folders instead of typing drive names.");
+    }
     if (body.version !== this.bounds.version) {
       throw new RosterRefusal(409, "version_conflict", "The boundaries changed since you read them. Read them again.");
     }
     const version = this.bounds.version + 1;
+    const stored = normaliseBoundaries(body.boundaries);
     this.bounds = {
       team: this.team,
       version,
-      boundaries: structuredClone(body.boundaries),
-      since: nextSince(this.bounds, version, body.boundaries),
+      boundaries: stored,
+      since: nextSince(this.bounds, version, stored),
       updated_at: iso(this.now()),
       updated_by: this.viewer
     };
     return this.boundaries();
+  }
+  /** GET /v1/teams/{team}/sources/config (PICKERS-SPEC §3.5): owners only. */
+  sourcesConfig() {
+    if (this.viewerRole() !== "owner") throw new RosterRefusal(403, "forbidden", "Only team owners can choose the sources.");
+    return structuredClone(DEMO_SOURCES_CONFIG);
+  }
+  /** GET /v1/teams/{team}/sources/github (PICKERS-SPEC §3.6): owners only; a fake listing. */
+  sourcesGithub() {
+    if (this.viewerRole() !== "owner") throw new RosterRefusal(403, "forbidden", "Only team owners can choose the sources.");
+    return { ...structuredClone(DEMO_GITHUB), fetched_at: iso(this.now()) };
   }
   /** The viewer's role here, by the roster's active entries. */
   viewerRole() {
@@ -22297,7 +22483,9 @@ var DemoAccount = class {
           boundaries: {
             topic: "Operations at Example Co: on-call, incidents, infrastructure and the runbooks behind them.",
             github_orgs: ["example-ops"],
-            drives: [{ domain: "example.com", shared_drive: "Operations" }],
+            github_repos: [],
+            drive_folders: [{ domain: "example.com", drive_id: "0AExampleOpsDrive0PVA", folder_id: "0AExampleOpsDrive0PVA", folder_name: "Operations", drive_name: "Operations" }],
+            drives: [],
             member_folders: false
           },
           version: 1,
@@ -23473,14 +23661,23 @@ var RelayError = class extends Error {
   status;
   code;
   detail;
-  constructor(status, code, detail) {
+  /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
+  retryAfter;
+  constructor(status, code, detail, retryAfter) {
     super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
     this.name = "RelayError";
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.retryAfter = retryAfter;
   }
 };
+var RETRY_AFTER_MAX_S = 3600;
+function parseRetryAfter(v) {
+  const t = v?.trim();
+  if (!t || !/^[0-9]{1,10}$/.test(t)) return void 0;
+  return Math.min(RETRY_AFTER_MAX_S, Number(t));
+}
 var RelayNetworkError = class extends Error {
   constructor(message2) {
     super(message2);
@@ -23812,7 +24009,7 @@ var RelayClient = class _RelayClient {
       const obj = json && typeof json === "object" ? json : {};
       const code = typeof obj.error === "string" ? obj.error : `http_${res.status}`;
       const detail = typeof obj.detail === "string" ? obj.detail.slice(0, 500) : "";
-      throw new RelayError(res.status, code, detail);
+      throw new RelayError(res.status, code, detail, parseRetryAfter(res.headers.get("retry-after")));
     }
     return json;
   }
@@ -23927,6 +24124,21 @@ var RelayClient = class _RelayClient {
   /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
   setBoundaries(body, opts) {
     return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
+  }
+  /**
+   * PICKERS-SPEC §3.5 (owners): the GitHub App's install link and the Google Picker's public
+   * settings. Never a key or a token.
+   */
+  sourcesConfig(opts) {
+    return this.call("GET", this.teamPath("sources", "config"), void 0, opts);
+  }
+  /**
+   * PICKERS-SPEC §3.6 (owners): the repositories of the allowed orgs where the relay's GitHub App
+   * is installed. Not configured: 404 github_not_configured; GitHub's rate limit: 503
+   * github_rate_limited with a Retry-After (RelayError.retryAfter).
+   */
+  sourcesGithub(opts) {
+    return this.call("GET", this.teamPath("sources", "github"), void 0, opts);
   }
   /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
   acceptance(opts) {
@@ -24055,6 +24267,30 @@ var SECURITY_HEADERS = {
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Resource-Policy": "same-origin"
 };
+var PICKER_CONTENT_SECURITY_POLICY = [
+  "default-src 'none'",
+  "script-src 'self' https://apis.google.com https://accounts.google.com/gsi/client",
+  "style-src 'self' https://accounts.google.com/gsi/style",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/ https://oauth2.googleapis.com/revoke",
+  "frame-src https://docs.google.com https://accounts.google.com/gsi/",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'"
+].join("; ");
+var PICKER_HEADERS = Object.freeze({
+  "Content-Security-Policy": PICKER_CONTENT_SECURITY_POLICY,
+  "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+  "X-Frame-Options": "DENY",
+  "X-Content-Type-Options": "nosniff",
+  "Cross-Origin-Resource-Policy": "same-origin",
+  "Cache-Control": "no-store"
+});
+var PICKER_PATH = "/pick/drive";
+var PICKER_FILE = "pick-drive.html";
 var MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -24131,7 +24367,9 @@ function relayBackend(client) {
     membersStatus: (ctx) => on(ctx).membersStatus(opts(ctx)),
     myRequests: (limit, ctx) => on(ctx).myRequests(limit, opts(ctx)),
     // One key per question sent from the page: the console never retries it (attempts: 1).
-    ask: (body, ctx) => on(ctx).createRequest({ idempotency_key: randomUUID(), kind: "question", to: body.to, question: body.question }, opts(ctx))
+    ask: (body, ctx) => on(ctx).createRequest({ idempotency_key: randomUUID(), kind: "question", to: body.to, question: body.question }, opts(ctx)),
+    sourcesConfig: (ctx) => on(ctx).sourcesConfig(opts(ctx)),
+    sourcesGithub: (ctx) => on(ctx).sourcesGithub(opts(ctx))
   };
 }
 function boundTeams(me, team) {
@@ -24171,7 +24409,9 @@ function demoBackend(account) {
     setAcceptance: async (version, ctx) => account.team(ctx?.team).setAcceptance(version),
     membersStatus: async (ctx) => account.team(ctx?.team).membersStatus(),
     myRequests: async (limit, ctx) => account.team(ctx?.team).myRequests(limit),
-    ask: async (body, ctx) => account.team(ctx?.team).ask(body)
+    ask: async (body, ctx) => account.team(ctx?.team).ask(body),
+    sourcesConfig: async (ctx) => account.team(ctx?.team).sourcesConfig(),
+    sourcesGithub: async (ctx) => account.team(ctx?.team).sourcesGithub()
   };
 }
 var ROSTER_EMAIL_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$/;
@@ -24251,26 +24491,48 @@ function checkConfirm(raw, team) {
   if (b.confirm !== team) throw new BodyError('type the team id to confirm: {"confirm": "<team id>"}');
   return team;
 }
-var BOUNDARIES_BODY_LIMIT = 32 * 1024;
+var BOUNDARIES_BODY_LIMIT = 160 * 1024;
+var isRecord = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var hasExactly = (o, keys) => Object.keys(o).length === keys.length && keys.every((k) => Object.prototype.hasOwnProperty.call(o, k));
 function list(v, field, max, what) {
   if (!Array.isArray(v)) throw new BodyError(`${field} must be a list`);
-  if (v.length > max) throw new BodyError(`at most ${max} ${what}`);
+  if (v.length > max) throw new BodyError(`${field}: at most ${max} ${what}`);
   return v;
 }
-function drive(v) {
-  if (typeof v !== "object" || v === null || Array.isArray(v)) throw new BodyError('each drive must be {"domain", "shared_drive"}');
-  const d = v;
-  onlyKeys(d, ["domain", "shared_drive"]);
-  if (!domainOk(d.domain)) {
-    throw new BodyError("a drive domain must be a lower-case domain name, such as example.com");
+var REPO_FIELDS = ["org", "repo", "id"];
+var FOLDER_FIELDS = ["domain", "drive_id", "folder_id", "folder_name", "drive_name"];
+var LEGACY_DRIVE_FIELDS = ["domain", "shared_drive"];
+var ORG_TEXT = "1 to 39 letters, digits or -, not starting with -";
+var DOMAIN_TEXT = "a lower-case domain name, such as example.com";
+var NAME_TEXT = "with no control or invisible characters and no leading or trailing space";
+function checkRepo(v) {
+  if (!isRecord(v) || !hasExactly(v, REPO_FIELDS)) throw new BodyError('github_repos: each repository must be exactly {"org", "repo", "id"}');
+  if (!orgOk(v.org)) throw new BodyError(`github_repos: a repository's org must be ${ORG_TEXT}`);
+  if (!repoNameOk(v.repo)) {
+    throw new BodyError(`github_repos: a repository's name must be 1 to ${REPO_NAME_MAX} letters, digits, ., _ or -, and not only dots`);
   }
-  const name = d.shared_drive;
-  if (!driveNameOk(name)) {
-    throw new BodyError(
-      `a shared drive name must be 1 to ${SHARED_DRIVE_MAX} characters, with no /, no control or invisible characters and no leading or trailing space`
-    );
+  if (!repoIdOk(v.id)) throw new BodyError("github_repos: a repository's id must be a whole number from 1 to 2^53-1, or null");
+}
+function checkFolder(v) {
+  if (!isRecord(v) || !hasExactly(v, FOLDER_FIELDS)) {
+    throw new BodyError('drive_folders: each folder must be exactly {"domain", "drive_id", "folder_id", "folder_name", "drive_name"}');
   }
-  return { domain: d.domain, shared_drive: name };
+  if (!domainOk(v.domain)) throw new BodyError(`drive_folders: a folder's domain must be ${DOMAIN_TEXT}`);
+  if (v.drive_id !== null && !driveItemIdOk(v.drive_id)) {
+    throw new BodyError("drive_folders: a shared drive id must be 10 to 200 letters, digits, _ or -, or null");
+  }
+  if (!driveItemIdOk(v.folder_id)) throw new BodyError("drive_folders: a folder id must be 10 to 200 letters, digits, _ or -");
+  if (!folderNameOk(v.folder_name)) throw new BodyError(`drive_folders: a folder name must be 1 to ${FOLDER_NAME_MAX} characters, ${NAME_TEXT}`);
+  if (!pickedDriveNameOk(v.drive_name)) {
+    throw new BodyError(`drive_folders: a shared drive name must be null or 1 to ${DRIVE_NAME_MAX} characters, ${NAME_TEXT}`);
+  }
+}
+function checkLegacyDrive(v) {
+  if (!isRecord(v) || !hasExactly(v, LEGACY_DRIVE_FIELDS)) throw new BodyError('drives: each drive must be exactly {"domain", "shared_drive"}');
+  if (!domainOk(v.domain)) throw new BodyError(`drives: a drive domain must be ${DOMAIN_TEXT}`);
+  if (!driveNameOk(v.shared_drive)) {
+    throw new BodyError(`drives: a shared drive name must be 1 to ${SHARED_DRIVE_MAX} characters, with no /, no control or invisible characters and no leading or trailing space`);
+  }
 }
 function checkSetBoundaries(raw) {
   const b = object(raw);
@@ -24278,29 +24540,82 @@ function checkSetBoundaries(raw) {
   if (!versionOk(b.version)) {
     throw new BodyError("version must be the whole number the boundaries were read at");
   }
-  if (typeof b.boundaries !== "object" || b.boundaries === null || Array.isArray(b.boundaries)) {
-    throw new BodyError('boundaries must be {"topic", "github_orgs", "drives", "member_folders"}');
+  if (!isRecord(b.boundaries)) {
+    throw new BodyError(`boundaries must be {${BOUNDARIES_FIELDS.map((f) => `"${f}"`).join(", ")}}`);
   }
   const x = b.boundaries;
-  onlyKeys(x, ["topic", "github_orgs", "drives", "member_folders"]);
+  onlyKeys(x, [...BOUNDARIES_FIELDS]);
   if (!topicOk(x.topic)) {
     throw new BodyError(`topic must be 1 to ${TOPIC_MAX} characters, with no control or invisible characters`);
   }
-  const topic = trimText(x.topic);
-  const orgs = [];
   for (const o of list(x.github_orgs, "github_orgs", BOUNDARIES_MAX_ORGS, "GitHub orgs")) {
-    if (!orgOk(o)) {
-      throw new BodyError("a GitHub org must be 1 to 39 letters, digits or -, not starting with -");
-    }
-    if (!orgs.some((have) => have.toLowerCase() === o.toLowerCase())) orgs.push(o);
+    if (!orgOk(o)) throw new BodyError(`github_orgs: a GitHub org must be ${ORG_TEXT}`);
   }
-  const drives = [];
-  for (const d of list(x.drives, "drives", BOUNDARIES_MAX_DRIVES, "shared drives").map(drive)) {
-    if (!drives.some((have) => have.domain === d.domain && have.shared_drive === d.shared_drive)) drives.push(d);
-  }
+  list(x.github_repos, "github_repos", BOUNDARIES_MAX_REPOS, "repositories").forEach(checkRepo);
+  list(x.drive_folders, "drive_folders", BOUNDARIES_MAX_FOLDERS, "shared-drive folders").forEach(checkFolder);
+  list(x.drives, "drives", BOUNDARIES_MAX_DRIVES, "shared drives").forEach(checkLegacyDrive);
   if (typeof x.member_folders !== "boolean") throw new BodyError("member_folders must be true or false");
-  const boundaries = { topic, github_orgs: orgs, drives, member_folders: x.member_folders };
-  return { version: b.version, boundaries };
+  if (!boundariesValid(x)) throw new BodyError("boundaries do not pass the rule");
+  return { version: b.version, boundaries: normaliseBoundaries(x) };
+}
+var INSTALL_URL_RE = /^https:\/\/github\.com\/apps\/[a-z0-9][a-z0-9-]{0,99}\/installations\/new$/;
+var PICKER_CLIENT_ID_RE = /^[A-Za-z0-9.-]{1,200}\.apps\.googleusercontent\.com$/;
+var PICKER_API_KEY_RE = /^AIza[0-9A-Za-z_-]{35}$/;
+var PICKER_APP_ID_RE = /^[0-9]{6,20}$/;
+var GITHUB_REPOS_MAX = 1e3;
+var GITHUB_INSTALLATIONS_MAX = 300;
+function pickerConfig(v) {
+  if (!isRecord(v)) return null;
+  const { client_id, api_key, app_id } = v;
+  if (typeof client_id !== "string" || !PICKER_CLIENT_ID_RE.test(client_id)) return null;
+  if (typeof api_key !== "string" || !PICKER_API_KEY_RE.test(api_key)) return null;
+  if (typeof app_id !== "string" || !PICKER_APP_ID_RE.test(app_id)) return null;
+  return { client_id, api_key, app_id };
+}
+function sourcesConfigView(raw, local, viewer) {
+  const r = isRecord(raw) ? raw : {};
+  const gh = isRecord(r.github) ? r.github : {};
+  const configured = gh.configured === true;
+  const install = configured && typeof gh.install_url === "string" && INSTALL_URL_RE.test(gh.install_url) ? gh.install_url : null;
+  const picker = local ? null : pickerConfig(r.google_picker);
+  const hint = typeof viewer === "string" && viewer.length <= 254 && ROSTER_EMAIL_RE.test(viewer) ? viewer : null;
+  return { github: { configured, install_url: install }, google_picker: picker && hint ? { ...picker, login_hint: hint } : picker };
+}
+function githubRepo(v) {
+  if (!isRecord(v) || !repoNameOk(v.name) || typeof v.id !== "number" || !Number.isSafeInteger(v.id) || v.id < 1) return null;
+  return { name: v.name, id: v.id, private: v.private === true, archived: v.archived === true };
+}
+function githubInstallation(v) {
+  if (!isRecord(v) || !orgOk(v.account)) return null;
+  const suspended = v.state === "suspended";
+  const repos = [];
+  if (!suspended && Array.isArray(v.repos)) {
+    for (const x of v.repos) {
+      const repo = githubRepo(x);
+      if (repo && repos.length < GITHUB_REPOS_MAX) repos.push(repo);
+    }
+  }
+  repos.sort((a, b) => a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0);
+  const truncated = v.truncated === true || Array.isArray(v.repos) && v.repos.length > GITHUB_REPOS_MAX && !suspended;
+  return {
+    account: v.account,
+    state: suspended ? "suspended" : "ok",
+    repository_selection: v.repository_selection === "selected" ? "selected" : "all",
+    repos,
+    truncated
+  };
+}
+function githubListingView(raw) {
+  const r = isRecord(raw) ? raw : {};
+  const installations = [];
+  if (Array.isArray(r.installations)) {
+    for (const x of r.installations.slice(0, GITHUB_INSTALLATIONS_MAX)) {
+      const inst = githubInstallation(x);
+      if (inst) installations.push(inst);
+    }
+  }
+  const fetched = typeof r.fetched_at === "string" && RFC33392.test(r.fetched_at) ? r.fetched_at : (/* @__PURE__ */ new Date()).toISOString();
+  return { installations, fetched_at: fetched };
 }
 function checkAcceptance(raw) {
   const b = object(raw);
@@ -24432,11 +24747,11 @@ function checkIpHashSalt(raw) {
 }
 var JOIN_MARKETPLACE = "team-relay-dev";
 var JOIN_PLUGIN = "team-relay";
-var GITHUB_REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
+var GITHUB_REPO_RE2 = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
 function checkJoinMarketplace(raw) {
   const v = raw?.trim();
   if (!v) return null;
-  if (GITHUB_REPO_RE.test(v) && !v.split("/").some((x) => x === "." || x === "..")) return v;
+  if (GITHUB_REPO_RE2.test(v) && !v.split("/").some((x) => x === "." || x === "..")) return v;
   try {
     return checkJoinRepoUrl(v);
   } catch {
@@ -24642,12 +24957,19 @@ function createConsoleServer(opts) {
       return sendJson(res, 502, { error: "relay_refused", relay_status: err.status, relay_error: err.code, detail: err.detail });
     }
     if (err instanceof RelayError) {
-      return sendJson(res, 502, {
-        error: "relay_refused",
-        relay_status: err.status,
-        relay_error: err.code,
-        ...err.detail ? { detail: err.detail.slice(0, 300) } : {}
-      });
+      const wait = err.retryAfter;
+      return sendJson(
+        res,
+        502,
+        {
+          error: "relay_refused",
+          relay_status: err.status,
+          relay_error: err.code,
+          ...err.detail ? { detail: err.detail.slice(0, 300) } : {},
+          ...wait !== void 0 ? { retry_after: wait } : {}
+        },
+        wait !== void 0 ? { "Retry-After": String(wait) } : {}
+      );
     }
     if (err instanceof RelayNetworkError) return sendJson(res, 502, { error: "relay_unreachable", detail: err.message });
     const detail = err instanceof Error ? err.message.slice(0, 300) : "unexpected error";
@@ -24886,15 +25208,15 @@ function createConsoleServer(opts) {
         return failure(res, err, viewer);
       }
     }
-    const own = query.filter((k) => k !== "team");
-    const known = path === "/api/join" || path === "/api/me" || path === "/api/directory" || path === "/api/roster" || path === "/api/inbox/summary" || path === "/api/boundaries" || path === "/api/acceptance" || path === "/api/members-status" || path === "/api/my-requests";
+    const own2 = query.filter((k) => k !== "team");
+    const known = path === "/api/join" || path === "/api/me" || path === "/api/directory" || path === "/api/roster" || path === "/api/inbox/summary" || path === "/api/boundaries" || path === "/api/acceptance" || path === "/api/members-status" || path === "/api/my-requests" || path === "/api/sources/config" || path === "/api/sources/github";
     const requestMatch = /^\/api\/requests\/([^/]+)$/.exec(path);
     if (!known && path !== "/api/activity" && !requestMatch) return sendJson(res, 404, { error: "not_found" });
-    if (requestMatch && (!REQUEST_ID_RE.test(requestMatch[1]) || own.length > 0)) return sendJson(res, 404, { error: "not_found" });
-    if (known && own.length > 0) return sendJson(res, 400, { error: "bad_request", detail: "no query parameters here" });
+    if (requestMatch && (!REQUEST_ID_RE.test(requestMatch[1]) || own2.length > 0)) return sendJson(res, 404, { error: "not_found" });
+    if (known && own2.length > 0) return sendJson(res, 400, { error: "bad_request", detail: "no query parameters here" });
     const q = {};
     if (path === "/api/activity") {
-      for (const k of own) {
+      for (const k of own2) {
         if (k !== "since" && k !== "limit") return sendJson(res, 400, { error: "bad_request", detail: `unknown parameter ${k.slice(0, 40)}` });
       }
       if (url.searchParams.getAll("since").length > 1 || url.searchParams.getAll("limit").length > 1) {
@@ -24939,6 +25261,8 @@ function createConsoleServer(opts) {
     else if (path === "/api/acceptance") call = () => opts.backend.acceptance(on);
     else if (path === "/api/members-status") call = () => opts.backend.membersStatus(on);
     else if (path === "/api/my-requests") call = () => opts.backend.myRequests(MY_REQUESTS_LIMIT, on);
+    else if (path === "/api/sources/config") call = async () => sourcesConfigView(await opts.backend.sourcesConfig(on), !hosted2, on.viewer);
+    else if (path === "/api/sources/github") call = async () => githubListingView(await opts.backend.sourcesGithub(on));
     else if (path === "/api/activity") call = () => opts.backend.activity(q, on);
     else {
       const rid = requestMatch[1];
@@ -24947,7 +25271,7 @@ function createConsoleServer(opts) {
     try {
       return sendJson(res, 200, await call());
     } catch (err) {
-      const newer = path === "/api/boundaries" || path === "/api/acceptance" || path === "/api/members-status" || path === "/api/my-requests";
+      const newer = path === "/api/boundaries" || path === "/api/acceptance" || path === "/api/members-status" || path === "/api/my-requests" || path === "/api/sources/config" || path === "/api/sources/github";
       return failure(res, err, viewer, requestMatch || newer ? void 0 : team);
     }
   }
@@ -24955,6 +25279,7 @@ function createConsoleServer(opts) {
     const head = req.method === "HEAD";
     if (req.method !== "GET" && !head) return send(res, 405, "method not allowed\n", "text/plain; charset=utf-8", { Allow: "GET, HEAD" });
     const html = (body) => send(res, 200, body, MIME[".html"], { "Cache-Control": "no-cache" }, head);
+    if (url.pathname.toLowerCase() === `/${PICKER_FILE}`) return send(res, 404, "not found\n", "text/plain; charset=utf-8");
     const index = staticRoot ? join2(staticRoot, "index.html") : null;
     if (!staticRoot || !index || !existsSync(index)) return html(PLACEHOLDER);
     let rel;
@@ -24974,6 +25299,7 @@ function createConsoleServer(opts) {
     } catch {
       real = null;
     }
+    if (real && real.slice(staticRoot.length + 1).toLowerCase() === PICKER_FILE) return send(res, 404, "not found\n", "text/plain; charset=utf-8");
     if (real && real.startsWith(staticRoot + sep) && statSync(real).isFile()) {
       const type = MIME[extname(real).toLowerCase()] ?? "application/octet-stream";
       const cache2 = rel.startsWith("/assets/") ? `${hosted2 ? "private" : "public"}, max-age=31536000, immutable` : "no-cache";
@@ -24981,6 +25307,23 @@ function createConsoleServer(opts) {
     }
     if (!extname(rel)) return html(readFileSync5(index));
     return send(res, 404, "not found\n", "text/plain; charset=utf-8");
+  }
+  function pickerPage(req, res, url) {
+    const notFound = () => send(res, 404, "not found\n", "text/plain; charset=utf-8");
+    if (!hosted2 || url.search !== "") return notFound();
+    const head = req.method === "HEAD";
+    if (req.method !== "GET" && !head) return send(res, 405, "method not allowed\n", "text/plain; charset=utf-8", { Allow: "GET, HEAD" });
+    if (!staticRoot) return notFound();
+    let real;
+    try {
+      real = realpathSync(join2(staticRoot, PICKER_FILE));
+    } catch {
+      return notFound();
+    }
+    if (real !== join2(staticRoot, PICKER_FILE) || !statSync(real).isFile()) return notFound();
+    const body = readFileSync5(real);
+    res.writeHead(200, { ...PICKER_HEADERS, "Content-Type": MIME[".html"], "Content-Length": String(body.length) });
+    res.end(head ? void 0 : body);
   }
   const unauthorized = (res) => send(res, 401, "unauthorized\n", "text/plain; charset=utf-8", { "Cache-Control": "no-store" });
   const server = createServer((req, res) => {
@@ -25034,7 +25377,8 @@ function createConsoleServer(opts) {
       return;
     }
     try {
-      staticFile(req, res, url);
+      if (url.pathname === PICKER_PATH) pickerPage(req, res, url);
+      else staticFile(req, res, url);
     } catch {
       if (!res.headersSent) send(res, 500, "internal error\n", "text/plain; charset=utf-8");
     }

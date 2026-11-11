@@ -184,12 +184,15 @@ var RelayError = class extends Error {
   status;
   code;
   detail;
-  constructor(status, code, detail) {
+  /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
+  retryAfter;
+  constructor(status, code, detail, retryAfter) {
     super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
     this.name = "RelayError";
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.retryAfter = retryAfter;
   }
 };
 var RelayNetworkError = class extends Error {

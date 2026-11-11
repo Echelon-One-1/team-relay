@@ -14958,14 +14958,23 @@ var RelayError = class extends Error {
   status;
   code;
   detail;
-  constructor(status, code, detail) {
+  /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
+  retryAfter;
+  constructor(status, code, detail, retryAfter) {
     super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
     this.name = "RelayError";
     this.status = status;
     this.code = code;
     this.detail = detail;
+    this.retryAfter = retryAfter;
   }
 };
+var RETRY_AFTER_MAX_S = 3600;
+function parseRetryAfter(v) {
+  const t = v?.trim();
+  if (!t || !/^[0-9]{1,10}$/.test(t)) return void 0;
+  return Math.min(RETRY_AFTER_MAX_S, Number(t));
+}
 var RelayNetworkError = class extends Error {
   constructor(message) {
     super(message);
@@ -15297,7 +15306,7 @@ var RelayClient = class _RelayClient {
       const obj = json && typeof json === "object" ? json : {};
       const code = typeof obj.error === "string" ? obj.error : `http_${res.status}`;
       const detail = typeof obj.detail === "string" ? obj.detail.slice(0, 500) : "";
-      throw new RelayError(res.status, code, detail);
+      throw new RelayError(res.status, code, detail, parseRetryAfter(res.headers.get("retry-after")));
     }
     return json;
   }
@@ -15412,6 +15421,21 @@ var RelayClient = class _RelayClient {
   /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
   setBoundaries(body, opts) {
     return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
+  }
+  /**
+   * PICKERS-SPEC §3.5 (owners): the GitHub App's install link and the Google Picker's public
+   * settings. Never a key or a token.
+   */
+  sourcesConfig(opts) {
+    return this.call("GET", this.teamPath("sources", "config"), void 0, opts);
+  }
+  /**
+   * PICKERS-SPEC §3.6 (owners): the repositories of the allowed orgs where the relay's GitHub App
+   * is installed. Not configured: 404 github_not_configured; GitHub's rate limit: 503
+   * github_rate_limited with a Retry-After (RelayError.retryAfter).
+   */
+  sourcesGithub(opts) {
+    return this.call("GET", this.teamPath("sources", "github"), void 0, opts);
   }
   /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
   acceptance(opts) {
@@ -15783,12 +15807,22 @@ var SHARED_DRIVE_MAX = 100;
 var DOMAIN_MAX = 253;
 var BOUNDARIES_MAX_ORGS = 10;
 var BOUNDARIES_MAX_DRIVES = 10;
+var BOUNDARIES_MAX_REPOS = 100;
+var BOUNDARIES_MAX_FOLDERS = 20;
+var REPO_ID_MAX = Number.MAX_SAFE_INTEGER;
+var FOLDER_NAME_MAX = 255;
+var DRIVE_NAME_MAX = SHARED_DRIVE_MAX;
 var BOUNDARIES_VERSION_MAX = 2 ** 31 - 1;
 var GITHUB_ORG_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
+var GITHUB_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
+var DRIVE_ITEM_ID_RE = /^[A-Za-z0-9_-]{10,200}$/;
 var DRIVE_DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
-var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
+var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
 var DRIVE_NAME_FORBIDDEN_RE = /[/\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/u;
+var FOLDER_NAME_FORBIDDEN_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/u;
 var EDGE_SPACE_RE = /^[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+var BOUNDARIES_FIELDS = ["topic", "github_orgs", "github_repos", "drive_folders", "drives", "member_folders"];
+var M10_BOUNDARIES_FIELDS = ["topic", "github_orgs", "drives", "member_folders"];
 var chars = (s) => [...s].length;
 var trimText = (s) => s.replace(EDGE_SPACE_RE, "");
 var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -15807,16 +15841,77 @@ function driveNameOk(name) {
   return typeof name === "string" && chars(name) >= 1 && chars(name) <= SHARED_DRIVE_MAX && !DRIVE_NAME_FORBIDDEN_RE.test(name) && name === trimText(name) && name !== "." && name !== "..";
 }
 var versionOk = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= BOUNDARIES_VERSION_MAX;
+var repoNameOk = (name) => typeof name === "string" && GITHUB_REPO_RE.test(name) && !/^\.+$/.test(name);
+var repoIdOk = (id) => id === null || typeof id === "number" && Number.isSafeInteger(id) && id >= 1;
+var driveItemIdOk = (id) => typeof id === "string" && DRIVE_ITEM_ID_RE.test(id);
+function folderNameOk(name, max = FOLDER_NAME_MAX) {
+  return typeof name === "string" && chars(name) >= 1 && chars(name) <= max && !FOLDER_NAME_FORBIDDEN_RE.test(name) && name === trimText(name);
+}
+var pickedDriveNameOk = (name) => name === null || folderNameOk(name, DRIVE_NAME_MAX);
+function repoOk(r) {
+  return isObj(r) && exactKeys(r, ["org", "repo", "id"]) && orgOk(r.org) && repoNameOk(r.repo) && repoIdOk(r.id);
+}
+function folderOk(f) {
+  return isObj(f) && exactKeys(f, ["domain", "drive_id", "folder_id", "folder_name", "drive_name"]) && domainOk(f.domain) && (f.drive_id === null || driveItemIdOk(f.drive_id)) && driveItemIdOk(f.folder_id) && folderNameOk(f.folder_name) && pickedDriveNameOk(f.drive_name);
+}
+var legacyDriveOk = (d) => isObj(d) && exactKeys(d, ["domain", "shared_drive"]) && domainOk(d.domain) && driveNameOk(d.shared_drive);
+var listOk = (v, max, ok) => Array.isArray(v) && v.length <= max && v.every(ok);
+function commonValid(raw) {
+  return topicOk(raw.topic) && listOk(raw.github_orgs, BOUNDARIES_MAX_ORGS, orgOk) && listOk(raw.drives, BOUNDARIES_MAX_DRIVES, legacyDriveOk) && typeof raw.member_folders === "boolean";
+}
 function boundariesValid(raw) {
-  if (!isObj(raw) || !exactKeys(raw, ["topic", "github_orgs", "drives", "member_folders"])) return false;
-  if (!topicOk(raw.topic)) return false;
-  const { github_orgs: orgs, drives } = raw;
-  if (!Array.isArray(orgs) || orgs.length > BOUNDARIES_MAX_ORGS || !orgs.every(orgOk)) return false;
-  if (!Array.isArray(drives) || drives.length > BOUNDARIES_MAX_DRIVES) return false;
-  for (const d of drives) {
-    if (!isObj(d) || !exactKeys(d, ["domain", "shared_drive"]) || !domainOk(d.domain) || !driveNameOk(d.shared_drive)) return false;
+  if (!isObj(raw) || !exactKeys(raw, BOUNDARIES_FIELDS)) return false;
+  return commonValid(raw) && listOk(raw.github_repos, BOUNDARIES_MAX_REPOS, repoOk) && listOk(raw.drive_folders, BOUNDARIES_MAX_FOLDERS, folderOk);
+}
+function readBoundaries(raw) {
+  if (boundariesValid(raw)) return raw;
+  if (!isObj(raw) || !exactKeys(raw, M10_BOUNDARIES_FIELDS) || !commonValid(raw)) return null;
+  const m10 = raw;
+  return { topic: m10.topic, github_orgs: m10.github_orgs, github_repos: [], drive_folders: [], drives: m10.drives, member_folders: m10.member_folders };
+}
+var lowerRepo = (r) => `${r.org.toLowerCase()}/${r.repo.toLowerCase()}`;
+var sameDrive = (a, b) => a.domain === b.domain && a.shared_drive === b.shared_drive;
+function normaliseBoundaries(b) {
+  const orgSeen = /* @__PURE__ */ new Set();
+  const github_orgs = b.github_orgs.filter((o) => !orgSeen.has(o.toLowerCase()) && orgSeen.add(o.toLowerCase()));
+  const repoSeen = /* @__PURE__ */ new Set();
+  const github_repos = b.github_repos.filter((r) => !orgSeen.has(r.org.toLowerCase()) && !repoSeen.has(lowerRepo(r)) && repoSeen.add(lowerRepo(r)));
+  const folderSeen = /* @__PURE__ */ new Set();
+  const drive_folders = b.drive_folders.filter((f) => !folderSeen.has(f.folder_id) && folderSeen.add(f.folder_id));
+  const drives = b.drives.filter((d, i) => b.drives.findIndex((x) => sameDrive(x, d)) === i);
+  return {
+    topic: trimText(b.topic),
+    github_orgs,
+    github_repos: github_repos.map((r) => ({ org: r.org, repo: r.repo, id: r.id })),
+    drive_folders: drive_folders.map((f) => ({ domain: f.domain, drive_id: f.drive_id, folder_id: f.folder_id, folder_name: f.folder_name, drive_name: f.drive_name })),
+    drives: drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive })),
+    member_folders: b.member_folders
+  };
+}
+var orgKey = (org) => `org:${org.toLowerCase()}`;
+var repoKey = (r) => `repo:${lowerRepo(r)}`;
+var folderKey = (f) => `folder:${f.folder_id}`;
+var driveKey = (d) => `drive:${d.domain}/${d.shared_drive}`;
+function itemKey(item) {
+  switch (item.kind) {
+    case "org":
+      return orgKey(item.org);
+    case "repo":
+      return repoKey(item);
+    case "folder":
+      return folderKey(item);
+    case "drive":
+      return driveKey(item);
   }
-  return typeof raw.member_folders === "boolean";
+}
+function boundaryItems(b) {
+  const n = normaliseBoundaries(b);
+  return [
+    ...n.github_orgs.map((org) => ({ kind: "org", org })),
+    ...n.github_repos.map((r) => ({ kind: "repo", ...r })),
+    ...n.drive_folders.map((f) => ({ kind: "folder", ...f })),
+    ...n.drives.map((d) => ({ kind: "drive", ...d }))
+  ];
 }
 
 // src/deny-list.ts
@@ -15928,6 +16023,17 @@ function credentialHit(p, ctx) {
   }
   return null;
 }
+
+// src/drive-locate.ts
+var DEFAULT_LOCATE_LIMITS = {
+  rootsPerMount: 50,
+  depth: 8,
+  hintDirs: 5e3,
+  blindReads: 300,
+  blindMs: 1e4,
+  verifyMs: 6e4,
+  notFoundMs: 10 * 6e4
+};
 
 // src/member-folders.ts
 import { chmodSync as chmodSync2, closeSync as closeSync2, fsyncSync as fsyncSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync3, openSync as openSync2, readFileSync as readFileSync5, renameSync as renameSync3, rmSync as rmSync3, writeSync as writeSync2 } from "node:fs";
@@ -16049,12 +16155,12 @@ function parseMemberFolders(raw, env, what = "the folders file") {
   }
   return out;
 }
-function sameDrive(a, b) {
+function sameDrive2(a, b) {
   return a.domain === b.domain && a.shared_drive === b.shared_drive;
 }
 function parseAccepted(raw) {
   if (!isObj2(raw)) throw new MemberFoldersError("accepted is not a JSON object");
-  onlyKeys(raw, ["version", "github_orgs", "drives", "member_folders"], "accepted");
+  onlyKeys(raw, ["version", "github_orgs", "github_repos", "drive_folders", "drives", "member_folders"], "accepted");
   const v = raw.version;
   if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1 || v > BOUNDARIES_VERSION_MAX) throw new MemberFoldersError("accepted.version must be a whole number from 1");
   if (!Array.isArray(raw.github_orgs) || raw.github_orgs.length > BOUNDARIES_MAX_ORGS) throw new MemberFoldersError("accepted.github_orgs must be a list of at most 10 org names");
@@ -16071,10 +16177,24 @@ function parseAccepted(raw) {
     if (!domainOk(d.domain)) throw new MemberFoldersError("accepted.drives has a domain that is not a lower-case DNS name");
     if (!driveNameOk(d.shared_drive)) throw new MemberFoldersError("accepted.drives has a shared drive name that cannot be used");
     const drive = { domain: d.domain, shared_drive: d.shared_drive };
-    if (!drives.some((x) => sameDrive(x, drive))) drives.push(drive);
+    if (!drives.some((x) => sameDrive2(x, drive))) drives.push(drive);
   }
   if (typeof raw.member_folders !== "boolean") throw new MemberFoldersError("accepted.member_folders must be true or false");
-  return { version: v, github_orgs: orgs, drives, member_folders: raw.member_folders };
+  const rawRepos = raw.github_repos ?? [];
+  if (!Array.isArray(rawRepos) || rawRepos.length > BOUNDARIES_MAX_REPOS) throw new MemberFoldersError("accepted.github_repos must be a list of at most 100 repositories");
+  const repos = [];
+  for (const r of rawRepos) {
+    if (!repoOk(r)) throw new MemberFoldersError("accepted.github_repos has an entry that is not a GitHub repository");
+    if (!repos.some((x) => repoKey(x) === repoKey(r))) repos.push({ org: r.org, repo: r.repo, id: r.id });
+  }
+  const rawFolders = raw.drive_folders ?? [];
+  if (!Array.isArray(rawFolders) || rawFolders.length > BOUNDARIES_MAX_FOLDERS) throw new MemberFoldersError("accepted.drive_folders must be a list of at most 20 folders");
+  const folders = [];
+  for (const f of rawFolders) {
+    if (!folderOk(f)) throw new MemberFoldersError("accepted.drive_folders has an entry that is not a shared-drive folder");
+    if (!folders.some((x) => x.folder_id === f.folder_id)) folders.push({ domain: f.domain, drive_id: f.drive_id, folder_id: f.folder_id, folder_name: f.folder_name, drive_name: f.drive_name });
+  }
+  return { version: v, github_orgs: orgs, github_repos: repos, drive_folders: folders, drives, member_folders: raw.member_folders };
 }
 function parseTeamSettings(raw, env, team = "a team") {
   if (!isObj2(raw)) throw new MemberFoldersError(`the settings for ${team} are not a JSON object`);
@@ -16149,60 +16269,90 @@ function readMemberSettings(path, env) {
 function readTeamSettings(path, env, team) {
   return teamSettings(readMemberSettings(path, env), team);
 }
+var own = (o, key) => o && Object.prototype.hasOwnProperty.call(o, key) ? o[key] : void 0;
 function sinceOf(tb) {
   const s = tb.since ?? null;
+  const item = (key) => {
+    if (!s) return void 0;
+    const at = key.indexOf(":");
+    const kind = key.slice(0, at);
+    const rest = key.slice(at + 1);
+    if (kind === "org") return own(s.github_orgs, rest);
+    if (kind === "repo") return own(s.github_repos, rest);
+    if (kind === "folder") return own(s.drive_folders, rest);
+    return s.drives.find((d) => driveKey(d) === key)?.since;
+  };
   return {
     version: tb.version,
-    // Own keys only: an org may be named like an Object.prototype member ("constructor").
-    org: (o) => {
-      const key = o.toLowerCase();
-      return s && Object.prototype.hasOwnProperty.call(s.github_orgs, key) ? s.github_orgs[key] ?? tb.version : tb.version;
-    },
-    drive: (d) => s?.drives.find((x) => sameDrive(x, d))?.since ?? tb.version,
+    item: (key) => item(key) ?? tb.version,
     memberFolders: () => s?.member_folders ?? tb.version
   };
 }
+var keySet = (a) => /* @__PURE__ */ new Set([...a.github_orgs.map(orgKey), ...a.github_repos.map(repoKey), ...a.drive_folders.map(folderKey), ...a.drives.map(driveKey)]);
+var wholeDrives = (a) => new Set(a.drive_folders.filter((f) => f.drive_id !== null && f.folder_id === f.drive_id).map((f) => f.folder_id));
+function holds(keys, wholes, item) {
+  if (keys.has(itemKey(item))) return true;
+  if (item.kind === "repo") return keys.has(orgKey(item.org));
+  if (item.kind === "folder") return item.drive_id !== null && wholes.has(item.drive_id);
+  return false;
+}
+function widening(items, member_folders) {
+  const w = { github_orgs: [], github_repos: [], drive_folders: [], drives: [], member_folders };
+  for (const i of items) {
+    if (i.kind === "org") w.github_orgs.push(i.org);
+    else if (i.kind === "repo") w.github_repos.push({ org: i.org, repo: i.repo, id: i.id });
+    else if (i.kind === "folder") w.drive_folders.push({ domain: i.domain, drive_id: i.drive_id, folder_id: i.folder_id, folder_name: i.folder_name, drive_name: i.drive_name });
+    else w.drives.push({ domain: i.domain, shared_drive: i.shared_drive });
+  }
+  return w;
+}
+var widens = (w) => w.github_orgs.length > 0 || w.github_repos.length > 0 || w.drive_folders.length > 0 || w.drives.length > 0 || w.member_folders;
 function effectiveBoundaries(current, acceptedRaw, since) {
   const accepted = acceptedRaw ? narrowAccepted(current, acceptedRaw, since)?.accepted ?? acceptedRaw : null;
-  const orgs = new Set((accepted?.github_orgs ?? []).map((o) => o.toLowerCase()));
-  const acceptedDrives = accepted?.drives ?? [];
-  const added = {
-    github_orgs: current.github_orgs.filter((o) => !orgs.has(o.toLowerCase())),
-    drives: current.drives.filter((d) => !acceptedDrives.some((a) => sameDrive(a, d))),
-    member_folders: current.member_folders && accepted?.member_folders !== true
-  };
-  const widens = added.github_orgs.length > 0 || added.drives.length > 0 || added.member_folders;
+  const keys = accepted ? keySet(accepted) : /* @__PURE__ */ new Set();
+  const wholes = accepted ? wholeDrives(accepted) : /* @__PURE__ */ new Set();
+  const stale = accepted !== null && accepted.version > since.version;
+  const isIn = (i) => accepted !== null && !stale && since.item(itemKey(i)) <= accepted.version && holds(keys, wholes, i);
+  const items = boundaryItems(current);
+  const inside = items.filter(isIn);
+  const kept = widening(inside, current.member_folders && accepted?.member_folders === true);
+  const added = widening(
+    items.filter((i) => !isIn(i)),
+    current.member_folders && accepted?.member_folders !== true
+  );
   return {
-    boundaries: {
-      topic: current.topic,
-      github_orgs: current.github_orgs.filter((o) => orgs.has(o.toLowerCase())),
-      drives: current.drives.filter((d) => acceptedDrives.some((a) => sameDrive(a, d))),
-      member_folders: current.member_folders && accepted?.member_folders === true
-    },
+    boundaries: { topic: current.topic, ...kept },
     notAccepted: accepted === null,
-    pending: widens ? added : null
+    pending: widens(added) ? added : null
   };
 }
 function narrowAccepted(current, accepted, since) {
   if (!accepted) return null;
   const stale = accepted.version > since.version;
   const covered = (n) => !stale && n <= accepted.version;
-  const orgs = new Set(current.github_orgs.map((o) => o.toLowerCase()));
-  const keep = (o) => orgs.has(o.toLowerCase()) && covered(since.org(o));
-  const listed = (d) => current.drives.some((c) => sameDrive(c, d)) && covered(since.drive(d));
-  const folders = current.member_folders && covered(since.memberFolders());
-  const dropped = {
-    github_orgs: accepted.github_orgs.filter((o) => !keep(o)),
-    drives: accepted.drives.filter((d) => !listed(d)),
-    member_folders: accepted.member_folders && !folders
-  };
-  if (dropped.github_orgs.length === 0 && dropped.drives.length === 0 && !dropped.member_folders) return null;
+  const keys = keySet(accepted);
+  const wholes = wholeDrives(accepted);
+  const kept = boundaryItems(current).filter((i) => covered(since.item(itemKey(i))) && holds(keys, wholes, i));
+  const keptKeys = new Set(kept.map(itemKey));
+  const folders = accepted.member_folders && current.member_folders && covered(since.memberFolders());
+  const next = { version: accepted.version, ...widening(kept, folders) };
+  const droppedItems = [
+    ...accepted.github_orgs.map((org) => ({ kind: "org", org })),
+    ...accepted.github_repos.map((r) => ({ kind: "repo", ...r })),
+    ...accepted.drive_folders.map((f) => ({ kind: "folder", ...f })),
+    ...accepted.drives.map((d) => ({ kind: "drive", ...d }))
+  ].filter((i) => !keptKeys.has(itemKey(i)));
+  const dropped = widening(droppedItems, accepted.member_folders && !folders);
+  const same = keptKeys.size === keys.size && [...keys].every((k) => keptKeys.has(k));
+  if (!widens(dropped) && same) return null;
+  const asAccepted = (list, key, from) => list.map((x) => from.find((y) => key(y) === key(x)) ?? x);
   return {
     accepted: {
-      version: accepted.version,
-      github_orgs: accepted.github_orgs.filter(keep),
-      drives: accepted.drives.filter(listed),
-      member_folders: accepted.member_folders && folders
+      ...next,
+      github_orgs: next.github_orgs.map((o) => accepted.github_orgs.find((a) => a.toLowerCase() === o.toLowerCase()) ?? o),
+      github_repos: asAccepted(next.github_repos, repoKey, accepted.github_repos),
+      drive_folders: asAccepted(next.drive_folders, folderKey, accepted.drive_folders),
+      drives: asAccepted(next.drives, driveKey, accepted.drives)
     },
     dropped
   };
@@ -16216,11 +16366,14 @@ function acceptedAtVersion(current, version, since) {
   }
 }
 function acceptedFrom(current, version) {
+  const n = normaliseBoundaries(current);
   return parseAccepted({
     version,
-    github_orgs: current.github_orgs,
-    drives: current.drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive })),
-    member_folders: current.member_folders
+    github_orgs: n.github_orgs,
+    github_repos: n.github_repos,
+    drive_folders: n.drive_folders,
+    drives: n.drives,
+    member_folders: n.member_folders
   });
 }
 
@@ -16243,9 +16396,22 @@ function quotedOwnerText(text, limit) {
   const flat = neutraliseChannelTags(text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim());
   return JSON.stringify(flat.length <= limit ? flat : flat.slice(0, limit));
 }
+function someOf(names, max) {
+  return `${names.slice(0, max).join(", ")}${names.length > max ? ` and ${names.length - max} more` : ""}`;
+}
+function folderText(f, withDomain) {
+  const where = f.drive_id !== null && f.folder_id === f.drive_id ? " (a whole shared drive" : f.drive_name !== null ? ` (in ${quotedOwnerText(f.drive_name, 100)}` : " (in a shared drive";
+  return `${quotedOwnerText(f.folder_name, 255)}${where}${withDomain ? `, ${f.domain}` : ""})`;
+}
+var repoNames = (repos) => someOf(repos.map((r) => `${r.org}/${r.repo}`), 10);
 function wideningText(w) {
   const parts = [];
   if (w.github_orgs.length) parts.push(`${w.github_orgs.length === 1 ? "the GitHub org" : "the GitHub orgs"} ${w.github_orgs.join(", ")}`);
+  if (w.github_repos.length) parts.push(`${w.github_repos.length === 1 ? "the GitHub repository" : "the GitHub repositories"} ${repoNames(w.github_repos)}`);
+  if (w.drive_folders.length) {
+    const names = someOf(w.drive_folders.map((f) => folderText(f, true)), 10);
+    parts.push(`${w.drive_folders.length === 1 ? "the Drive folder" : "the Drive folders"} ${names}`);
+  }
   if (w.drives.length) {
     const names = w.drives.map((d) => `${quotedOwnerText(d.shared_drive, 100)} (${d.domain})`).join(", ");
     parts.push(`${w.drives.length === 1 ? "the shared drive" : "the shared drives"} ${names}`);
@@ -16253,22 +16419,25 @@ function wideningText(w) {
   if (w.member_folders) parts.push("members' own folders");
   return parts.join(", ") || "nothing to read yet";
 }
+var NOTHING = { github_orgs: [], github_repos: [], drive_folders: [], drives: [], member_folders: false };
 function boundariesSentence(current, version, settings, since, acceptedVersion, consoleAt) {
   if ("error" in settings) {
     return `Your team has boundaries (version ${version}), but your folders file cannot be used (${settings.error.slice(0, 200)}), so teammates' questions to you are declined until you fix it: run /team-relay:folders.`;
   }
   const eff = effectiveBoundaries(current, acceptedAtVersion(current, acceptedVersion, since), since);
   if (eff.notAccepted) {
-    return `Your team has boundaries (version ${version}) that you have not accepted yet, so teammates' questions to you are declined. Accept them in the console at ${consoleAt} (your answerer would then answer on its own from ${wideningText(eff.pending ?? { github_orgs: [], drives: [], member_folders: false })}).`;
+    return `Your team has boundaries (version ${version}) that you have not accepted yet, so teammates' questions to you are declined. Accept them in the console at ${consoleAt} (your answerer would then answer on its own from ${wideningText(eff.pending ?? NOTHING)}).`;
   }
   const b = eff.boundaries;
   const orgs = b.github_orgs.length ? `files git tracks in your clones of ${b.github_orgs.length === 1 ? "the GitHub org" : "the GitHub orgs"} ${b.github_orgs.join(", ")}` : null;
+  const repos = b.github_repos.length ? `files git tracks in your clones of ${b.github_repos.length === 1 ? "the GitHub repository" : "the GitHub repositories"} ${repoNames(b.github_repos)}` : null;
+  const folders = b.drive_folders.length ? `${b.drive_folders.length === 1 ? "the Drive folder" : "the Drive folders"} ${someOf(b.drive_folders.map((f) => folderText(f, false)), 10)}` : null;
   const drives = b.drives.length ? `${b.drives.length === 1 ? "the shared drive" : "the shared drives"} ${b.drives.map((d) => quotedOwnerText(d.shared_drive, 100)).join(", ")}` : null;
-  const own = b.member_folders ? "your own added folders" : null;
-  const from = [orgs, drives, own].filter(Boolean).join(", ") || "nothing yet";
+  const own2 = b.member_folders ? "your own added folders" : null;
+  const from = [orgs, repos, folders, drives, own2].filter(Boolean).join(", ") || "nothing yet";
   const pending = eff.pending ? ` Version ${version} adds ${wideningText(eff.pending)}, which you have not accepted: accept it in the console at ${consoleAt}; until then answers come only from what you accepted.` : "";
   let roots;
-  if (b.github_orgs.length && settings.repo_roots.length === 0) roots = " You have set no repo roots yet: run /team-relay:folders add-root <the folder your clones are in>.";
+  if ((b.github_orgs.length || b.github_repos.length) && settings.repo_roots.length === 0) roots = " You have set no repo roots yet: run /team-relay:folders add-root <the folder your clones are in>.";
   else roots = ` Repo roots set: ${settings.repo_roots.length} (/team-relay:folders shows them).`;
   return `Your team has boundaries (version ${version}): your answerer answers teammates on its own from ${from}; reads of anything else are denied and off-topic questions declined.${pending}${roots}`;
 }
@@ -16276,16 +16445,34 @@ var isObj3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function validBoundaries(v) {
   if (!isObj3(v) || !versionOk(v.version)) return false;
   if (v.boundaries === null) return v.since === void 0 || v.since === null;
-  return boundariesValid(v.boundaries) && sinceValid(v.since, v.version);
+  const b = readBoundaries(v.boundaries);
+  if (!b || !sinceValid(v.since, v.version)) return false;
+  v.boundaries = b;
+  if (isObj3(v.since)) v.since = { github_orgs: v.since.github_orgs, github_repos: v.since.github_repos ?? {}, drive_folders: v.since.drive_folders ?? {}, drives: v.since.drives, member_folders: v.since.member_folders };
+  return true;
 }
 function sinceValid(v, version) {
   if (v === void 0 || v === null) return true;
   const inRange = (n) => versionOk(n) && n >= 1 && n <= version;
   const keys = (o, want) => Object.keys(o).length === want.length && want.every((k) => Object.prototype.hasOwnProperty.call(o, k));
-  if (!isObj3(v) || !keys(v, ["github_orgs", "drives", "member_folders"])) return false;
+  if (!isObj3(v) || !(keys(v, ["github_orgs", "drives", "member_folders"]) || keys(v, ["github_orgs", "github_repos", "drive_folders", "drives", "member_folders"]))) return false;
   const orgs = v.github_orgs;
   if (!isObj3(orgs) || Object.keys(orgs).length > BOUNDARIES_MAX_ORGS) return false;
   if (!Object.entries(orgs).every(([o, n]) => orgOk(o) && o === o.toLowerCase() && inRange(n))) return false;
+  if (v.github_repos !== void 0) {
+    const repos = v.github_repos;
+    if (!isObj3(repos) || Object.keys(repos).length > BOUNDARIES_MAX_REPOS) return false;
+    const repoKeyOk = (k) => {
+      const at = k.indexOf("/");
+      return at > 0 && k === k.toLowerCase() && orgOk(k.slice(0, at)) && repoNameOk(k.slice(at + 1));
+    };
+    if (!Object.entries(repos).every(([k, n]) => repoKeyOk(k) && inRange(n))) return false;
+  }
+  if (v.drive_folders !== void 0) {
+    const folders = v.drive_folders;
+    if (!isObj3(folders) || Object.keys(folders).length > BOUNDARIES_MAX_FOLDERS) return false;
+    if (!Object.entries(folders).every(([k, n]) => driveItemIdOk(k) && inRange(n))) return false;
+  }
   if (!Array.isArray(v.drives) || v.drives.length > BOUNDARIES_MAX_DRIVES) return false;
   if (!v.drives.every((d) => isObj3(d) && keys(d, ["domain", "shared_drive", "since"]) && domainOk(d.domain) && driveNameOk(d.shared_drive) && inRange(d.since))) return false;
   return v.member_folders === null || inRange(v.member_folders);
@@ -16328,7 +16515,7 @@ async function relayStatusLine(env) {
       client.me(),
       readSummary(client, 3e3),
       readInvitations(client, 3e3),
-      readBoundaries(client, 3e3),
+      readBoundaries2(client, 3e3),
       readAccepted(client, 3e3)
     ]);
     if (!MEMBER_RE.test(me.member) || !TEAM_RE.test(me.team)) throw new Error("unexpected answer from the relay");
@@ -16358,7 +16545,7 @@ async function readAccepted(client, timeoutMs) {
     return null;
   }
 }
-async function readBoundaries(client, timeoutMs) {
+async function readBoundaries2(client, timeoutMs) {
   try {
     const tb = await client.boundaries({ attempts: 1, timeoutMs });
     return validBoundaries(tb) ? tb : null;

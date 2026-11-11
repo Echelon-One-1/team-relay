@@ -412,6 +412,62 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     await done;
   });
 
+  it('PICKERS-SPEC §3.3: while the team has boundaries the status says which of its items this Mac cannot find (keys only)', async () => {
+    relay.setBoundaries({
+      topic: 'T',
+      github_orgs: ['example-org'],
+      github_repos: [{ org: 'example-labs', repo: 'api', id: 7 }],
+      drive_folders: [{ domain: 'example.com', drive_id: '0AExampleDriveId0PVA', folder_id: '1ExampleFolderClients0000000000a', folder_name: 'Clients', drive_name: null }],
+      drives: [],
+      member_folders: false,
+    });
+    const seen: Array<{ keys: string[]; roots: string[] }> = [];
+    let mounts = 'one';
+    const { make } = fakeHosts();
+    const ac = new AbortController();
+    const done = runDaemon({
+      env: env(),
+      log: (l) => logs.push(l),
+      dist: DIST,
+      version: '1',
+      signal: ac.signal,
+      makeHost: make,
+      selfTest: async () => PASSED,
+      facts: {
+        ...facts,
+        missing: async (b, folders) => {
+          seen.push({ keys: [...b.github_repos.map((r) => r.repo), ...b.drive_folders.map((x) => x.folder_id)], roots: folders.repo_roots });
+          return ['repo:example-labs/api'];
+        },
+        mounts: async () => mounts,
+      },
+      intervals: { ...intervals, factsMs: 3_600_000 },
+    });
+    await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the first status');
+    const st = relay.memberStatus.get('bob')!;
+    expect(st.sources).toEqual({ boundaries_version: relay.boundaries.version, missing: ['repo:example-labs/api'] });
+    expect(seen[0]).toEqual({ keys: ['api', '1ExampleFolderClients0000000000a'], roots: [] });
+    // The mounts changing (a shared drive appears) works it out again at once, not 10 minutes later.
+    const before = seen.length;
+    mounts = 'two';
+    await waitFor(() => seen.length > before, 5_000, 'missing worked out again');
+    ac.abort();
+    await done;
+  });
+
+  it('PICKERS-SPEC §3.3: an M10 document is used too; the default search finds nothing on an empty Mac and names only the team\'s items', async () => {
+    relay.setBoundaries({ topic: 'T', github_orgs: ['Example-Org'], drives: [{ domain: 'example.com', shared_drive: 'Team Drive' }], member_folders: false });
+    const { make } = fakeHosts();
+    const ac = new AbortController();
+    const { missing: _m, mounts: _n, ...plain } = facts as typeof facts & { missing?: unknown; mounts?: unknown };
+    const done = runDaemon({ env: env(), log: (l) => logs.push(l), dist: DIST, version: '1', signal: ac.signal, makeHost: make, selfTest: async () => PASSED, facts: plain, intervals });
+    await waitFor(() => (relay.memberStatus.get('bob') as { sources?: unknown } | undefined)?.sources, 10_000, 'a status with sources');
+    expect(relay.memberStatus.get('bob')!.sources).toEqual({ boundaries_version: relay.boundaries.version, missing: ['org:example-org', 'drive:example.com/Team Drive'] });
+    expect(JSON.stringify(relay.memberStatus.get('bob'))).not.toContain(tmp);
+    ac.abort();
+    await done;
+  });
+
   it('the self-test runs at start, then on its interval', async () => {
     const { make } = fakeHosts();
     let runs = 0;

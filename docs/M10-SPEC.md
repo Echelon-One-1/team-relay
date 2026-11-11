@@ -36,6 +36,18 @@ Endpoints (the contract relay, plugin and console share):
 members see it read-only); the create-team dialog links to it straight after creating. Console route
 `PUT /api/boundaries` under the existing write rules (same-origin, JSON, body cap, per-route check).
 
+(Correction, 11 Nov 2026, docs/PICKERS-SPEC.md §2-§3: owners now **pick** exact sources. The
+document gains `github_repos` (≤100 `{org, repo, id}`: single repositories; one whose org is in
+`github_orgs` is dropped, the whole org covers it) and `drive_folders` (≤20 `{domain, drive_id,
+folder_id, folder_name, drive_name}`: shared-drive folders, or a whole shared drive when `folder_id
+== drive_id`), both answered with their own `since` maps. The PUT body must hold all six fields
+(`topic`, `github_orgs`, `github_repos`, `drive_folders`, `drives`, `member_folders`); an M10-shaped
+body is 400. `drives` is now **legacy**: a PUT may keep an entry the stored document holds, never add
+one (`400 legacy_drive`); the version is checked first, so a stale save is `409 version_conflict`.
+RELAY_GITHUB_ORGS and RELAY_ALLOWED_SHARED_DRIVES, when set, refuse other orgs and drives
+(`org_not_allowed`, `drive_not_allowed`) and hide stored ones. A document stored before reads with
+empty new lists and the same version; the console's PUT body cap is 160 KiB.)
+
 ## 2. What each member's answerer may read
 
 The plugin fetches the team's boundaries when it starts and before each answer (a run uses one
@@ -54,6 +66,14 @@ The allowed set, recomputed per run:
 
 Always out, at any depth: the credential deny list (M4/M8, unchanged) and the sensitive names list
 (M8 §7.1).
+
+(Correction, 11 Nov 2026, docs/PICKERS-SPEC.md §6: 1. also takes a clone whose origin is
+`github.com/<org>/<repo>` of a `github_repos` entry, git-tracked files only as above. 2. also takes,
+for each `drive_folders` entry, the folder found under `Shared drives` of an account in the entry's
+domain by its Drive item id (the extended attribute `com.google.drivefs.item-id#S`, read with
+`/usr/bin/xattr`; never a symlink), not by name: the drive root by `drive_id`, a subfolder by name
+hint then id. Name matching stays only for legacy `drives` entries. A Mac never calls GitHub or the
+Drive API to find a source; one not found locally is skipped and reported as missing by its key.)
 
 ### 2a. Native Google Docs, Sheets and Slides
 
@@ -75,6 +95,12 @@ Always out, at any depth: the credential deny list (M4/M8, unchanged) and the se
 - Shared drive identity: the host resolves the allowed drive's id by name with `drives.list` (as the
   member) and compares it with the file's `driveId`; the link file must also sit under the mount of
   an account in the team's domain.
+  (Correction, 11 Nov 2026, docs/PICKERS-SPEC.md §6.2: for a picked folder the link file's real
+  path must be under that folder, and the file's `driveId` must equal the id read locally from the
+  shared drive root's attribute; no `drives.list` by name. The `drives.list` check above stays for
+  legacy name entries only. The Drive Desktop client is unchanged; the console's Drive folder
+  picker uses its own Web client with scope `drive.file`, in the owner's browser only, served
+  through `GET /v1/teams/{team}/sources/config` to owners.)
 
 The member's directory entry shows what they can answer from (repo names, drive names, folder names),
 so teammates know whom to ask.
@@ -211,6 +237,10 @@ all its data.
    count the lists as sent, before de-duplication; unknown fields refused. Python and Node may
    know different Unicode versions, so a character assigned in one and unassigned in the other
    can be judged differently; the relay is the authority, and the vectors hold no such character.
+   (Correction, 11 Nov 2026: the topic and the picked folder and drive names are no longer checked
+   for unassigned code points on any side, and the vectors now hold such characters on purpose:
+   a new emoji passed the console and failed at the relay. Legacy `shared_drive` names keep the
+   check; see PICKERS-SPEC.)
 6. Boundaries never read (relay unreachable at start) → questions are declined with the fixed busy
    text; never an approval item.
 7. Behind a load balancer every per-address limit uses the configured hop count:

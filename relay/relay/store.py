@@ -46,9 +46,10 @@ that need a transaction live in exactly one primitive each:
 - :meth:`Store.set_acceptance`: read the team, its boundaries, the member's acceptance and roster
   entry, run a pure function, count the quotas, and write the acceptance and the audit, in one
   transaction (M11-SPEC §2). The version check lives in that function.
-- :meth:`Store.set_member_status`: read the team, the member's status and roster entry, run a
-  pure function, and write the new status, in one transaction (M11-SPEC §3). The 20-second
-  rule lives in that function.
+- :meth:`Store.set_member_status`: read the team, the member's status and roster entry and the
+  team's boundaries, run a pure function, and write the new status, in one transaction
+  (M11-SPEC §3). The 20-second rule, and keeping only missing-source keys of the current
+  boundaries' items (PICKERS-SPEC §3.3), live in that function.
 
 A member's acceptance and status (M11-SPEC §2, §3) leave with the member: the roster
 transaction that removes a member deletes both; and with the team (the purge).
@@ -422,6 +423,31 @@ class DriveBoundary:
     shared_drive: str
 
 
+@dataclass(frozen=True)
+class RepoBoundary:
+    """PICKERS-SPEC §2.1: one GitHub repository, matched by a clone's origin
+    ``github.com/<org>/<repo>``. ``id`` is GitHub's repository id from the relay's listing, or
+    None when the owner pasted it (not checked against GitHub)."""
+
+    org: str
+    repo: str
+    id: int | None
+
+
+@dataclass(frozen=True)
+class FolderBoundary:
+    """PICKERS-SPEC §2.1: one folder of a shared drive (``folder_id == drive_id``: the whole
+    shared drive), matched on a member's Mac by its Drive id. ``drive_id`` None: pasted as a
+    link (not checked); ``folder_name`` is display text and a search hint, never a path;
+    ``drive_name`` None when it could not be read."""
+
+    domain: str
+    drive_id: str | None
+    folder_id: str
+    folder_name: str
+    drive_name: str | None
+
+
 @dataclass
 class TeamBoundaries:
     """``teams/{team}/settings/boundaries``: what a team's members answer about and from. The
@@ -431,6 +457,7 @@ class TeamBoundaries:
     version: int
     topic: str
     github_orgs: list[str]
+    # M10 name-matched drives; since PICKERS-SPEC §2.1 a write may keep these, never add one.
     drives: list[DriveBoundary]
     member_folders: bool
     updated_at: datetime
@@ -441,6 +468,12 @@ class TeamBoundaries:
     org_since: dict[str, int]
     drive_since: dict[DriveBoundary, int]
     member_folders_since: int | None
+    # PICKERS-SPEC §2.4: picked repositories and shared-drive folders, with their ``since`` by
+    # lower-case ``org/repo`` and by folder id. A document stored before them reads as empty.
+    github_repos: list[RepoBoundary] = field(default_factory=list)
+    drive_folders: list[FolderBoundary] = field(default_factory=list)
+    repo_since: dict[str, int] = field(default_factory=dict)
+    folder_since: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -479,8 +512,10 @@ class AcceptanceChange[T]:
 @dataclass
 class MemberStatus:
     """``teams/{team}/member_status/{member}``: what the member's background answerer last
-    reported (counts, booleans and times only, as validated) and when the relay received it
-    (``seen_at``, the relay's clock). Overwritten; removed with the member and the team."""
+    reported (counts, booleans and times only, as validated; since PICKERS-SPEC §3.3 also
+    ``sources``: keys of the team's own boundary items its Mac could not find) and when the
+    relay received it (``seen_at``, the relay's clock). Overwritten; removed with the member
+    and the team."""
 
     status: dict[str, Any]
     seen_at: datetime
@@ -808,8 +843,11 @@ type BoundariesFn[T] = Callable[[TeamBoundaries | None, RosterEntry | None], Bou
 type AcceptanceFn[T] = Callable[
     [TeamBoundaries | None, Acceptance | None, RosterEntry | None], AcceptanceChange[T]
 ]
-# The member's status (None when none) and roster entry (None when absent).
-type StatusFn[T] = Callable[[MemberStatus | None, RosterEntry | None], StatusChange[T]]
+# The member's status (None when none), roster entry (None when absent) and the team's
+# boundaries (None when never set).
+type StatusFn[T] = Callable[
+    [MemberStatus | None, RosterEntry | None, TeamBoundaries | None], StatusChange[T]
+]
 
 
 class Store(Protocol):
@@ -1076,8 +1114,8 @@ class Store(Protocol):
 
     async def set_member_status[T](self, team: str, member: str, fn: StatusFn[T]) -> T:
         """Read the team (a deleted one raises :class:`TeamGone`, nothing written),
-        ``member``'s status and roster entry; run ``fn`` (pure; raising writes nothing); write
-        the status it returns whole; one transaction."""
+        ``member``'s status and roster entry and the team's boundaries; run ``fn`` (pure;
+        raising writes nothing); write the status it returns whole; one transaction."""
         ...
 
     async def get_account(self, email_sha256: str) -> AccountRecord | None: ...

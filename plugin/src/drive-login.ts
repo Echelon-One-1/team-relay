@@ -349,18 +349,18 @@ export async function startDriveConnect(opts: DriveConnectOptions): Promise<Driv
 }
 
 /**
- * The domain to connect for: the one Drive domain in the team's boundaries, or the domain of
- * `loginHint` when it is one of several.
+ * The domain to connect for: the one Drive domain of the team's picked Drive folders and shared
+ * drives (PICKERS-SPEC §6.2), or the domain of `loginHint` when it is one of several.
  */
 export function teamDriveDomain(drives: Array<{ domain: string }> | null | undefined, loginHint?: string): string {
   const domains = [...new Set((drives ?? []).map((d) => d.domain).filter(isDomain))];
-  if (domains.length === 0) throw new DriveConnectError('your team has no shared Google Drive in its boundaries, so there is nothing to connect');
+  if (domains.length === 0) throw new DriveConnectError('your team has no shared Google Drive or Drive folder in its boundaries, so there is nothing to connect');
   if (loginHint) {
     const d = domains.find((x) => emailInDomain(loginHint, x));
     if (!d) throw new DriveConnectError(`that account is not in your team's Drive domain (${domains.join(', ')})`);
     return d;
   }
-  if (domains.length > 1) throw new DriveConnectError(`your team's drives are in several domains (${domains.join(', ')}): run /team-relay:drive connect <your email>`);
+  if (domains.length > 1) throw new DriveConnectError(`your team's Drive folders and drives are in several domains (${domains.join(', ')}): run /team-relay:drive connect <your email>`);
   return domains[0]!;
 }
 

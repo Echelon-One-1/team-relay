@@ -1,4 +1,4 @@
-// M10-SPEC §1: a team's boundaries in the console. GET /api/boundaries reads them (any member);
+// M10-SPEC §1 and PICKERS-SPEC §2.1, §3.2: a team's boundaries in the console. GET /api/boundaries reads them (any member);
 // PUT /api/boundaries replaces them (owners) under every write rule the other changes follow:
 // the method, Sec-Fetch-Site: same-origin, a JSON content type, no query but `team`, a body cap
 // and a strict per-route body check (checkSetBoundaries) before anything reaches the relay. The
@@ -22,7 +22,9 @@ import {
   relayBackend,
   type ConsoleServer,
 } from '../src/console-app.js';
-import { DemoAccount } from '../src/console-demo.js';
+import { normaliseBoundaries } from '../src/boundaries-rule.js';
+import type { Boundaries } from '../src/boundaries-types.js';
+import { DEMO_BOUNDARIES, DemoAccount } from '../src/console-demo.js';
 import { RelayClient } from '../src/relay-client.js';
 import { PLACEHOLDERS, VECTORS } from './helpers/vectors.js';
 
@@ -32,12 +34,23 @@ const PUBLIC_HOST = 'team.example.com';
 const SALT = 'a-salt-of-at-least-32-characters-0123';
 const SAME_ORIGIN = { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'same-origin' };
 
-const GOOD = {
+const DRIVE_ID = '0AExampleDriveId0PVA';
+const FOLDER_ID = '1ExampleFolderIdxxxxxxxxxxxxxxxxx';
+/** A document with no legacy drive: one any owner may PUT, stored or not. */
+const GOOD: Boundaries = {
   topic: 'Example Co: our clients and their delivery, our products and tools.',
   github_orgs: ['Example-Org'],
-  drives: [{ domain: 'example.com', shared_drive: 'Example Team Drive' }],
+  github_repos: [{ org: 'example-labs', repo: 'api', id: 123456 }],
+  drive_folders: [
+    { domain: 'example.com', drive_id: DRIVE_ID, folder_id: DRIVE_ID, folder_name: 'Example Team Drive', drive_name: 'Example Team Drive' },
+    { domain: 'example.com', drive_id: DRIVE_ID, folder_id: FOLDER_ID, folder_name: 'Clients / 2026', drive_name: null },
+  ],
+  drives: [],
   member_folders: true,
 };
+const LEGACY = { domain: 'example.com', shared_drive: 'Example Team Drive' };
+const REPO = GOOD.github_repos[0]!;
+const FOLDER = GOOD.drive_folders[1]!;
 
 type Res = { status: number; body: string; headers: IncomingMessage['headers']; json: () => any };
 
@@ -56,17 +69,21 @@ function call(port: number, path: string, opts: { method?: string; host?: string
   });
 }
 
-describe('checkSetBoundaries (M10-SPEC §1)', () => {
-  it('accepts a full document, trims the topic, and drops duplicates', () => {
+describe('checkSetBoundaries (M10-SPEC §1, PICKERS-SPEC §2.1)', () => {
+  it('accepts a full document and sends it on as the relay stores it: topic trimmed, duplicates and repositories of whole orgs dropped', () => {
     const out = checkSetBoundaries({
       version: 3,
       boundaries: {
         topic: '  Example Co: delivery.\nAnd tools.  ',
         github_orgs: ['Example-Org', 'example-org', 'other-org'],
-        drives: [
-          { domain: 'example.com', shared_drive: 'Team Drive' },
-          { domain: 'example.com', shared_drive: 'Team Drive' },
+        github_repos: [
+          { org: 'example-labs', repo: 'API', id: 123456 },
+          { org: 'Example-Labs', repo: 'api', id: null },
+          { org: 'EXAMPLE-ORG', repo: 'covered-by-the-org', id: 7 },
+          { org: 'example-labs', repo: 'web', id: null },
         ],
+        drive_folders: [FOLDER, { ...FOLDER, folder_name: 'Same id, other name' }, GOOD.drive_folders[0]!],
+        drives: [LEGACY, LEGACY],
         member_folders: false,
       },
     });
@@ -75,12 +92,28 @@ describe('checkSetBoundaries (M10-SPEC §1)', () => {
       boundaries: {
         topic: 'Example Co: delivery.\nAnd tools.',
         github_orgs: ['Example-Org', 'other-org'],
-        drives: [{ domain: 'example.com', shared_drive: 'Team Drive' }],
+        github_repos: [
+          { org: 'example-labs', repo: 'API', id: 123456 },
+          { org: 'example-labs', repo: 'web', id: null },
+        ],
+        drive_folders: [FOLDER, GOOD.drive_folders[0]],
+        drives: [LEGACY],
         member_folders: false,
       },
     });
     // Empty lists are allowed (a team on Drive only, or on repositories only).
-    expect(checkSetBoundaries({ version: 0, boundaries: { ...GOOD, github_orgs: [], drives: [] } }).boundaries.github_orgs).toEqual([]);
+    const empty = { ...GOOD, github_orgs: [], github_repos: [], drive_folders: [], drives: [] };
+    expect(checkSetBoundaries({ version: 0, boundaries: empty }).boundaries).toEqual(empty);
+    // Pasted entries carry no id: a repository's id and a folder's drive id may be null.
+    const pasted = { ...GOOD, github_repos: [{ ...REPO, id: null }], drive_folders: [{ ...FOLDER, drive_id: null }] };
+    expect(checkSetBoundaries({ version: 0, boundaries: pasted }).boundaries).toEqual(pasted);
+  });
+
+  it('PICKERS-SPEC §3.2: a document of the M10 shape (no github_repos, no drive_folders) is refused, naming the missing field', () => {
+    const { github_repos: _r, drive_folders: _f, ...m10 } = GOOD;
+    expect(() => checkSetBoundaries({ version: 0, boundaries: m10 })).toThrow(/^github_repos must be a list$/);
+    expect(() => checkSetBoundaries({ version: 0, boundaries: { ...m10, github_repos: [] } })).toThrow(/^drive_folders must be a list$/);
+    for (const doc of VECTORS.m10_documents) expect(() => checkSetBoundaries({ version: 0, boundaries: doc })).toThrow(BodyError);
   });
 
   const bad: Array<[string, unknown]> = [
@@ -135,6 +168,28 @@ describe('checkSetBoundaries (M10-SPEC §1)', () => {
     ],
     ['member_folders not a boolean', { version: 0, boundaries: { ...GOOD, member_folders: 'yes' } }],
     ['no member_folders', { version: 0, boundaries: { ...GOOD, member_folders: undefined } }],
+    ['no github_repos', { version: 0, boundaries: { ...GOOD, github_repos: undefined } }],
+    ['no drive_folders', { version: 0, boundaries: { ...GOOD, drive_folders: undefined } }],
+    ['a repository with an unknown field', { version: 0, boundaries: { ...GOOD, github_repos: [{ ...REPO, url: 'x' }] } }],
+    ['a repository without an id', { version: 0, boundaries: { ...GOOD, github_repos: [{ org: 'a', repo: 'b' }] } }],
+    ['a repository id as a string', { version: 0, boundaries: { ...GOOD, github_repos: [{ ...REPO, id: '1' }] } }],
+    ['a repository id of 0', { version: 0, boundaries: { ...GOOD, github_repos: [{ ...REPO, id: 0 }] } }],
+    ['a repository id over 2^53-1', { version: 0, boundaries: { ...GOOD, github_repos: [{ ...REPO, id: 2 ** 53 }] } }],
+    ['a repository name of dots', { version: 0, boundaries: { ...GOOD, github_repos: [{ ...REPO, repo: '..' }] } }],
+    ['a repository name with a slash', { version: 0, boundaries: { ...GOOD, github_repos: [{ ...REPO, repo: 'a/b' }] } }],
+    ['a repository of a bad org', { version: 0, boundaries: { ...GOOD, github_repos: [{ ...REPO, org: '-x' }] } }],
+    ['101 repositories', { version: 0, boundaries: { ...GOOD, github_repos: Array.from({ length: 101 }, (_, i) => ({ org: 'example-labs', repo: `r${i}`, id: i + 1 })) } }],
+    ['a folder with an unknown field', { version: 0, boundaries: { ...GOOD, drive_folders: [{ ...FOLDER, path: '/x' }] } }],
+    ['a folder without drive_name', { version: 0, boundaries: { ...GOOD, drive_folders: [{ domain: 'example.com', drive_id: null, folder_id: FOLDER_ID, folder_name: 'C' }] } }],
+    ['a folder id too short', { version: 0, boundaries: { ...GOOD, drive_folders: [{ ...FOLDER, folder_id: 'short' }] } }],
+    ['a folder id with a slash', { version: 0, boundaries: { ...GOOD, drive_folders: [{ ...FOLDER, folder_id: `${FOLDER_ID}/x` }] } }],
+    ['a drive id that is empty', { version: 0, boundaries: { ...GOOD, drive_folders: [{ ...FOLDER, drive_id: '' }] } }],
+    ['a folder name with a newline', { version: 0, boundaries: { ...GOOD, drive_folders: [{ ...FOLDER, folder_name: 'a\nb' }] } }],
+    ['a folder name with trailing space', { version: 0, boundaries: { ...GOOD, drive_folders: [{ ...FOLDER, folder_name: 'Clients ' }] } }],
+    ['a folder name of 256 characters', { version: 0, boundaries: { ...GOOD, drive_folders: [{ ...FOLDER, folder_name: 'f'.repeat(256) }] } }],
+    ['a picked drive name of 101 characters', { version: 0, boundaries: { ...GOOD, drive_folders: [{ ...FOLDER, drive_name: 'd'.repeat(101) }] } }],
+    ['an upper-case folder domain', { version: 0, boundaries: { ...GOOD, drive_folders: [{ ...FOLDER, domain: 'Example.com' }] } }],
+    ['21 folders', { version: 0, boundaries: { ...GOOD, drive_folders: Array.from({ length: 21 }, () => FOLDER) } }],
   ];
   it.each(bad)('refuses %s', (_why, raw) => {
     const body = JSON.parse(JSON.stringify(raw ?? null)) as unknown;
@@ -143,6 +198,11 @@ describe('checkSetBoundaries (M10-SPEC §1)', () => {
 
   it('accepts the largest version, 2^31-1', () => {
     expect(checkSetBoundaries({ version: 2 ** 31 - 1, boundaries: GOOD }).version).toBe(2 ** 31 - 1);
+  });
+
+  it('counts names in characters, not bytes (a folder name of 255 characters outside the BMP passes)', () => {
+    const name = '\u{1F4C1}'.repeat(255);
+    expect(checkSetBoundaries({ version: 0, boundaries: { ...GOOD, drive_folders: [{ ...FOLDER, folder_name: name }] } }).boundaries.drive_folders[0]!.folder_name).toBe(name);
   });
 
   it('counts the topic in characters, not bytes (500 non-ASCII characters pass)', () => {
@@ -172,7 +232,15 @@ describe('local console: /api/boundaries on the demo account', () => {
     const b = r.json();
     expect(b.team).toBe('demo');
     expect(b.version).toBeGreaterThanOrEqual(1);
-    expect(b.boundaries).toMatchObject({ github_orgs: expect.any(Array), drives: expect.any(Array), member_folders: expect.any(Boolean) });
+    expect(b.boundaries).toMatchObject({
+      github_orgs: expect.any(Array),
+      github_repos: expect.any(Array),
+      drive_folders: expect.any(Array),
+      drives: expect.any(Array),
+      member_folders: expect.any(Boolean),
+    });
+    expect(b.boundaries).toEqual(DEMO_BOUNDARIES);
+    expect(Object.keys(b.since).sort()).toEqual(['drive_folders', 'drives', 'github_orgs', 'github_repos', 'member_folders']);
     expect(typeof b.boundaries.topic).toBe('string');
     const research = await local('/api/boundaries?team=research');
     expect(research.json()).toEqual({ team: 'research', version: 0, boundaries: null, since: null, updated_at: null, updated_by: null });
@@ -192,6 +260,50 @@ describe('local console: /api/boundaries on the demo account', () => {
     expect(stale.status).toBe(502);
     expect(stale.json()).toMatchObject({ error: 'relay_refused', relay_status: 409, relay_error: 'version_conflict' });
     expect((await local('/api/boundaries?team=research')).json()).toMatchObject({ version: 1, boundaries: { member_folders: true } });
+  });
+
+  it('PUT: legacy drives matched by name can be kept (with their since) or removed, never added (400 legacy_drive)', async () => {
+    const read = (await local('/api/boundaries')).json();
+    const kept = DEMO_BOUNDARIES.drives[0]!;
+    const keep = await put('/api/boundaries', { version: read.version, boundaries: { ...DEMO_BOUNDARIES, topic: 'Example Co: everything.' } });
+    expect(keep.status).toBe(200);
+    expect(keep.json().boundaries.drives).toEqual([kept]);
+    expect(keep.json().since.drives).toEqual(read.since.drives);
+    expect(keep.json().since.github_repos).toEqual(read.since.github_repos);
+    // A new name, or the kept one under another domain: refused, and nothing changes.
+    for (const drives of [[kept, LEGACY], [{ ...kept, domain: 'example.org' }]]) {
+      const add = await put('/api/boundaries', { version: keep.json().version, boundaries: { ...DEMO_BOUNDARIES, drives } });
+      expect(add.status).toBe(502);
+      expect(add.json()).toMatchObject({ error: 'relay_refused', relay_status: 400, relay_error: 'legacy_drive' });
+    }
+    // A team that never had any: none can be added.
+    const fresh = await put('/api/boundaries?team=research', { version: 0, boundaries: { ...GOOD, drives: [LEGACY] } });
+    expect(fresh.json()).toMatchObject({ relay_status: 400, relay_error: 'legacy_drive' });
+    // Removing it works; adding it back afterwards does not.
+    const removed = await put('/api/boundaries', { version: keep.json().version, boundaries: { ...DEMO_BOUNDARIES, drives: [] } });
+    expect(removed.status).toBe(200);
+    expect(removed.json().boundaries.drives).toEqual([]);
+    const back = await put('/api/boundaries', { version: removed.json().version, boundaries: DEMO_BOUNDARIES });
+    expect(back.json()).toMatchObject({ relay_status: 400, relay_error: 'legacy_drive' });
+  });
+
+  it('PUT: the demo relay stores the document as the relay does, with since by PICKERS-SPEC §2.3', async () => {
+    const read = (await local('/api/boundaries')).json();
+    // The whole org narrowed to one of its repositories keeps the org's since (rule 2); a new
+    // folder of a whole drive keeps the drive's since (rule 3); a brand-new repository is new.
+    const next = {
+      ...DEMO_BOUNDARIES,
+      github_orgs: [],
+      github_repos: [...DEMO_BOUNDARIES.github_repos, { org: 'example-org', repo: 'payments', id: 100102 }, { org: 'example-tools', repo: 'cli', id: null }],
+      drive_folders: [...DEMO_BOUNDARIES.drive_folders, { domain: 'example.com', drive_id: DEMO_BOUNDARIES.drive_folders[0]!.drive_id, folder_id: FOLDER_ID.replace('1', '2'), folder_name: 'Runbooks', drive_name: null }],
+    };
+    const r = await put('/api/boundaries', { version: read.version, boundaries: next });
+    expect(r.status).toBe(200);
+    const v = r.json().version;
+    expect(v).toBe(read.version + 1);
+    expect(r.json().since.github_repos).toEqual({ 'example-labs/api': read.since.github_repos['example-labs/api'], 'example-org/payments': read.since.github_orgs['example-org'], 'example-tools/cli': v });
+    expect(r.json().since.drive_folders[FOLDER_ID.replace('1', '2')]).toBe(read.since.drive_folders[DEMO_BOUNDARIES.drive_folders[0]!.folder_id]);
+    expect(r.json().boundaries).toEqual(normaliseBoundaries(next));
   });
 
   it('PUT: a member (not an owner) is refused as the relay refuses (403)', async () => {
@@ -238,20 +350,42 @@ describe('local console: /api/boundaries on the demo account', () => {
     expect(other.json()).toMatchObject({ error: 'not_on_team', team: 'ops' });
   });
 
-  it('the cap fits the largest valid document', () => {
+  it('the cap fits the largest valid document, every character that is not ASCII escaped', () => {
+    const wide = '\u{1F600}';
+    const domain = (i: number) => `${'d'.repeat(63)}.${'e'.repeat(63)}.${'f'.repeat(63)}.${'g'.repeat(48)}.example${i}.com`;
     const widest = {
       version: 2 ** 31 - 1,
       boundaries: {
-        topic: '\u{1F600}'.repeat(500),
+        topic: wide.repeat(500),
         github_orgs: Array.from({ length: 10 }, (_, i) => `${'o'.repeat(37)}-${i}`),
-        drives: Array.from({ length: 10 }, (_, i) => ({ domain: `${'d'.repeat(60)}.${'e'.repeat(60)}.${'f'.repeat(60)}.example${i}.com`, shared_drive: `${'"'.repeat(98)}${i}` })),
+        github_repos: Array.from({ length: 100 }, (_, i) => ({ org: `${'p'.repeat(35)}-${String(i).padStart(3, '0')}`, repo: `${'r'.repeat(97)}${String(i).padStart(3, '0')}`, id: Number.MAX_SAFE_INTEGER })),
+        drive_folders: Array.from({ length: 20 }, (_, i) => ({
+          domain: domain(i % 10),
+          drive_id: `${'x'.repeat(197)}${String(i).padStart(3, '0')}`,
+          folder_id: `${'y'.repeat(197)}${String(i).padStart(3, '0')}`,
+          folder_name: wide.repeat(255),
+          drive_name: wide.repeat(100),
+        })),
+        drives: Array.from({ length: 10 }, (_, i) => ({ domain: domain(i), shared_drive: `${wide.repeat(99)}${i}` })),
         member_folders: true,
       },
     };
+    expect(domain(9).length).toBe(253);
     // Escaped as a browser's JSON.stringify would not, every non-ASCII character as \\uXXXX.
-    const text = JSON.stringify(widest).replace(/[\u0080-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+    const text = JSON.stringify(widest).replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
     expect(() => checkSetBoundaries(JSON.parse(text))).not.toThrow();
     expect(Buffer.byteLength(text)).toBeLessThanOrEqual(BOUNDARIES_BODY_LIMIT);
+    // PICKERS-SPEC §3.2's 64 KiB would refuse it, escaped or not.
+    expect(Buffer.byteLength(JSON.stringify(widest))).toBeGreaterThan(64 * 1024);
+  });
+
+  it('a body over the cap is 413 and never reaches the relay', async () => {
+    const over = JSON.stringify({ version: 0, boundaries: { ...GOOD, topic: 'x'.repeat(BOUNDARIES_BODY_LIMIT) } });
+    const before = (await local('/api/boundaries')).json().version;
+    const r = await put('/api/boundaries', over);
+    expect(r.status).toBe(413);
+    expect(r.json()).toEqual({ error: 'too_large', detail: `at most ${BOUNDARIES_BODY_LIMIT} bytes` });
+    expect((await local('/api/boundaries')).json().version).toBe(before);
   });
 });
 
@@ -275,6 +409,33 @@ describe('checkSetBoundaries follows schema/boundaries-vectors.json (M10-SPEC §
 
   it.each(invalid)('refuses: %s', (_why, b) => {
     expect(() => checkSetBoundaries({ version: 0, boundaries: b })).toThrow(BodyError);
+  });
+
+  // PICKERS-SPEC §3: a refusal names the field at fault and never the value.
+  const leaves = (v: unknown): string[] =>
+    typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(leaves) : v && typeof v === 'object' ? Object.values(v).flatMap(leaves) : [];
+  const FIELD_NAMES = ['topic', 'github_orgs', 'github_repos', 'drive_folders', 'drives', 'member_folders'];
+  it.each(vectors.invalid.map((v) => [v.why, v.field, v.boundaries] as const))('names the field and never the value: %s', (_why, field, b) => {
+    let message = '';
+    try {
+      checkSetBoundaries({ version: 0, boundaries: b });
+    } catch (err) {
+      expect(err).toBeInstanceOf(BodyError);
+      message = (err as Error).message;
+    }
+    if (field === null) expect(message).toMatch(/^unknown field /);
+    else expect(message.startsWith(`${field} must `) || message.startsWith(`${field}: `), message).toBe(true);
+    for (const s of leaves(b)) {
+      if (s.length >= 4 && !FIELD_NAMES.includes(s)) expect(message, s).not.toContain(s);
+    }
+  });
+
+  it.each(vectors.normalised.map((v) => [v.why, v.boundaries, v.expect] as const))('sends on what the relay stores: %s', (_why, b, expected) => {
+    expect(checkSetBoundaries({ version: 0, boundaries: b }).boundaries).toEqual(expected);
+  });
+
+  it.each(vectors.m10_documents.map((d, i) => [i, d] as const))('refuses M10 document %i as a PUT body', (_i, d) => {
+    expect(() => checkSetBoundaries({ version: 0, boundaries: d })).toThrow(BodyError);
   });
 
   it.each(vectors.versions.valid.map((v) => [JSON.stringify(v), v] as const))('accepts version %s', (_s, v) => {
