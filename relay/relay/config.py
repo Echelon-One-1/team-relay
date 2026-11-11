@@ -133,6 +133,22 @@ def parse_allowed_domains(raw: str | None) -> frozenset[str]:
     return frozenset(entries)
 
 
+# The sign-in page's brand (docs/SIGNIN-PAGE.md): 1 to 40 ASCII letters, digits, spaces and
+# & . , ' -, not starting or ending with a space. Shown escaped all the same.
+BRAND_NAME_RE = re.compile(r"[A-Za-z0-9&.,'-](?:[A-Za-z0-9 &.,'-]{0,38}[A-Za-z0-9&.,'-])?")
+
+
+def parse_brand_name(raw: str) -> str:
+    """``RELAY_BRAND_NAME``: the name the sign-in page shows, else a startup error (which
+    never quotes the value)."""
+    if not isinstance(raw, str) or BRAND_NAME_RE.fullmatch(raw) is None:
+        raise ConfigError(
+            "RELAY_BRAND_NAME must be 1 to 40 letters, digits, spaces and & . , ' - "
+            "(no other characters), not starting or ending with a space"
+        )
+    return raw
+
+
 def fold_team_name(name: str) -> str:
     """What two team names are compared by (M9-SPEC §7.2): case folded, whitespace runs
     folded to one space, surrounding whitespace dropped."""
@@ -693,8 +709,12 @@ class Settings:
     # it and ``public_url``, read once at start; None: ``GET /setup`` is 404.
     plugin_marketplace: str | None = None
     setup_script: str | None = None
+    # The sign-in page (docs/SIGNIN-PAGE.md): RELAY_BRAND_NAME, or None for the generic copy.
+    brand_name: str | None = None
 
     def __post_init__(self) -> None:
+        if self.brand_name is not None:
+            parse_brand_name(self.brand_name)
         if self.forwarded_for_hops not in FORWARDED_FOR_HOPS:
             raise ConfigError("RELAY_FORWARDED_FOR_HOPS must be 1, 2 or 3")
         if (
@@ -754,6 +774,8 @@ class Settings:
         marketplace = (
             setup_scripts.parse_plugin_marketplace(marketplace_raw) if marketplace_raw else None
         )
+        brand_raw = env.get("RELAY_BRAND_NAME") or None
+        brand = parse_brand_name(brand_raw) if brand_raw else None
         script = None
         if marketplace is not None and public_url is not None:
             script = setup_scripts.load_setup_script(
@@ -770,4 +792,5 @@ class Settings:
             forwarded_for_hops=parse_forwarded_for_hops(hops_raw) if hops_raw is not None else 1,
             plugin_marketplace=marketplace,
             setup_script=script,
+            brand_name=brand,
         )

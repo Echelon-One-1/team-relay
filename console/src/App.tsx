@@ -20,6 +20,7 @@ import { NavContext, TeamContext, useNav, type ConsoleFocus, type ConsoleView, t
 import { useNow } from '@/hooks/use-now'
 import { sortedRequests } from '@/lib/activity'
 import { isOwner } from '@/lib/roster'
+import { SETUP_STEPS } from '@/lib/setup'
 import { effectiveRequest } from '@/lib/steps'
 import { pickTeam, rememberTeam } from '@/lib/teams'
 
@@ -122,14 +123,30 @@ export function Console() {
 
 /**
  * The view from the address: /admin is the admin page (M9 §4), /join the Join checklist and /ask
- * the Ask page (M11), anything else the team. (/setup is the relay's setup script on the same host.)
+ * the Ask page (M11), /team and anything else the team (the local console opens at /). On the
+ * hosted address / and /login are the relay's sign-in page and /setup its setup script
+ * (docs/SIGNIN-PAGE.md); the page's button leads to /start (see startRequested).
  */
 function viewFromLocation(): ConsoleView {
-  const m = /\/(admin|join|ask)\/?$/.exec(window.location.pathname)
+  const m = /\/(admin|join|ask|team)\/?$/.exec(window.location.pathname)
   return m ? (m[1] as ConsoleView) : 'team'
 }
 
-function useView(): [ConsoleView, (v: ConsoleView) => void] {
+/** Whether the address is /start: where the sign-in page leads, until the setup state is known. */
+function startRequested(): boolean {
+  return /\/start\/?$/.test(window.location.pathname)
+}
+
+/** The address of `v`, relative to where the page is served, with the query and no fragment. */
+function viewAddress(v: ConsoleView): string {
+  const target = new URL(v, window.location.href)
+  target.search = window.location.search
+  // The local console's key stays out of the address.
+  target.hash = ''
+  return target.pathname + target.search
+}
+
+function useView(): [ConsoleView, (v: ConsoleView) => void, (v: ConsoleView) => void] {
   const [view, setViewState] = useState<ConsoleView>(viewFromLocation)
   useEffect(() => {
     const onPop = () => setViewState(viewFromLocation())
@@ -138,18 +155,38 @@ function useView(): [ConsoleView, (v: ConsoleView) => void] {
   }, [])
   const setView = useCallback((v: ConsoleView) => {
     setViewState(v)
-    if (viewFromLocation() === v) return
+    if (viewFromLocation() === v && !startRequested()) return
     try {
-      // Relative to where the page is served (the local console's key stays out of the address).
-      const target = new URL(v === 'team' ? './' : v, window.location.href)
-      target.search = window.location.search
-      target.hash = ''
-      window.history.pushState(window.history.state, '', target.pathname + target.search)
+      window.history.pushState(window.history.state, '', viewAddress(v))
     } catch {
       // A sandboxed document may refuse; the view still changes.
     }
   }, [])
-  return [view, setView]
+  // The same, in place of the current entry (/start leaves no entry to come back to).
+  const replaceView = useCallback((v: ConsoleView) => {
+    setViewState(v)
+    try {
+      window.history.replaceState(window.history.state, '', viewAddress(v))
+    } catch {
+      // A sandboxed document may refuse; the view still changes.
+    }
+  }, [])
+  return [view, setView, replaceView]
+}
+
+/**
+ * /start (docs/SIGNIN-PAGE.md): the loading state until the viewer's own setup is known (the data
+ * the Setup tab shows), then `/join` while it is not done, else `/ask`. A setup that cannot be read
+ * goes to /join, which says why.
+ */
+function StartRedirect({ onKnown }: { onKnown: (v: ConsoleView) => void }) {
+  const setup = useViewerSetup()
+  const failed = setup.me.isError || setup.statuses.isError || setup.bounds.isError
+  const next: ConsoleView | null = failed ? 'join' : setup.known ? (setup.done === SETUP_STEPS ? 'ask' : 'join') : null
+  useEffect(() => {
+    if (next) onKnown(next)
+  }, [next, onKnown])
+  return <Loading />
 }
 
 /**
@@ -161,7 +198,8 @@ function useView(): [ConsoleView, (v: ConsoleView) => void] {
 function Teams() {
   const teams = useTeams()
   const [chosen, setChosen] = useState<string | null>(null)
-  const [view, setView] = useView()
+  const [view, setView, replaceView] = useView()
+  const [starting, setStarting] = useState(startRequested)
   const [creating, setCreating] = useState(false)
   // What to bring into view on which team's page, until that page has done so.
   const [focusOn, setFocusOn] = useState<{ team: string; part: ConsoleFocus } | null>(null)
@@ -178,6 +216,18 @@ function Teams() {
     [setView],
   )
   const clearFocus = useCallback(() => setFocusOn(null), [])
+  const finishStart = useCallback(
+    (v: ConsoleView) => {
+      setStarting(false)
+      replaceView(v)
+    },
+    [replaceView],
+  )
+  // /start for a viewer on no team: what the team view shows them (the page for no team).
+  const noTeam = !!data && team === null
+  useEffect(() => {
+    if (starting && noTeam) finishStart('team')
+  }, [starting, noTeam, finishStart])
   // Only once that team is the one shown (a new team appears after the teams are read again).
   const focus = focusOn !== null && focusOn.team === team ? focusOn.part : null
   const nav = useMemo<Nav>(
@@ -205,7 +255,7 @@ function Teams() {
     // A team's view starts fresh: nothing of another team's stays on screen.
     body = (
       <TeamContext.Provider value={team}>
-        <Console key={team ?? ''} />
+        {starting ? <StartRedirect onKnown={finishStart} /> : <Console key={team ?? ''} />}
       </TeamContext.Provider>
     )
   }
