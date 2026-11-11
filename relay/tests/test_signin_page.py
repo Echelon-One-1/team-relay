@@ -499,9 +499,36 @@ def test_the_load_balancer_routes_the_sign_in_page_to_the_relay():
     assert m["defaultUrlRedirect"]["hostRedirect"] == "PUBLIC_HOST"
 
 
-def test_the_map_digest_compares_the_tests_too():
+def _map_digest(m: dict) -> str:
+    """The digest deploy-lb.sh compares (its own map_digest program, run as the script runs it)."""
     script = (REPO_ROOT / "scripts" / "deploy-lb.sh").read_text()
-    assert '"pathMatchers", "tests")' in script
+    prog = re.search(r"map_digest\(\) \{.*?\n  python3 -c '\n(.*?)\n'\n\}", script, re.S)
+    assert prog is not None, "map_digest not found in deploy-lb.sh"
+    out = subprocess.run(
+        ["python3", "-c", prog.group(1)],
+        input=json.dumps(m),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout
+
+
+def test_the_map_digest_compares_the_tests_too():
+    m = _url_map()
+    assert _map_digest(m) == _map_digest(json.loads(json.dumps(m)))
+    # Fields Google adds on describe (id, fingerprint, selfLink, ...) do not count.
+    described = {**m, "id": "123", "fingerprint": "abc=", "selfLink": "https://example.invalid/x"}
+    assert _map_digest(described) == _map_digest(m)
+    # A change to the tests alone is a change to the map.
+    changed = json.loads(json.dumps(m))
+    changed["tests"][0]["path"] = "/elsewhere"
+    assert _map_digest(changed) != _map_digest(m)
+    assert _map_digest({**m, "tests": []}) != _map_digest(m)
+    # So is a change to the route rules.
+    rerouted = json.loads(json.dumps(m))
+    rerouted["pathMatchers"][0]["routeRules"][0]["priority"] = 9
+    assert _map_digest(rerouted) != _map_digest(m)
 
 
 @pytest.mark.parametrize(

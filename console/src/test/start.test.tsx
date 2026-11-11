@@ -132,7 +132,7 @@ describe('/start: where the sign-in page leads', () => {
 
   it('keeps the query and drops any fragment', async () => {
     server()
-    at('/start?x=1')
+    at('/start?x=1#frag')
     renderWithClient(<App />)
     await screen.findByRole('region', { name: 'Your setup' })
     expect(window.location.pathname + window.location.search + window.location.hash).toBe('/join?x=1')
@@ -160,6 +160,10 @@ describe('/team: the team view has its own path', () => {
     expect(await screen.findByRole('region', { name: 'Members' })).toBeInTheDocument()
     expect(window.location.pathname).toBe('/team')
     expect(push.mock.calls.map((c) => c[2])).toEqual(['/team'])
+    window.history.back()
+    expect(await screen.findByRole('region', { name: 'Your setup' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/join')
+    expect(tab('join')).toHaveAttribute('aria-current', 'page')
     await user.click(tab('ask'))
     expect(window.location.pathname).toBe('/ask')
     await user.click(tab('team'))

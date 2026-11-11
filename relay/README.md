@@ -711,7 +711,9 @@ it is still only handed to members and never logged.
 ## One address with the console (M10-SPEC §5)
 
 At one public address (e.g. `https://team.example.com`) a load balancer sends `/v1/*` and
-`/healthz` to the relay and everything else to the console behind IAP. Nothing in the relay assumes a `run.app`
+`/healthz` to the relay and everything else to the console behind IAP. (Correction, 11 Nov 2026:
+`/setup` (M11) and the public sign-in page at `/` and `/login` also go to the relay; the console's
+team view moved to `/team`. See [docs/SIGNIN-PAGE.md](../docs/SIGNIN-PAGE.md).) Nothing in the relay assumes a `run.app`
 address: `RELAY_PUBLIC_URL` is the origin the login's redirect URI and the chooser's `Origin`
 check use, and `RELAY_AUDIENCE` lists every audience an ID token may carry (add the new
 address there if a caller mints tokens for it). The relay's only cookie, `trl`, is

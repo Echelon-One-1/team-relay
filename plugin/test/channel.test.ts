@@ -508,7 +508,8 @@ describe('channel server: asker tools', () => {
   it('M11-SPEC §4: ask_question says the answers can also be followed in the team console', async () => {
     const s = await channel('alice', 'asker');
     const r = JSON.parse(textOf(await s.client.callTool({ name: 'ask_question', arguments: { to: ['bob'], question: 'x' } })));
-    expect(r.follow_in_console).toBe(`Answers can also be followed in the team console: ${relay.url} (the Ask page).`);
+    // The Ask page itself: the public host's origin is the sign-in page (docs/SIGNIN-PAGE.md).
+    expect(r.follow_in_console).toBe(`Answers can also be followed in the team console: ${new URL(relay.url).origin}/ask (the Ask page).`);
   });
 
   it('request_status returns the side surface and rejects malformed ids', async () => {
