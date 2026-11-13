@@ -49,6 +49,8 @@ export interface MemberStatusBody {
   claude: { found: boolean; signed_in: boolean };
   /** How many folders the member chose for the team: 0..20. */
   folder_count: number;
+  /** False when the member's folders file cannot be used (then folder_count is 0). */
+  folders_ok: boolean;
   self_test: { ok: boolean; at: string; reason: string | null };
 }
 
@@ -71,6 +73,8 @@ export interface MemberStatusEntry {
    * (others null). Null too when the member's plugin has not reported it.
    */
   folder_count: number | null;
+  /** Whether the member's folders file can be used; the same visibility as folder_count. */
+  folders_ok: boolean | null;
 }
 
 export interface MembersStatus {

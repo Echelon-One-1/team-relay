@@ -6,9 +6,13 @@
 // shown there, and how to start one where they are. When questions wait for the member's
 // answering session and it is not running, the line says so (M7-SPEC §2), and so it does when
 // answers wait for the member's approval in a channel working session (M8-SPEC §5), and when
-// the relay reports open team invitations for a Google sign-in (M9-SPEC §7.2).
+// the relay reports open team invitations for a Google sign-in (M9-SPEC §7.2). Beside that line
+// it removes an earlier plugin's Google Drive sign-in from the Keychain (drive-token-cleanup.ts),
+// saying so on stderr only, never in the session's context.
 
 import { CredentialFileError } from './credentials.js';
+import { removeOldDriveSignIn } from './drive-token-cleanup.js';
+import { makeLogger } from './log.js';
 import { MEMBER_RE, NotConnected, RelayClient, RelayError, TEAM_RE, connectionFromEnv } from './relay-client.js';
 import { answeringCommand, detectChannelSession, notChannelNote } from './channel-mode.js';
 import { readSummary, waitingSentence } from './waiting.js';
@@ -110,6 +114,7 @@ function teamSettings(env: NodeJS.ProcessEnv, team: string): TeamSettings | { er
   }
 }
 
+const cleanup = removeOldDriveSignIn({ env: process.env, log: makeLogger('session-start') });
 detectChannelSession({ env: process.env, role: 'asker' })
   .then(({ channel }) => sessionStartLine(process.env, channel))
   .then((line) => {
@@ -118,4 +123,4 @@ detectChannelSession({ env: process.env, role: 'asker' })
   .catch(() => {
     process.stdout.write('team-relay: status unavailable.\n');
   })
-  .finally(() => process.exit(0));
+  .finally(() => cleanup.finally(() => process.exit(0)));

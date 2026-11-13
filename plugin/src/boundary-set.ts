@@ -22,7 +22,7 @@
 import { execFile } from 'node:child_process';
 import { promises as fsp, type Dirent } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join, normalize, relative, sep } from 'node:path';
+import { basename, dirname, join, normalize, relative, sep } from 'node:path';
 import type { TeamBoundaries } from './boundaries-types.js';
 import { readBoundaries, versionOk } from './boundaries-rule.js';
 import { ANY_DEPTH, credentialHit, globRe, within } from './deny-list.js';
@@ -329,29 +329,57 @@ export type BuildInput = {
   limits?: Partial<Limits>;
 };
 
-/** One chosen folder's files (canonical root), by the reading rule above. */
+/** Whether `dir` or any folder above it, up to /, holds a `.git` entry (of any type). */
+async function underGitEntry(dir: string): Promise<boolean> {
+  for (let d = dir; ; d = dirname(d)) {
+    try {
+      await fsp.lstat(join(d, '.git'));
+      return true;
+    } catch {
+      // none here
+    }
+    if (dirname(d) === d) return false;
+  }
+}
+
+const quotedName = (p: string) => JSON.stringify((basename(p) || p).slice(0, 200));
+
+/**
+ * One chosen folder's files (canonical root), by the reading rule above. Fails closed: when git
+ * does not say the folder is in a work tree, but a `.git` entry sits in it or above it, git could
+ * not answer (a broken install, an ownership check, a timeout, a damaged index) and nothing is
+ * read, never a walk (which would take untracked and ignored files). A repository met while
+ * walking a plain folder whose files git cannot list gives none of its files. Each is a note.
+ */
 async function folderFiles(
   root: string,
   input: { env: NodeJS.ProcessEnv; git: GitRunner; cache: GitCache | null; limits: Limits; ctx: DenyCtx; budget: { left: number } },
-): Promise<{ files: string[]; truncated: boolean } | null> {
+): Promise<{ files: string[]; truncated: boolean; notes: string[] } | { error: string }> {
   const { env, git, cache, limits, ctx, budget } = input;
+  const unlisted = `folder ${quotedName(root)}: git could not list this repository's files, so none of them are used`;
   const inside = await git(root, ['rev-parse', '--is-inside-work-tree'], env);
   if (inside?.trim() === 'true') {
     const rel = await trackedFiles(root, env, git, cache);
-    if (rel === null) return null;
-    return keepFiles(
+    if (rel === null) return { error: unlisted };
+    const kept = await keepFiles(
       rel.map((r) => join(root, r)),
       ctx,
       { budget },
     );
+    return { ...kept, notes: [] };
   }
+  if (await underGitEntry(root)) return { error: unlisted };
   const w = await walk(root, limits);
   const walked = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
   const files = [...walked.files];
+  const notes: string[] = [];
   let truncated = w.truncated || walked.truncated;
   for (const tree of w.trees) {
     const rel = await trackedFiles(tree, env, git, cache);
-    if (rel === null) continue;
+    if (rel === null) {
+      notes.push(`folder ${quotedName(root)}: git could not list the files of the repository ${quotedName(tree)} in it, so none of them are used`);
+      continue;
+    }
     const kept = await keepFiles(
       rel.map((r) => join(tree, r)),
       ctx,
@@ -361,7 +389,7 @@ async function folderFiles(
     truncated ||= kept.truncated;
   }
   files.sort();
-  return { files, truncated };
+  return { files, truncated, notes };
 }
 
 /** The allowed set for one run. */
@@ -383,9 +411,16 @@ export async function buildAllowedSet(input: BuildInput): Promise<AllowedSet> {
       continue;
     }
     const root = await canonical(path);
-    if (!root) continue;
+    if (!root) {
+      notes.push(`folder ${quotedName(path)} is not used: it could not be resolved`);
+      continue;
+    }
     const kept = await folderFiles(root, { env, git, cache, limits, ctx, budget });
-    if (!kept) continue;
+    if ('error' in kept) {
+      notes.push(kept.error);
+      continue;
+    }
+    notes.push(...kept.notes);
     areas.push({ kind: 'folder', name: `folder:${basename(root)}`, root, files: kept.files, truncated: kept.truncated });
   }
 

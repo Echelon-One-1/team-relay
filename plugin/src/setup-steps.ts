@@ -124,8 +124,9 @@ export function addFolder(out: string[], raw: string, env: NodeJS.ProcessEnv): A
 
 /**
  * Reads the member's folders for `team` afresh (the file may have changed meanwhile; an earlier
- * plugin's lists read into the one list, member-folders.ts), lets `change` work out the new
- * list, and stores it as `folders` alone (atomically, mode 600), keeping the other teams. Returns
+ * plugin's lists are never part of it, member-folders.ts), lets `change` work out the new
+ * list, and stores this team as `folders` alone (atomically, mode 600; its earlier lists leave
+ * the file), keeping the other teams as they were. Returns
  * the list as stored. Throws MemberFoldersError when the file must not be used.
  */
 export function saveTeamFolders(env: NodeJS.ProcessEnv, team: string, change: (current: string[]) => string[]): string[] {

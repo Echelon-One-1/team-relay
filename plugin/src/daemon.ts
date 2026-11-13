@@ -2,10 +2,13 @@
 // through ~/.config/team-relay/daemon-launch.mjs (daemon-launch.ts). Everything it does is in
 // daemon-core.ts; this file wires the process: the log file, SIGTERM (stop within 15 s) and the
 // exit code (0 when stopped or when the plugin was updated, so launchd starts the new version).
+// At start it also removes an earlier plugin's Google Drive sign-in from the Keychain
+// (drive-token-cleanup.ts), beside the answerer, never holding it up.
 
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DaemonLog, daemonLogPath, pluginVersion, runDaemon } from './daemon-core.js';
+import { removeOldDriveSignIn } from './drive-token-cleanup.js';
 import { PLUGIN_KEY_ENV, PLUGIN_KEY_RE, readInstalledPlugin } from './daemon-launch.js';
 import { homeDir } from './boundary-set.js';
 import { describeError } from './tool-util.js';
@@ -37,6 +40,7 @@ const keyGiven = env[PLUGIN_KEY_ENV]?.trim() ?? '';
 const pluginKey = PLUGIN_KEY_RE.test(keyGiven) ? keyGiven : null;
 if (!pluginKey) log('not started by the launcher (no plugin key): updates of the plugin are not watched');
 log(`starting the background answerer (version ${version}, pid ${process.pid})`);
+void removeOldDriveSignIn({ env, log });
 runDaemon({
   env,
   log,

@@ -127,6 +127,56 @@ describe('the allowed set: the folders the member chose, by the reading rule', (
     expect(gone.notes).toEqual(['folder "~/code/gone" is not used: it does not exist']);
   });
 
+  it('fails closed when git cannot answer: a folder inside a work tree gives nothing (never a walk), with a note', async () => {
+    // git fails for every call (an Xcode shim, dubious ownership, a timeout, a corrupt index).
+    const broken: GitRunner = async () => null;
+    // docs of alpha holds an ignored build folder: a walk would read docs/build/notes.txt.
+    const ignored = join(f.alpha, 'docs', 'build', 'notes.txt');
+    mkdirSync(join(f.alpha, 'docs', 'build'), { recursive: true });
+    writeFileSync(ignored, 'ignored inside docs\n');
+    git(f.alpha, f.home, 'check-ignore', '-q', ignored);
+    try {
+      const s = await build([`${REPO_ROOT}/alpha/docs`], { git: broken });
+      expect(s.files.size).toBe(0);
+      expect(s.areas).toEqual([]);
+      expect(s.notes).toEqual(['folder "docs": git could not list this repository\'s files, so none of them are used']);
+      // The repository itself, too.
+      const whole = await build([`${REPO_ROOT}/alpha`], { git: broken });
+      expect(whole.files.size).toBe(0);
+      expect(whole.notes).toEqual(['folder "alpha": git could not list this repository\'s files, so none of them are used']);
+      // With git working, the ignored file is out all the same.
+      expect((await build([`${REPO_ROOT}/alpha/docs`])).files.has(ignored)).toBe(false);
+    } finally {
+      rmSync(join(f.alpha, 'docs', 'build'), { recursive: true });
+    }
+  });
+
+  it('a nested repository whose git fails in a plain folder: its files stay out, the plain files still count, with a note', async () => {
+    // git answers for the plain folder (not a work tree) but fails for beta.
+    const beta = join(f.repoRoot, 'clients', 'beta');
+    const partly: GitRunner = (cwd, args, env) => (cwd === beta ? Promise.resolve(null) : runGit(cwd, args, env));
+    const s = await build([REPO_ROOT], { git: partly });
+    expect(s.files.has(join(beta, 'plan.md'))).toBe(false);
+    expect(s.files.has(f.forbidden.betaUntracked!)).toBe(false);
+    expect(s.files.has(join(f.repoRoot, 'README.md'))).toBe(true);
+    expect(s.files.has(join(f.alpha, 'README.md'))).toBe(true);
+    expect(s.notes).toEqual(['folder "example-org": git could not list the files of the repository "beta" in it, so none of them are used']);
+    // Every git call failing: the plain files only, a note for each repository.
+    const none = await build([REPO_ROOT], { git: async () => null });
+    expect([...none.files.keys()].sort()).toEqual([join(f.repoRoot, 'README.md'), join(f.repoRoot, 'clients', 'index.md')]);
+    expect(none.notes).toHaveLength(3);
+  });
+
+  it('a chosen folder that cannot be resolved is not dropped silently', async () => {
+    const gone = join(f.home, 'code', 'vanishing');
+    mkdirSync(gone, { recursive: true });
+    symlinkSync(join(f.root, 'nowhere'), join(gone, 'x'));
+    // A dangling link as the chosen folder itself: memberFolderProblem says it does not exist.
+    const s = await build(['~/code/vanishing/x']);
+    expect(s.notes).toHaveLength(1);
+    rmSync(gone, { recursive: true });
+  });
+
   it('two chosen folders with the same name get distinct area names', async () => {
     const other = join(f.home, 'work', 'team');
     mkdirSync(other, { recursive: true });

@@ -16,7 +16,8 @@
 // They are shown where folders are chosen (/team-relay:folders, the setup page, setup-cli) so the
 // member can add the ones they still want, and only by the usual ways (the Mac's chooser, or
 // /team-relay:folders add <path>, each checked again). They stay in the file until the member
-// saves folders: every write stores `folders` alone (the old keys and `accepted` gone).
+// saves that team's folders: that write stores the team as `folders` alone (its old keys gone);
+// other teams' old lists are written back as they were. `accepted` is never written back.
 //
 // Accepting: a member has accepted their team's boundaries when the version the relay holds for
 // them (GET me/acceptance) is from 1 to the current version (hasAccepted). A greater one belongs
@@ -47,17 +48,20 @@ export const MAX_FOLDERS = 20;
 export const MAX_TEAMS = 20;
 const MAX_PATH = 1024;
 const MAX_FILE_BYTES = 256 * 1024;
-/** The lists of earlier plugins, read into `folders` in this order after it. */
+/** The lists of earlier plugins: never read from, shown as `previous` in this order. */
 export const OLD_FOLDER_LISTS = ['repo_roots', 'extra_folders'] as const;
 
-/**
- * One team's folders: the one list (at most 20), and what reading an earlier plugin's lists left
- * out past 20 (in order; empty once the list was saved again).
- */
 /** A folder an earlier plugin's file held: shown to the member, never read from. */
 export type PreviousFolder = { path: string; kind: 'repo_root' | 'own_folder' };
+/** One team's folders: `folders` (at most 20, the only ones read) and `previous` (never read). */
 export type TeamSettings = { folders: string[]; previous: PreviousFolder[] };
-export type MemberSettings = { teams: Record<string, TeamSettings> };
+/** An earlier plugin's lists for one team, as the file holds them (written back until that team saves). */
+export type OldLists = { repo_roots?: string[]; extra_folders?: string[] };
+export type MemberSettings = {
+  teams: Record<string, TeamSettings>;
+  /** Per team, the earlier plugin's lists still in the file (gone once that team's folders are saved). */
+  old?: Record<string, OldLists>;
+};
 
 export class MemberFoldersError extends Error {
   constructor(message: string) {
@@ -176,11 +180,20 @@ export function parseMemberSettings(raw: unknown, env: NodeJS.ProcessEnv): Membe
   const names = Object.keys(raw.teams);
   if (names.length > MAX_TEAMS) throw new MemberFoldersError(`the folders file has more than ${MAX_TEAMS} teams`);
   const teams = emptyTeams();
+  const old = Object.create(null) as Record<string, OldLists>;
   for (const name of names) {
     if (!TEAM_RE.test(name)) throw new MemberFoldersError(`the folders file has a team name that is not a team id (${JSON.stringify(name.slice(0, 40))})`);
-    teams[name] = parseTeamSettings(raw.teams[name], env, `team ${name}`);
+    const entry = raw.teams[name];
+    teams[name] = parseTeamSettings(entry, env, `team ${name}`);
+    // Checked by parseTeamSettings: each present list is at most 20 strings.
+    const kept: OldLists = {};
+    for (const key of OLD_FOLDER_LISTS) {
+      const list = (entry as Record<string, unknown>)[key];
+      if (Array.isArray(list)) kept[key] = [...(list as string[])];
+    }
+    if (Object.keys(kept).length) old[name] = kept;
   }
-  return { teams };
+  return { teams, old };
 }
 
 /** One team's settings (no folders when the team is not in the file). */
@@ -195,7 +208,10 @@ export function withTeam(settings: MemberSettings, team: string, value: { folder
   const teams = emptyTeams();
   for (const [k, v] of Object.entries(settings.teams)) teams[k] = v;
   teams[team] = { folders: [...value.folders], previous: [] };
-  return { teams };
+  // That team's earlier lists leave the file; every other team's stay until it saves its own.
+  const old = Object.create(null) as Record<string, OldLists>;
+  for (const [k, v] of Object.entries(settings.old ?? {})) if (k !== team) old[k] = v;
+  return { teams, old };
 }
 
 function uid(): number | null {
@@ -240,10 +256,13 @@ export function readTeamSettings(path: string, env: NodeJS.ProcessEnv, team: str
   return teamSettings(readMemberSettings(path, env), team);
 }
 
-/** What is written: each team's `folders` alone (earlier lists and `accepted` are not kept). */
+/** What is written: each team's `folders`, and the earlier lists of a team that has not saved yet (`accepted` never). */
 function serialise(settings: MemberSettings): Record<string, unknown> {
   const teams: Record<string, unknown> = {};
-  for (const name of Object.keys(settings.teams).sort()) teams[name] = { folders: settings.teams[name]!.folders };
+  for (const name of Object.keys(settings.teams).sort()) {
+    const old = Object.prototype.hasOwnProperty.call(settings.old ?? {}, name) ? settings.old![name] : undefined;
+    teams[name] = { folders: settings.teams[name]!.folders, ...(old ?? {}) };
+  }
   return { teams };
 }
 

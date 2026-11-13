@@ -1039,7 +1039,7 @@ function sessionStart(extra: Record<string, string> = {}): Promise<string> {
     const child = execFile(
       process.execPath,
       [join(DIST, 'session-start.js')],
-      { env: { PATH: process.env.PATH ?? '', XDG_CONFIG_HOME: xdg, TEAM_RELAY_CHANNEL: '1', RELAY_URL: relay.url, RELAY_TEAM: 'demo', RELAY_AUTH: 'token', RELAY_TOKEN: TOKEN_OF.bob!, ...extra }, encoding: 'utf8', timeout: 10_000 },
+      { env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', XDG_CONFIG_HOME: xdg, TEAM_RELAY_CHANNEL: '1', RELAY_URL: relay.url, RELAY_TEAM: 'demo', RELAY_AUTH: 'token', RELAY_TOKEN: TOKEN_OF.bob!, ...extra }, encoding: 'utf8', timeout: 10_000 },
       (_err, stdout) => resolve(stdout),
     );
     child.stdin?.end('{}');

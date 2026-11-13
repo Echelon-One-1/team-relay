@@ -173,11 +173,15 @@ describe('the file on disk', () => {
     writeMemberSettings(file, withTeam(before, TEAM, { folders: [MY_FOLDER] }), f.env);
     expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ teams: { [TEAM]: { folders: [MY_FOLDER] } } });
     expect(readTeamSettings(file, f.env, TEAM)).toEqual({ folders: [MY_FOLDER], previous: [] });
-    // Any write stores `folders` alone for every team: another team's earlier lists leave the file
-    // too, and that team reads no folders.
-    writeFileSync(file, JSON.stringify({ teams: { [TEAM]: { folders: [REPO_ROOT] }, other: { repo_roots: [MY_FOLDER], extra_folders: [] } } }));
+    // Saving one team keeps another team's earlier lists as they were (its hints stay until it
+    // saves its own); only `accepted` goes. That team still reads no folders.
+    writeFileSync(file, JSON.stringify({ teams: { [TEAM]: { repo_roots: [REPO_ROOT] }, other: { repo_roots: [MY_FOLDER, '~/code/gone'], extra_folders: [], accepted: { version: 3 } } } }));
     writeMemberSettings(file, withTeam(readMemberSettings(file, f.env), TEAM, { folders: [] }), f.env);
-    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ teams: { [TEAM]: { folders: [] }, other: { folders: [] } } });
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ teams: { [TEAM]: { folders: [] }, other: { folders: [], repo_roots: [MY_FOLDER, '~/code/gone'], extra_folders: [] } } });
+    expect(readTeamSettings(file, f.env, 'other')).toEqual({ folders: [], previous: [{ path: MY_FOLDER, kind: 'repo_root' }, { path: '~/code/gone', kind: 'repo_root' }] });
+    // Then the other team saves: its earlier lists leave the file too.
+    writeMemberSettings(file, withTeam(readMemberSettings(file, f.env), 'other', { folders: [MY_FOLDER] }), f.env);
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ teams: { [TEAM]: { folders: [] }, other: { folders: [MY_FOLDER] } } });
     writeFolders(f, FOLDERS);
   });
 

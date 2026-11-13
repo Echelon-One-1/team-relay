@@ -106,7 +106,7 @@ describe('SessionStart hook', () => {
         [join(DIST, 'session-start.js')],
         {
           // A channel session unless the test says otherwise (the process-tree check is channel-mode.test.ts).
-          env: { PATH: process.env.PATH ?? '', XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME ?? '', TEAM_RELAY_CHANNEL: '1', ...env },
+          env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME ?? '', TEAM_RELAY_CHANNEL: '1', ...env },
           encoding: 'utf8',
           timeout: 10_000,
         },

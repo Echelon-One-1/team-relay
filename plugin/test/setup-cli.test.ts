@@ -425,10 +425,10 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
     claude: { found: true, signed_in: true },
     self_test: { ok: true, at: '2026-11-10T10:00:00.000Z', reason: null },
   };
-  const base = { answering: true, acceptedVersion: 1, boundariesVersion: 1, folderCount: 2, console: 'https://relay.example.com' };
+  const base = { answering: true, acceptedVersion: 1, boundariesVersion: 1, folderCount: 2, foldersOk: true as boolean | null, console: 'https://relay.example.com' };
   const open = (steps: ReturnType<typeof checklist>) => steps[0]!.checks.filter((c) => !c.done).map((c) => c.id);
   /** A status as the Mac sends it (the fake relay keeps folder_count apart, as the relay does). */
-  const seen = (extra: Record<string, unknown> = {}) => ({ daemon: { version: '1', started_at: '2026-11-10T10:00:00.000Z' }, ...full, folder_count: 2, seen_at: new Date().toISOString(), ...extra });
+  const seen = (extra: Record<string, unknown> = {}) => ({ daemon: { version: '1', started_at: '2026-11-10T10:00:00.000Z' }, ...full, folder_count: 2, folders_ok: true, seen_at: new Date().toISOString(), ...extra });
 
   it("Set up your Mac and Accept what the team shares, from the relay's view of this member", () => {
     const steps = checklist({ ...base, status: full });
@@ -470,6 +470,12 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
       "Your Mac's last check did not pass. Run the setup line again. If it still does not pass, show this to a team owner: Claude Code is not signed in.",
     ]);
     expect(todo({ ...base, status: full, folderCount: 0 })).toEqual(['You have not chosen the folders your Claude answers from yet. Run the setup line again and pick them.']);
+    // A folders file that cannot be used is said as such, never as "no folders".
+    expect(todo({ ...base, status: full, folderCount: 0, foldersOk: false })).toEqual([
+      'Your saved folders file cannot be used on this Mac. In Claude Code, run /team-relay:folders to see why.',
+    ]);
+    // An older plugin that does not say (null): the count alone decides.
+    expect(todo({ ...base, status: full, foldersOk: null })).toEqual([]);
     for (const t of todo({ ...base, status: { claude: { found: true, signed_in: false }, self_test: { ok: false, reason: null } }, folderCount: 0, answering: false })) {
       expect(t).not.toMatch(/daemon|LaunchAgent|plugin|channel|\bCLI\b|\bnode\b|boundaries|repo root|self-test/i);
     }
@@ -593,9 +599,18 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
     const me = list.members.find((m) => m.member === 'bob')!;
     expect(me.folder_count).toBe(0);
     expect(me.status).not.toHaveProperty('folder_count');
+    expect(me.folders_ok).toBe(true);
+    expect(me.status).not.toHaveProperty('folders_ok');
+    // The file cannot be used: said so in status.
+    relay.memberStatus.set('bob', seen({ folder_count: 0, folders_ok: false }));
+    const t2 = term();
+    await runSetup(['status'], deps(t2));
+    expect(t2.out).toContain('      - Your saved folders file cannot be used on this Mac. In Claude Code, run /team-relay:folders to see why.');
     // Another member's count is not given to a member who is not an owner.
     relay.memberStatus.set('carol', seen({ folder_count: 4 }));
-    expect((await bob().client.membersStatus()).members.find((m) => m.member === 'carol')!.folder_count).toBeNull();
+    const carol = (await bob().client.membersStatus()).members.find((m) => m.member === 'carol')!;
+    expect(carol.folder_count).toBeNull();
+    expect(carol.folders_ok).toBeNull();
   });
 
   it('status takes no other argument', async () => {

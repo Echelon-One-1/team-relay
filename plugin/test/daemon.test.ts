@@ -244,11 +244,12 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     expect(o.me.member).toBe('bob');
     expect(o.lockRetryMs).toBe(50);
     const st = relay.memberStatus.get('bob')!;
-    expect(Object.keys(st).sort()).toEqual(['claude', 'daemon', 'folder_count', 'seen_at', 'self_test']);
+    expect(Object.keys(st).sort()).toEqual(['claude', 'daemon', 'folder_count', 'folders_ok', 'seen_at', 'self_test']);
     expect(st).toMatchObject({
       daemon: { version: '0.11.0', started_at: expect.any(String) },
       claude: { found: true, signed_in: true },
       folder_count: 0,
+      folders_ok: true,
       self_test: PASSED,
     });
     const puts = () => relay.requests.filter((r) => r.member === 'bob' && r.method === 'PUT' && r.path.endsWith('/me/status')).length;
@@ -441,8 +442,22 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     const probed: string[] = [];
     const done = runDaemon({ env: e, log: (l) => logs.push(l), dist: DIST, version: '1', signal: ac.signal, makeHost: make, selfTest: async () => PASSED, facts: { ...facts, canRead: async (p: string) => void probed.push(p) }, intervals });
     await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the first status');
-    expect(relay.memberStatus.get('bob')).toMatchObject({ folder_count: 0 });
+    expect(relay.memberStatus.get('bob')).toMatchObject({ folder_count: 0, folders_ok: true });
     expect(probed).toEqual([]);
+    ac.abort();
+    await done;
+  });
+
+  it('a folders file that cannot be used reports folders_ok false (and folder_count 0), never a plain 0 folders', async () => {
+    const e = env();
+    mkdirSync(join(tmp, 'xdg', 'team-relay'), { recursive: true, mode: 0o700 });
+    writeFileSync(memberFoldersPath(e), JSON.stringify({ teams: { demo: { folders: ['~/work/x'] } } }), { mode: 0o644 });
+    chmodSync(memberFoldersPath(e), 0o644);
+    const { make } = fakeHosts();
+    const ac = new AbortController();
+    const done = runDaemon({ env: e, log: (l) => logs.push(l), dist: DIST, version: '1', signal: ac.signal, makeHost: make, selfTest: async () => PASSED, facts, intervals });
+    await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the first status');
+    expect(relay.memberStatus.get('bob')).toMatchObject({ folder_count: 0, folders_ok: false });
     ac.abort();
     await done;
   });

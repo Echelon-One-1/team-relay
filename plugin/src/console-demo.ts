@@ -38,8 +38,9 @@
 //
 // Since 13 Nov 2026 (local folders only) a team's boundaries are its topic alone: a PUT holding
 // a field of the earlier schemas is refused naming it, as the relay refuses it. Members'
-// statuses carry how many folders each chose (`folder_count`): the owner sees every member's,
-// anyone else only their own (others null), never a name or a path.
+// statuses carry how many folders each chose (`folder_count`) and whether the folders file can
+// be used (`folders_ok`): the owner sees every member's, anyone else only their own (others
+// null), never a name or a path.
 
 import { createHash } from 'node:crypto';
 import { boundariesValid, normaliseBoundaries, removedField, removedFieldDetail } from './boundaries-rule.js';
@@ -636,7 +637,7 @@ export class DemoTeam {
     const folderCount = (member: string): number | null => (owner || member === this.viewer ? (DEMO_FOLDER_COUNTS[member] ?? 0) : null);
     const entry = (member: string): MemberStatusEntry => {
       const accepted = member === this.viewer ? this.accepted.version : 0;
-      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted, folder_count: null };
+      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted, folder_count: null, folders_ok: null };
       const s =
         member === 'bob'
           ? status({ seenAgo: 25_000 })
@@ -644,7 +645,7 @@ export class DemoTeam {
             ? status({ signedIn: false, selfOk: false, reason: 'Claude Code is not signed in.', seenAgo: 9 * 60_000 })
             : status({ seenAgo: 40_000 });
       const version = member === 'bob' ? this.bounds.version : accepted;
-      return { member, status: s, answering: now - Date.parse(s.seen_at) < 180_000, accepted_version: version, folder_count: folderCount(member) };
+      return { member, status: s, answering: now - Date.parse(s.seen_at) < 180_000, accepted_version: version, folder_count: folderCount(member), folders_ok: folderCount(member) === null ? null : true };
     };
     return { members: active.map(entry), boundaries_version: this.bounds.version };
   }

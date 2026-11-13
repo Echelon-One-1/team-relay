@@ -363,11 +363,13 @@ const PENDING_WAIT_MS = 90_000;
  * same; "Ask the team" is not a step, it is always there below them). "Set up your Mac" is done
  * when every check is: the Mac has reported in, Claude Code is there and signed in, the Mac
  * answers now, at least one folder is chosen (`folderCount`, the member's own entry's
- * folder_count; null, not reported, never counts as done) and the self-test.
+ * folder_count; null, not reported, never counts as done; when `foldersOk` is false the folders
+ * file cannot be used, which is said as such) and the self-test.
  */
 export function checklist(p: {
   status: { claude?: { found?: unknown; signed_in?: unknown }; self_test?: { ok?: unknown; reason?: unknown } } | null;
   folderCount: number | null;
+  foldersOk: boolean | null;
   answering: boolean;
   acceptedVersion: number;
   boundariesVersion: number;
@@ -392,8 +394,11 @@ export function checklist(p: {
           { id: 'answering', done: p.answering, todo: "Your Mac isn't answering right now. Make sure it's switched on; if this stays, run the setup line again." },
           {
             id: 'folders',
-            done: typeof p.folderCount === 'number' && p.folderCount > 0,
-            todo: 'You have not chosen the folders your Claude answers from yet. Run the setup line again and pick them.',
+            done: p.foldersOk !== false && typeof p.folderCount === 'number' && p.folderCount > 0,
+            todo:
+              p.foldersOk === false
+                ? 'Your saved folders file cannot be used on this Mac. In Claude Code, run /team-relay:folders to see why.'
+                : 'You have not chosen the folders your Claude answers from yet. Run the setup line again and pick them.',
           },
           {
             id: 'self_test',
@@ -465,6 +470,7 @@ async function status(d: SetupDeps, afterSetup: boolean): Promise<number> {
   const steps = checklist({
     status: entry?.status ?? null,
     folderCount: typeof entry?.folder_count === 'number' ? entry.folder_count : null,
+    foldersOk: typeof entry?.folders_ok === 'boolean' ? entry.folders_ok : null,
     answering: entry?.answering === true,
     acceptedVersion,
     boundariesVersion,

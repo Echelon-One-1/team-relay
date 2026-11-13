@@ -306,16 +306,18 @@ export class FakeRelay {
       return this.send(res, 200, { ok: true });
     }
     if (m === 'GET' && rest.length === 2 && rest[0] === 'members' && rest[1] === 'status') {
-      // As the relay does (13 Nov 2026): each entry's folder_count goes to an owner for every
-      // member and to anyone else for their own entry only; the status itself never carries it.
+      // As the relay does (13 Nov 2026): each entry's folder_count and folders_ok go to an owner
+      // for every member and to anyone else for their own entry only; the status never carries them.
       const owner = this.roster.find((r) => r.member === member)?.role === 'owner';
       return this.send(res, 200, {
         members: MEMBERS.map((x) => {
           const stored = this.memberStatus.get(x) ?? null;
-          const { folder_count: count, ...st } = stored ?? {};
+          const { folder_count: count, folders_ok: ok, ...st } = stored ?? {};
           const seen = stored ? Date.parse(String(stored.seen_at)) : NaN;
-          const folder_count = typeof count === 'number' && (owner || x === member) ? count : null;
-          return { member: x, status: stored ? st : null, answering: Number.isFinite(seen) && Date.now() - seen < 180_000, accepted_version: this.acceptances.get(x) ?? 0, folder_count };
+          const shown = owner || x === member;
+          const folder_count = typeof count === 'number' && shown ? count : null;
+          const folders_ok = typeof ok === 'boolean' && shown ? ok : null;
+          return { member: x, status: stored ? st : null, answering: Number.isFinite(seen) && Date.now() - seen < 180_000, accepted_version: this.acceptances.get(x) ?? 0, folder_count, folders_ok };
         }),
         boundaries_version: this.boundaries.version,
       });

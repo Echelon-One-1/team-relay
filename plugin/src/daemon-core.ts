@@ -13,7 +13,8 @@
 //   claude.found=false.
 // - Status: every 60 s, PUT me/status with counts and booleans only (no path, folder name,
 //   question or answer): among them how many folders the member chose for the team
-//   (`folder_count`, 0..20, member-folders.ts); a 429 is only logged.
+//   (`folder_count`, 0..20, member-folders.ts) and whether its folders file can be used
+//   (`folders_ok`); a 429 is only logged.
 // - Self-test at start and every 6 h: `claude auth status` succeeds, and the M10 boundary-mode
 //   child starts with the real flags against a local host that denies every tool, offline, with
 //   a relay address that leads nowhere (answer-dry-run.ts): no relay traffic, no question. The
@@ -346,24 +347,25 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
     );
   };
 
-  /** The member's folders for the team (after reading an earlier plugin's lists); none when the file cannot be used. */
-  const folders = (team: string): string[] => {
+  /** The member's folders for the team; none, and ok false, when the file cannot be used. */
+  const folders = (team: string): { list: string[]; ok: boolean } => {
     try {
-      return readTeamSettings(memberFoldersPath(env), env, team).folders;
+      return { list: readTeamSettings(memberFoldersPath(env), env, team).folders, ok: true };
     } catch {
-      return [];
+      return { list: [], ok: false };
     }
   };
 
   /** One status PUT; 'refused' on a 401. */
   const sendStatus = async (client: RelayClient, team: string): Promise<'ok' | 'refused'> => {
-    const f = folders(team);
+    const { list: f, ok: foldersOk } = folders(team);
     // Recounted every 10 minutes, or at once when the folders changed.
     await refreshFacts(f);
     const body: MemberStatusBody = {
       daemon: { version: o.version.slice(0, 32), started_at: startedAt },
       claude: { found: claudeBinFrom(env) !== null, signed_in: signedIn },
       folder_count: clamp(f.length, FOLDER_COUNT_MAX),
+      folders_ok: foldersOk,
       self_test: { ok: test.ok, at: test.at, reason: test.reason },
     };
     try {
