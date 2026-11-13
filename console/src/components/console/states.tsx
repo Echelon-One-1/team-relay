@@ -10,7 +10,7 @@ import { RelayMark } from './primitives'
 export function FullPage({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
   return (
     <main className="flex min-h-dvh items-center justify-center px-4">
-      <div className="flex w-full max-w-md flex-col gap-4 rounded-xl border bg-card p-6">
+      <div className="flex w-full max-w-md flex-col gap-4 rounded-lg bg-card p-6">
         <div className="flex items-center gap-2 text-[13px] font-semibold">
           <RelayMark />
           Team relay

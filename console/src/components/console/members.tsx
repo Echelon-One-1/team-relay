@@ -262,7 +262,7 @@ function MemberRow({
 }
 
 const inputClass =
-  'h-8 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-[12.5px] text-foreground shadow-none outline-none transition-colors placeholder:text-faint focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 aria-invalid:border-bad'
+  'h-9 w-full min-w-0 rounded-sm border border-input bg-field px-2.5 text-[12.5px] text-foreground shadow-none outline-none transition-colors placeholder:text-faint focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 aria-invalid:border-bad'
 
 function AddMember({ roster }: { roster: Roster | undefined }) {
   const change = useRosterChange()

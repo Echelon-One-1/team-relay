@@ -241,12 +241,12 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect(panel).not.toBeInTheDocument()
   })
 
-  it('the pages: Ask first, then Team and Setup; the landing page is still the team', async () => {
+  it('the pages: Ask first, then Team, Setup and Team settings; the landing page is still the team', async () => {
     server()
     renderWithClient(<App />)
     await screen.findByRole('region', { name: 'Members' })
     const nav = screen.getByRole('navigation', { name: 'Pages' })
-    expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.getAttribute('data-view-tab'))).toEqual(['ask', 'team', 'join'])
+    expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.getAttribute('data-view-tab'))).toEqual(['ask', 'team', 'join', 'settings'])
     expect(tab('team')).toHaveAttribute('aria-current', 'page')
     expect(window.location.pathname).toBe('/')
   })

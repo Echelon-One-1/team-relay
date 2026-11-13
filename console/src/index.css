@@ -1,19 +1,27 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/ibm-plex-sans/wght.css";
+@import "@fontsource/inter/latin-400.css";
+@import "@fontsource/inter/latin-500.css";
+@import "@fontsource/inter/latin-600.css";
 @import "@fontsource/ibm-plex-mono/latin-400.css";
 @import "@fontsource/ibm-plex-mono/latin-500.css";
 
 /*
   Team relay console tokens.
 
-  One accent, "signal" (a cobalt), marks what is moving: an edge in flight, the step a
-  request is waiting on, the focus ring, the selected filter. Status colours carry meaning
-  only: ok (online, answered), warn (idle, no response), bad (timed out, a tool error).
-  Everything else is a cool neutral ramp. IBM Plex Sans for the interface, Plex Mono for
-  identifiers (request ids, tool and capability names, params). Figures are tabular
-  wherever a number can change under the reader's eye.
+  Flat and quiet: a grey canvas with white cards that carry no border and no shadow, pill-shaped
+  controls, one violet accent ("signal", also the primary action and the focus ring) for what is
+  moving or chosen, and colour otherwise only for status: ok (online, answered), warn (idle, no
+  response), bad (timed out, a tool error). Neutrals are a cool, slightly blue-violet grey ramp.
+
+  Inter (400, 500, 600; latin) for the interface, IBM Plex Mono for identifiers (request ids, tool
+  and capability names, params). Both are bundled files (OFL), so the page loads nothing from
+  elsewhere. Figures are tabular wherever a number can change under the reader's eye.
+
+  Text contrast is at least 4.5:1 on the canvas, on cards and on the muted tint over either, in
+  both themes: the muted text steps (subtle, faint) are a step darker (light) or lighter (dark)
+  than the reference greys where those fell short on a tinted surface.
 
   Every colour is a CSS variable in a file; nothing is injected at runtime, so the page
   runs under the console server's CSP (default-src 'self').
@@ -22,7 +30,7 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: "IBM Plex Sans Variable", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --color-background: var(--background);
@@ -48,6 +56,9 @@
   --color-subtle: var(--subtle);
   --color-faint: var(--faint);
   --color-hairline: var(--hairline);
+  --color-field: var(--field);
+  --color-switch-off: var(--switch-off);
+  --color-thumb: var(--thumb);
   --color-signal: var(--signal);
   --color-signal-soft: var(--signal-soft);
   --color-ok: var(--ok);
@@ -57,88 +68,100 @@
   --color-bad: var(--bad);
   --color-bad-soft: var(--bad-soft);
 
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
+  /* Cards, menus and the selected nav item 8px; fields 4px; controls are pills (rounded-full). */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
   --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+  --radius-xl: var(--radius);
+  --radius-2xl: calc(var(--radius) * 1.5);
+  --radius-3xl: calc(var(--radius) * 2);
+  --radius-4xl: calc(var(--radius) * 2.5);
+
+  --shadow-thumb: 0 2px 8px rgb(0 0 0 / 0.08);
+  --shadow-menu: 0 2px 12px rgb(0 0 0 / 0.1);
 }
 
 :root {
   --radius: 0.5rem;
 
-  --canvas: oklch(0.975 0.003 255);
-  --background: oklch(0.975 0.003 255);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.22 0.018 262);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.22 0.018 262);
-  --foreground: oklch(0.22 0.018 262);
-  --subtle: oklch(0.47 0.017 262);
-  --faint: oklch(0.63 0.013 262);
-  --muted: oklch(0.955 0.004 262);
-  --muted-foreground: oklch(0.47 0.017 262);
-  --border: oklch(0.915 0.006 262);
-  --hairline: oklch(0.94 0.004 262);
-  --input: oklch(0.9 0.006 262);
+  --canvas: #f3f3f5;
+  --background: #f3f3f5;
+  --card: #ffffff;
+  --card-foreground: #13151d;
+  --popover: #ffffff;
+  --popover-foreground: #13151d;
+  --foreground: #13151d;
+  --subtle: #595d6c;
+  --faint: #636777;
+  /* A tint over whatever is below: hover, tracks, chips, quiet buttons. */
+  --muted: rgb(19 21 29 / 0.05);
+  --muted-foreground: #595d6c;
+  --border: #e0e2e8;
+  --hairline: #eaebed;
+  --input: #cfd1da;
+  --field: #ffffff;
+  --switch-off: #cfd1da;
+  --thumb: #ffffff;
 
-  --primary: oklch(0.22 0.018 262);
-  --primary-foreground: oklch(0.985 0.002 262);
-  --secondary: oklch(0.955 0.004 262);
-  --secondary-foreground: oklch(0.22 0.018 262);
-  --accent: oklch(0.955 0.004 262);
-  --accent-foreground: oklch(0.22 0.018 262);
-  --destructive: oklch(0.56 0.19 27);
+  --primary: #6d45ff;
+  --primary-foreground: #ffffff;
+  --secondary: rgb(19 21 29 / 0.05);
+  --secondary-foreground: #13151d;
+  --accent: rgb(19 21 29 / 0.05);
+  --accent-foreground: #13151d;
+  --destructive: #c22f2f;
 
-  --signal: oklch(0.53 0.2 262);
-  --signal-soft: oklch(0.53 0.2 262 / 0.1);
-  --ok: oklch(0.58 0.13 155);
-  --ok-soft: oklch(0.58 0.13 155 / 0.12);
-  --warn: oklch(0.68 0.14 70);
-  --warn-soft: oklch(0.68 0.14 70 / 0.14);
-  --bad: oklch(0.56 0.19 27);
-  --bad-soft: oklch(0.56 0.19 27 / 0.1);
+  --signal: #6d45ff;
+  --signal-soft: rgb(109 69 255 / 0.1);
+  --ok: #1b7331;
+  --ok-soft: rgb(27 115 49 / 0.12);
+  --warn: #975a00;
+  --warn-soft: rgb(241 185 91 / 0.22);
+  --bad: #c22f2f;
+  --bad-soft: rgb(229 72 77 / 0.1);
 
-  --ring: oklch(0.53 0.2 262);
+  --ring: #6d45ff;
   color-scheme: light;
 }
 
 .dark {
-  --canvas: oklch(0.165 0.008 262);
-  --background: oklch(0.165 0.008 262);
-  --card: oklch(0.2 0.009 262);
-  --card-foreground: oklch(0.93 0.005 262);
-  --popover: oklch(0.225 0.01 262);
-  --popover-foreground: oklch(0.93 0.005 262);
-  --foreground: oklch(0.93 0.005 262);
-  --subtle: oklch(0.72 0.012 262);
-  --faint: oklch(0.56 0.012 262);
-  --muted: oklch(0.245 0.01 262);
-  --muted-foreground: oklch(0.72 0.012 262);
-  --border: oklch(0.29 0.011 262);
-  --hairline: oklch(0.255 0.01 262);
-  --input: oklch(0.31 0.011 262);
+  --canvas: #13151d;
+  --background: #13151d;
+  --card: #20232d;
+  --card-foreground: #f9fafa;
+  --popover: #2b2e39;
+  --popover-foreground: #f9fafa;
+  --foreground: #f9fafa;
+  --subtle: #b2b5c1;
+  --faint: #9195a4;
+  --muted: rgb(255 255 255 / 0.05);
+  --muted-foreground: #b2b5c1;
+  --border: #2b2e39;
+  --hairline: #2b2e39;
+  --input: #474a59;
+  --field: #2b2e39;
+  --switch-off: #474a59;
+  --thumb: #363946;
 
-  --primary: oklch(0.93 0.005 262);
-  --primary-foreground: oklch(0.2 0.009 262);
-  --secondary: oklch(0.245 0.01 262);
-  --secondary-foreground: oklch(0.93 0.005 262);
-  --accent: oklch(0.245 0.01 262);
-  --accent-foreground: oklch(0.93 0.005 262);
-  --destructive: oklch(0.68 0.17 25);
+  --primary: #8f79ff;
+  --primary-foreground: #13151d;
+  --secondary: rgb(255 255 255 / 0.05);
+  --secondary-foreground: #f9fafa;
+  --accent: rgb(255 255 255 / 0.05);
+  --accent-foreground: #f9fafa;
+  --destructive: #ff7a66;
 
-  --signal: oklch(0.7 0.15 262);
-  --signal-soft: oklch(0.7 0.15 262 / 0.14);
-  --ok: oklch(0.74 0.14 158);
-  --ok-soft: oklch(0.74 0.14 158 / 0.13);
-  --warn: oklch(0.8 0.13 78);
-  --warn-soft: oklch(0.8 0.13 78 / 0.13);
-  --bad: oklch(0.69 0.17 25);
-  --bad-soft: oklch(0.69 0.17 25 / 0.14);
+  --signal: #9f8cff;
+  --signal-soft: rgb(143 121 255 / 0.16);
+  --ok: #5fcf6f;
+  --ok-soft: rgb(95 207 111 / 0.13);
+  --warn: #f5a524;
+  --warn-soft: rgb(245 165 36 / 0.13);
+  --bad: #ff7a66;
+  --bad-soft: rgb(255 122 102 / 0.14);
 
-  --ring: oklch(0.7 0.15 262);
+  --ring: #8f79ff;
   color-scheme: dark;
 }
 
@@ -153,8 +176,8 @@
   body {
     @apply bg-canvas text-foreground antialiased;
     font-family: var(--font-sans);
-    font-size: 13px;
-    line-height: 1.45;
+    font-size: 14px;
+    line-height: 20px;
     font-feature-settings: "kern", "calt";
   }
   ::selection {

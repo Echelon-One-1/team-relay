@@ -29,7 +29,7 @@ import { Panel, RelayMark } from './primitives'
 // for a viewer who is on no team.
 
 const inputClass =
-  'h-8 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-[12.5px] text-foreground shadow-none outline-none transition-colors placeholder:text-faint focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 aria-invalid:border-bad'
+  'h-9 w-full min-w-0 rounded-sm border border-input bg-field px-2.5 text-[12.5px] text-foreground shadow-none outline-none transition-colors placeholder:text-faint focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 aria-invalid:border-bad'
 
 function InlineError({ id, children }: { id?: string; children: string | null }) {
   if (!children) return null
@@ -311,8 +311,8 @@ export function CreateTeamDialog({ open, onOpenChange }: { open: boolean; onOpen
         onSuccess: (out) => {
           const created = (out as { team?: unknown } | null)?.team
           onOpenChange(false)
-          // M10 §1: straight on to the new team's boundaries.
-          nav.selectTeam(typeof created === 'string' ? created : sentId, 'boundaries')
+          // M10 §1: straight on to the new team's boundaries, on its settings page.
+          nav.selectTeam(typeof created === 'string' ? created : sentId, 'boundaries', 'settings')
         },
         onError: (err: ChangeError) => setError(createRefusal(err, max)),
       },
@@ -462,6 +462,7 @@ export function TeamSettings({ entry, owner, roleKnown = true }: { entry: TeamEn
 }
 
 function DeleteTeam({ entry }: { entry: TeamEntry }) {
+  const nav = useNav()
   const change = useTeamChange()
   const [typed, setTyped] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -472,7 +473,11 @@ function DeleteTeam({ entry }: { entry: TeamEntry }) {
     e.preventDefault()
     if (!matches) return
     setError(null)
-    change.mutate({ kind: 'delete', team: entry.team, confirm: typed }, { onError: (err: ChangeError) => setError(deleteRefusal(err)) })
+    // Gone: back to the team page (of the team shown next), not another team's settings.
+    change.mutate(
+      { kind: 'delete', team: entry.team, confirm: typed },
+      { onSuccess: () => nav.setView('team'), onError: (err: ChangeError) => setError(deleteRefusal(err)) },
+    )
   }
   return (
     <form onSubmit={submit} className="flex flex-col gap-2.5 border-t border-hairline px-4 py-3.5 lg:border-t-0" aria-label="Delete this team" data-delete-team>
@@ -537,7 +542,7 @@ export function NoTeamPage({ teams, lost }: { teams: Teams; lost?: string | null
   }
   return (
     <main className="flex min-h-dvh items-start justify-center px-4 pt-[14vh] pb-10">
-      <div className="flex w-full max-w-md flex-col gap-4 rounded-xl border bg-card p-6" data-no-team>
+      <div className="flex w-full max-w-md flex-col gap-4 rounded-lg bg-card p-6" data-no-team>
         <div className="flex items-center gap-2 text-[13px] font-semibold">
           <RelayMark />
           Team relay

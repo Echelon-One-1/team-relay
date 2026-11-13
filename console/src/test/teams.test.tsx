@@ -267,6 +267,7 @@ describe('an owner\'s team (M9 §7.2, §7.7)', () => {
 
   it('deletes a team it owns after the id is typed, and moves to another team', async () => {
     window.localStorage.setItem(TEAM_STORAGE_KEY, 'research')
+    window.history.replaceState(null, '', '/settings')
     const s = server()
     const user = userEvent.setup()
     renderWithClient(<App />)
@@ -279,9 +280,13 @@ describe('an owner\'s team (M9 §7.2, §7.7)', () => {
     await user.click(button)
     await waitFor(() => expect(switcher()).toHaveTextContent('Demo'))
     expect(s.changes()).toEqual([{ method: 'DELETE', path: '/api/teams/research', team: null, body: { confirm: 'research' } }])
+    // Back on the team page of the team shown next, not on its settings.
+    expect(window.location.pathname).toBe('/team')
+    expect(await screen.findByRole('region', { name: 'Members' })).toBeInTheDocument()
   })
 
   it('explains a team from the relay\'s team file cannot be deleted here', async () => {
+    window.history.replaceState(null, '', '/settings')
     server()
     const user = userEvent.setup()
     renderWithClient(<App />)
