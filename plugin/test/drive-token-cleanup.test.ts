@@ -2,10 +2,10 @@
 // /usr/bin/security and a fake fetch, so nothing touches the real Keychain or Google.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { GOOGLE_REVOKE_URL, OLD_DRIVE_SERVICE, loginKeychainPath, removeOldDriveSignIn, type RevokeFetch, type SecurityRun } from '../src/drive-token-cleanup.js';
+import { GOOGLE_REVOKE_URL, OLD_DRIVE_SERVICE, backoffPath, loginKeychainPath, removeOldDriveSignIn, removeOldDriveSignInWithin, type RevokeFetch, type SecurityRun } from '../src/drive-token-cleanup.js';
 
 let home: string;
 let env: NodeJS.ProcessEnv;
@@ -143,5 +143,49 @@ describe('removeOldDriveSignIn', () => {
       'could not remove the old Google Drive sign-in from the Keychain (security exit 1); trying again next start',
     ]);
     expect(logs.join('\n')).not.toContain('synthetic-refresh-token');
+  });
+
+  it('session start waits at most its cap for a Keychain that does not answer (a locked one shows a dialog)', async () => {
+    const calls: string[][] = [];
+    const hangs: SecurityRun = (args) => {
+      calls.push(args);
+      return new Promise(() => {});
+    };
+    const t0 = Date.now();
+    expect(await removeOldDriveSignInWithin(150, { env, log: () => {}, platform: 'darwin', run: hangs, fetch: google({ status: 200 }).fetch })).toBe('still_running');
+    expect(Date.now() - t0).toBeLessThan(1500);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('a lookup that timed out is remembered (a timestamp only, mode 600): skipped for a day, then tried again', async () => {
+    const t = Date.parse('2026-11-13T09:00:00.000Z');
+    let calls = 0;
+    const slow: SecurityRun = async () => {
+      calls++;
+      return { code: 1, stdout: '', timedOut: true };
+    };
+    const logs: string[] = [];
+    const run = (now: number) => removeOldDriveSignIn({ env, log: (l) => logs.push(l), platform: 'darwin', run: slow, fetch: google({ status: 200 }).fetch, now: () => now });
+    expect(await run(t)).toBe('timed_out');
+    expect(calls).toBe(1);
+    const file = backoffPath(env);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(readFileSync(file, 'utf8')).toBe('2026-11-13T09:00:00.000Z\n');
+    expect(logs).toEqual(['the Keychain did not answer in time (it may be locked); not looking for the old Google Drive sign-in again for a day']);
+    expect(await run(t + 23 * 3_600_000)).toBe('backed_off');
+    expect(calls).toBe(1);
+    expect(await run(t + 25 * 3_600_000)).toBe('timed_out');
+    expect(calls).toBe(2);
+    // Once the Keychain answers, the note is gone.
+    const kc = keychain([]);
+    expect(await removeOldDriveSignIn({ env, log: () => {}, platform: 'darwin', run: kc.run, fetch: google({ status: 200 }).fetch, now: () => t + 50 * 3_600_000 })).toBe('absent');
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it('when the cap is reached the lookup is stopped and remembered as timed out', async () => {
+    const stoppable: SecurityRun = (_args, signal) =>
+      new Promise((resolve) => signal?.addEventListener('abort', () => resolve({ code: 1, stdout: '', timedOut: true })));
+    expect(await removeOldDriveSignInWithin(100, { env, log: () => {}, platform: 'darwin', run: stoppable, fetch: google({ status: 200 }).fetch })).toBe('timed_out');
+    expect(existsSync(backoffPath(env))).toBe(true);
   });
 });

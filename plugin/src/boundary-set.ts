@@ -22,7 +22,7 @@
 import { execFile } from 'node:child_process';
 import { promises as fsp, type Dirent } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, normalize, relative, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, relative, sep } from 'node:path';
 import type { TeamBoundaries } from './boundaries-types.js';
 import { readBoundaries, versionOk } from './boundaries-rule.js';
 import { ANY_DEPTH, credentialHit, globRe, within } from './deny-list.js';
@@ -269,14 +269,29 @@ async function keepFiles(
 
 const SKIP_DIRS = new Set(['node_modules', '.git']);
 
+/** A `.git` entry, in any case (APFS is case-insensitive: `.GIT` is the same entry there). */
+export const isGitEntryName = (name: string): boolean => name.toLowerCase() === '.git';
+
+/**
+ * Whether a folder's entries are a git directory's own (a bare repository, a separate git dir,
+ * a `.git` folder): a HEAD file beside objects/ and refs/ folders. Its config may hold a remote
+ * URL with a token; its hooks, objects and refs are never files of the member's.
+ */
+function looksLikeGitDir(entries: readonly Dirent[]): boolean {
+  const has = (name: string, dir: boolean) => entries.some((e) => e.name === name && (dir ? e.isDirectory() : e.isFile()));
+  return has('HEAD', false) && has('objects', true) && has('refs', true);
+}
+
 /**
  * Every regular file below `root` (canonical), never through a symlink or a dot entry, within
  * caps; a folder holding a `.git` entry (the top of a work tree, whatever the entry's type) is
- * not walked into but returned in `trees`.
+ * not walked into but returned in `trees`, and a git directory is not walked into but returned
+ * in `gitDirs`.
  */
-async function walk(root: string, limits: Limits): Promise<{ files: string[]; trees: string[]; truncated: boolean }> {
+async function walk(root: string, limits: Limits): Promise<{ files: string[]; trees: string[]; gitDirs: string[]; truncated: boolean }> {
   const files: string[] = [];
   const trees: string[] = [];
+  const gitDirs: string[] = [];
   let dirs = 0;
   let truncated = false;
   const until = Date.now() + limits.walkMs;
@@ -293,8 +308,12 @@ async function walk(root: string, limits: Limits): Promise<{ files: string[]; tr
     } catch {
       continue;
     }
-    if (entries.some((e) => e.name === '.git')) {
+    if (entries.some((e) => isGitEntryName(e.name))) {
       trees.push(dir);
+      continue;
+    }
+    if (looksLikeGitDir(entries)) {
+      gitDirs.push(dir);
       continue;
     }
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
@@ -302,7 +321,7 @@ async function walk(root: string, limits: Limits): Promise<{ files: string[]; tr
       if (e.name.startsWith('.')) continue;
       const p = join(dir, e.name);
       if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name) && depth < limits.walkDepth) queue.push({ dir: p, depth: depth + 1 });
+        if (!SKIP_DIRS.has(e.name.toLowerCase()) && depth < limits.walkDepth) queue.push({ dir: p, depth: depth + 1 });
       } else if (e.isFile()) {
         if (files.length >= limits.walkFiles) {
           truncated = true;
@@ -313,7 +332,7 @@ async function walk(root: string, limits: Limits): Promise<{ files: string[]; tr
     }
     if (truncated) break;
   }
-  return { files, trees, truncated };
+  return { files, trees, gitDirs, truncated };
 }
 
 // -- the set -------------------------------------------------------------------------------------
@@ -344,6 +363,34 @@ async function underGitEntry(dir: string): Promise<boolean> {
 
 const quotedName = (p: string) => JSON.stringify((basename(p) || p).slice(0, 200));
 
+/** Whether `dir` or a folder above it is a git directory's own (HEAD, objects/, refs/). */
+async function inGitDirByShape(dir: string): Promise<boolean> {
+  for (let d = dir; ; d = dirname(d)) {
+    try {
+      if (looksLikeGitDir(await fsp.readdir(d, { withFileTypes: true }))) return true;
+    } catch {
+      // not readable: not taken as one
+    }
+    if (dirname(d) === d) return false;
+  }
+}
+
+/**
+ * Whether `root` is in a git directory: by its shape, or as git says (a bare repository, inside
+ * a git dir, or a git dir that resolves to `root` or below it).
+ */
+async function inGitDir(root: string, env: NodeJS.ProcessEnv, git: GitRunner): Promise<boolean> {
+  if (await inGitDirByShape(root)) return true;
+  const out = await git(root, ['rev-parse', '--is-bare-repository', '--is-inside-git-dir', '--absolute-git-dir'], env);
+  if (out === null) return false;
+  const [bare, insideGitDir, gitDir] = out.split('\n').map((l) => l.trim());
+  if (bare === 'true' || insideGitDir === 'true') return true;
+  if (!gitDir) return false;
+  const real = (await canonical(gitDir)) ?? gitDir;
+  const rel = relative(root, real);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
 /**
  * One chosen folder's files (canonical root), by the reading rule above. Fails closed: when git
  * does not say the folder is in a work tree, but a `.git` entry sits in it or above it, git could
@@ -369,10 +416,15 @@ async function folderFiles(
     return { ...kept, notes: [] };
   }
   if (await underGitEntry(root)) return { error: unlisted };
+  // Not in a work tree: a git directory itself (a bare repository, a separate git dir) is
+  // never walked, whatever git says.
+  if (await inGitDir(root, env, git)) {
+    return { error: `folder ${quotedName(root)} is not used: it is a git repository's own folder (a bare repository or a git directory), not a folder of files` };
+  }
   const w = await walk(root, limits);
   const walked = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
   const files = [...walked.files];
-  const notes: string[] = [];
+  const notes: string[] = w.gitDirs.map((d) => `folder ${quotedName(root)}: the git directory ${quotedName(d)} in it is not used`);
   let truncated = w.truncated || walked.truncated;
   for (const tree of w.trees) {
     const rel = await trackedFiles(tree, env, git, cache);

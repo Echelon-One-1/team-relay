@@ -167,14 +167,60 @@ describe('the allowed set: the folders the member chose, by the reading rule', (
     expect(none.notes).toHaveLength(3);
   });
 
-  it('a chosen folder that cannot be resolved is not dropped silently', async () => {
-    const gone = join(f.home, 'code', 'vanishing');
-    mkdirSync(gone, { recursive: true });
-    symlinkSync(join(f.root, 'nowhere'), join(gone, 'x'));
-    // A dangling link as the chosen folder itself: memberFolderProblem says it does not exist.
-    const s = await build(['~/code/vanishing/x']);
-    expect(s.notes).toHaveLength(1);
-    rmSync(gone, { recursive: true });
+  it('a bare repository as the chosen folder (or a folder inside one) is refused, git working or not, with a note', async () => {
+    const bare = join(f.home, 'code', 'bare.git');
+    git(f.home, f.home, 'init', '-q', '--bare', bare);
+    // git internals a walk would take: a remote with a token in its URL, hooks, objects.
+    git(bare, f.home, 'remote', 'add', 'origin', 'https://alice:synthetic-token@example.com/x.git');
+    try {
+      for (const runner of [undefined, (async () => null) as GitRunner]) {
+        const s = await build(['~/code/bare.git'], runner ? { git: runner } : {});
+        expect(s.files.size).toBe(0);
+        expect(s.areas).toEqual([]);
+        expect(s.notes).toEqual(['folder "bare.git" is not used: it is a git repository\'s own folder (a bare repository or a git directory), not a folder of files']);
+        const refs = await build(['~/code/bare.git/refs'], runner ? { git: runner } : {});
+        expect(refs.files.size).toBe(0);
+        expect(refs.notes).toEqual(['folder "refs" is not used: it is a git repository\'s own folder (a bare repository or a git directory), not a folder of files']);
+      }
+    } finally {
+      rmSync(bare, { recursive: true });
+    }
+  });
+
+  it('a bare repository or a separate git directory inside a plain folder is skipped by the walk, with a note', async () => {
+    const archive = join(f.myFolder, 'archive.git');
+    const sep = join(f.myFolder, 'sep-gitdir');
+    const work = join(f.root, 'elsewhere-work');
+    git(f.home, f.home, 'init', '-q', '--bare', archive);
+    mkdirSync(work, { recursive: true });
+    git(f.home, f.home, 'init', '-q', `--separate-git-dir=${sep}`, work);
+    try {
+      const s = await build([MY_FOLDER]);
+      expect([...s.files.keys()].filter((p) => p.startsWith(`${archive}/`) || p.startsWith(`${sep}/`))).toEqual([]);
+      expect(s.files.has(join(f.myFolder, 'ideas.md'))).toBe(true);
+      expect(s.notes).toEqual([
+        'folder "team": the git directory "archive.git" in it is not used',
+        'folder "team": the git directory "sep-gitdir" in it is not used',
+      ]);
+    } finally {
+      rmSync(archive, { recursive: true });
+      rmSync(sep, { recursive: true });
+      rmSync(work, { recursive: true });
+    }
+  });
+
+  it('a .git entry in another case (.GIT, one entry on a case-insensitive disk) marks a repository too', async () => {
+    const caps = join(f.myFolder, 'caps');
+    mkdirSync(caps, { recursive: true });
+    writeFileSync(join(caps, 'a.md'), 'would be walked\n');
+    writeFileSync(join(caps, '.GIT'), 'gitdir: /nowhere\n');
+    try {
+      const s = await build([MY_FOLDER]);
+      expect(s.files.has(join(caps, 'a.md'))).toBe(false);
+      expect(s.notes).toEqual(['folder "team": git could not list the files of the repository "caps" in it, so none of them are used']);
+    } finally {
+      rmSync(caps, { recursive: true });
+    }
   });
 
   it('two chosen folders with the same name get distinct area names', async () => {

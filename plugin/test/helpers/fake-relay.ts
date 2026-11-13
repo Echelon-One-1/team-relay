@@ -299,6 +299,8 @@ export class FakeRelay {
       return this.send(res, 200, { version: v, accepted_at: v > 0 ? iso() : null });
     }
     if (m === 'PUT' && rest.length === 2 && rest[0] === 'me' && rest[1] === 'status') {
+      // As strict as the relay (member_state.py): every field, no other, each of its type.
+      if (!validStatusBody(body)) return this.send(res, 400, { error: 'invalid_body' });
       const last = this.statusAt.get(member) ?? Number.NEGATIVE_INFINITY;
       if (Date.now() - last < this.statusGapMs) return this.send(res, 429, { error: 'rate_limited' });
       this.statusAt.set(member, Date.now());
@@ -544,4 +546,19 @@ export class FakeRelay {
       ...(email !== null ? { email } : {}),
     });
   }
+}
+
+/** The relay's rule for a status body (member_state.py, 13 Nov 2026). */
+function validStatusBody(b: Record<string, unknown>): boolean {
+  const obj = (v: unknown, keys: string[]): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).sort().join() === [...keys].sort().join();
+  const str = (v: unknown, max: number) => typeof v === 'string' && v.length <= max;
+  const time = (v: unknown) => str(v, 40) && Number.isFinite(Date.parse(v as string));
+  if (!obj(b, ['daemon', 'claude', 'folder_count', 'folders_ok', 'self_test'])) return false;
+  if (!obj(b.daemon, ['version', 'started_at']) || !str(b.daemon.version, 32) || !time(b.daemon.started_at)) return false;
+  if (!obj(b.claude, ['found', 'signed_in']) || typeof b.claude.found !== 'boolean' || typeof b.claude.signed_in !== 'boolean') return false;
+  if (typeof b.folder_count !== 'number' || !Number.isInteger(b.folder_count) || b.folder_count < 0 || b.folder_count > 20) return false;
+  if (typeof b.folders_ok !== 'boolean' || (!b.folders_ok && b.folder_count !== 0)) return false;
+  if (!obj(b.self_test, ['ok', 'at', 'reason']) || typeof b.self_test.ok !== 'boolean' || !time(b.self_test.at)) return false;
+  return b.self_test.reason === null || (typeof b.self_test.reason === 'string' && b.self_test.reason.length <= 200);
 }

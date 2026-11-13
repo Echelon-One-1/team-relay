@@ -8,10 +8,10 @@
 // answers wait for the member's approval in a channel working session (M8-SPEC §5), and when
 // the relay reports open team invitations for a Google sign-in (M9-SPEC §7.2). Beside that line
 // it removes an earlier plugin's Google Drive sign-in from the Keychain (drive-token-cleanup.ts),
-// saying so on stderr only, never in the session's context.
+// saying so on stderr only, never in the session's context, and waiting for it ~2 s at most.
 
 import { CredentialFileError } from './credentials.js';
-import { removeOldDriveSignIn } from './drive-token-cleanup.js';
+import { SESSION_START_CLEANUP_CAP_MS, removeOldDriveSignInWithin } from './drive-token-cleanup.js';
 import { makeLogger } from './log.js';
 import { MEMBER_RE, NotConnected, RelayClient, RelayError, TEAM_RE, connectionFromEnv } from './relay-client.js';
 import { answeringCommand, detectChannelSession, notChannelNote } from './channel-mode.js';
@@ -114,7 +114,8 @@ function teamSettings(env: NodeJS.ProcessEnv, team: string): TeamSettings | { er
   }
 }
 
-const cleanup = removeOldDriveSignIn({ env: process.env, log: makeLogger('session-start') });
+// At most ~2 s of the hook's 10 (a locked Keychain does not answer); the daemon runs it too.
+const cleanup = removeOldDriveSignInWithin(SESSION_START_CLEANUP_CAP_MS, { env: process.env, log: makeLogger('session-start') });
 detectChannelSession({ env: process.env, role: 'asker' })
   .then(({ channel }) => sessionStartLine(process.env, channel))
   .then((line) => {
