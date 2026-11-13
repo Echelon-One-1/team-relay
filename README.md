@@ -276,6 +276,10 @@ services take traffic only from it.
    outside, the console asks for a sign-in and plain
    http redirects to https.
 
+**Roll forward only past the local-folders revision (13 Nov 2026).** Once it is deployed, the
+relay writes boundaries documents with the topic alone and member statuses with a folder count;
+an older relay image cannot read them. Never roll the relay back past it; fix forward instead.
+
 `deploy.sh` never quietly drops a setting: when the live relay has one (say
 `RELAY_PLUGIN_MARKETPLACE`, `RELAY_ALLOWED_DOMAINS`, `RELAY_BRAND_NAME` or a mounted secret) that this deploy would remove, because it is unset in
 `config/deploy.local.env` or its secret was not found, it stops and names it. Set it again, or
