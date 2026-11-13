@@ -25,19 +25,11 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from .boundaries import (
-    boundaries_json,
-    carried_since,
-    known_item_keys,
-    legacy_drive_refusal,
-    parse_set_body,
-    visible,
-)
+from .boundaries import boundaries_json, parse_set_body
 from .clock import Clock, format_time, truncate_ms, utc_now
-from .config import Settings, TeamConfig
+from .config import TeamConfig
 from .credentials import PUBLIC_ID_RE, Credentials, public_id
 from .errors import ApiError, not_found
-from .github_app import GithubApp
 from .jsonutil import canonical_json, content_digest, sha256_hex
 from .log import log_event
 from .manifest import ManifestError, ManifestValidator, ParamsError, find_capability
@@ -46,9 +38,8 @@ from .member_state import (
     acceptance_json,
     parse_accept_body,
     parse_status_body,
-    sources_json,
     status_json,
-    stored_missing,
+    stored_folder_count,
 )
 from .models import CreateRequestBody, CursorBody, ProgressBody, ReplyBody, ToolEventBody
 from .roster import (
@@ -61,7 +52,6 @@ from .roster import (
     plan_remove,
     plan_update,
 )
-from .sources import config_json, github_json
 from .store import (
     STREAMS,
     Acceptance,
@@ -278,15 +268,8 @@ class RelayService:
         manifests: ManifestValidator,
         clock: Clock = utc_now,
         poll_interval: float = 1.0,
-        *,
-        settings: Settings | None = None,
-        github: GithubApp | None = None,
     ) -> None:
         self.config = config
-        # PICKERS-SPEC §3.5, §3.6: the relay's source settings (the GitHub App, the Google
-        # Picker's public settings) and the app's client; None: not configured.
-        self._settings = settings
-        self._github = github
         self.store = store
         self.manifests = manifests
         self._clock = clock
@@ -1497,19 +1480,7 @@ class RelayService:
             raise ApiError(
                 429, "rate_limited", f"At most {limit} reads of the boundaries a minute."
             )
-        return self._boundaries_json(caller.team, await self.store.get_boundaries(caller.team))
-
-    def _allowlists(self) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
-        """RELAY_ALLOWED_DOMAINS, RELAY_GITHUB_ORGS and RELAY_ALLOWED_SHARED_DRIVES."""
-        c = self.config
-        return c.allowed_domains, c.allowed_github_orgs, c.allowed_shared_drives
-
-    def _boundaries_json(self, team: str, doc: TeamBoundaries | None) -> dict[str, Any]:
-        return boundaries_json(team, doc, *self._allowlists())
-
-    def _visible(self, doc: TeamBoundaries | None) -> TeamBoundaries | None:
-        """The boundaries as members are handed them (outside the allowlists left out)."""
-        return visible(doc, *self._allowlists()) if doc is not None else None
+        return boundaries_json(caller.team, await self.store.get_boundaries(caller.team))
 
     async def boundaries_set(self, caller: Caller, raw: Any) -> dict[str, Any]:
         """An owner replaces the team's boundaries (M10-SPEC §1). The owner rule is checked
@@ -1524,7 +1495,7 @@ class RelayService:
             snapshot = await self.roster.snapshot(caller.team, fresh=True)
             if snapshot.role(caller.member) != OWNER:
                 raise not_owner()
-            version, body = parse_set_body(raw, *self._allowlists())
+            version, topic = parse_set_body(raw)
             now = self.now()
             detail = f"version {version + 1}" + ("; via delegate" if caller.delegate else "")
             audit = self._audit(
@@ -1544,27 +1515,8 @@ class RelayService:
                         f"The boundaries changed since you read them (now version {stored}); "
                         "reload and try again.",
                     )
-                # PICKERS-SPEC §2.1: a name-matched drive can be kept, never added (against the
-                # document this replaces, read in the same transaction).
-                legacy_drive_refusal(current.drives if current is not None else None, body.drives)
-                # §7.1: when each item was last added, from the version this replaces (read in
-                # the same transaction).
-                since = carried_since(current, version + 1, body)
                 new = TeamBoundaries(
-                    version=version + 1,
-                    topic=body.topic,
-                    github_orgs=body.github_orgs,
-                    drives=body.drives,
-                    member_folders=body.member_folders,
-                    updated_at=now,
-                    updated_by=caller.member,
-                    org_since=since.orgs,
-                    drive_since=since.drives,
-                    member_folders_since=since.member_folders,
-                    github_repos=body.github_repos,
-                    drive_folders=body.drive_folders,
-                    repo_since=since.repos,
-                    folder_since=since.folders,
+                    version=version + 1, topic=topic, updated_at=now, updated_by=caller.member
                 )
                 return BoundariesChange(result=new, boundaries=new, audit=[audit])
 
@@ -1594,7 +1546,7 @@ class RelayService:
                 version=stored.version,
                 via_delegate=bool(caller.delegate),
             )
-            return self._boundaries_json(caller.team, stored)
+            return boundaries_json(caller.team, stored)
 
         return await self._guarded(caller, "boundaries_set", None, work)
 
@@ -1692,27 +1644,19 @@ class RelayService:
         """M11-SPEC §3: the caller's background answerer reports; the relay adds ``seen_at``
         (its own clock). At most one write per member per STATUS_MIN_INTERVAL (``429``).
         Never a delegate's (the app refuses it). Not audited: like a cursor move, it is the
-        transport's bookkeeping, and it holds counts and booleans only, and (PICKERS-SPEC
-        §3.3) keys of the team's own boundary items: of ``sources.missing`` only the keys of
-        items of the current boundaries (read in the same transaction) are kept, the rest
-        dropped silently."""
+        transport's bookkeeping, and it holds a count, booleans and times only. The answer is
+        the status as stored, with the caller's own ``folder_count``."""
         status = parse_status_body(raw)
         now = self.now()
 
         def fn(
-            current: MemberStatus | None,
-            entry: RosterEntry | None,
-            bounds: TeamBoundaries | None,
+            current: MemberStatus | None, entry: RosterEntry | None
         ) -> StatusChange[dict[str, Any] | None]:
             if entry is None or not entry.active:
                 raise not_found()  # removed meanwhile
             if current is not None and now < current.seen_at + STATUS_MIN_INTERVAL:
                 return StatusChange(result=None)
-            kept = status
-            if "sources" in status:
-                missing = known_item_keys(self._visible(bounds), status["sources"]["missing"])
-                kept = {**status, "sources": {**status["sources"], "missing": missing}}
-            return StatusChange(result=kept, status=MemberStatus(status=kept, seen_at=now))
+            return StatusChange(result=status, status=MemberStatus(status=status, seen_at=now))
 
         try:
             written = await self.store.set_member_status(caller.team, caller.member, fn)
@@ -1725,18 +1669,15 @@ class RelayService:
             raise ApiError(
                 429, "rate_limited", "At most one status every 20 seconds; try again shortly."
             )
-        answer = status_json(written, now)
-        if "sources" in written:
-            answer["sources"] = sources_json(written, stored_missing(written))
-        return answer
+        return {**status_json(written, now), "folder_count": stored_folder_count(written)}
 
     async def members_status(self, caller: Caller) -> dict[str, Any]:
         """M11-SPEC §3: every active member's last status (null when none), whether they are
         answering (a status within ANSWERING_WINDOW), the boundaries version they accepted,
-        and the team's current version. PICKERS-SPEC §3.4: each entry's ``sources`` (what the
-        member's Mac could not find, narrowed again to the current boundaries' items) goes to
-        an owner for every member and to anyone else for their own entry only (null for the
-        others, and when the member's plugin has not reported it)."""
+        and the team's current version. Each entry's ``folder_count`` (how many folders the
+        member chose; never their names, 13 Nov 2026) goes to an owner for every member and to
+        anyone else for their own entry only: null for the others, and when the member has no
+        status or an older plugin's status without a count."""
         await self._count_own_read(caller, "status_reads", "members_status")
         snapshot = await self.roster.snapshot(caller.team, fresh=True)
         owner = snapshot.role(caller.member) == OWNER
@@ -1744,61 +1685,27 @@ class RelayService:
         statuses = await self.store.get_member_statuses(caller.team, members)
         accepted = await self.store.get_acceptances(caller.team, members)
         current = await self.store.get_boundaries(caller.team)
-        shown = self._visible(current)
         now = self.now()
         listed = []
         for member in members:
             stored = statuses.get(member)
             acceptance = accepted.get(member)
-            sources = None
+            count = None
             if stored is not None and (owner or member == caller.member):
-                keep = known_item_keys(shown, stored_missing(stored.status))
-                sources = sources_json(stored.status, keep)
+                count = stored_folder_count(stored.status)
             listed.append(
                 {
                     "member": member,
                     "status": status_json(stored.status, stored.seen_at) if stored else None,
                     "answering": stored is not None and now - stored.seen_at <= ANSWERING_WINDOW,
                     "accepted_version": acceptance.version if acceptance else 0,
-                    "sources": sources,
+                    "folder_count": count,
                 }
             )
         return {
             "members": listed,
             "boundaries_version": current.version if current is not None else 0,
         }
-
-    # PICKERS-SPEC §3.5, §3.6: what owners pick sources from ---------------------------------
-    async def _owner_read(self, caller: Caller, endpoint: str) -> None:
-        """One against the caller's per-minute budget ``source_reads``; then the caller (the
-        member a delegate names) must be an owner (``403``)."""
-        await self._count_own_read(caller, "source_reads", endpoint)
-        snapshot = await self.roster.snapshot(caller.team, fresh=True)
-        if snapshot.role(caller.member) != OWNER:
-            raise ApiError(403, "forbidden", "Only an owner can pick the team's sources.")
-
-    async def sources_config(self, caller: Caller) -> dict[str, Any]:
-        """PICKERS-SPEC §3.5: whether the GitHub App is configured (and where an org owner
-        installs it) and the Google Picker's public settings. Never a key or a token."""
-        await self._owner_read(caller, "sources_config")
-        return config_json(self._settings)
-
-    async def sources_github(self, caller: Caller) -> dict[str, Any]:
-        """PICKERS-SPEC §3.6: the repositories of the app's installations on the relay's
-        allowed orgs. A read: logged with counts and the duration, never audited."""
-        await self._owner_read(caller, "sources_github")
-        started = time.monotonic()
-        listing = await github_json(self._github, self.config.allowed_github_orgs)
-        log_event(
-            "github_listed",
-            team=caller.team,
-            member=caller.member,
-            installations=len(listing["installations"]),
-            repos=sum(len(i["repos"]) for i in listing["installations"]),
-            duration_ms=int((time.monotonic() - started) * 1000),
-            **({"delegate": caller.delegate} if caller.delegate else {}),
-        )
-        return listing
 
     async def my_requests(self, caller: Caller, limit_raw: str | None) -> dict[str, Any]:
         """M11-SPEC §4: the caller's own unexpired questions, newest first, with the first

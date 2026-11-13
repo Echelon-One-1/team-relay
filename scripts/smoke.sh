@@ -8,8 +8,6 @@
 #   the relay's run.app URL from here -> not 200 (ingress: load balancer only)
 #   / and /login without sign-in      -> 200, the relay's public sign-in page (docs/SIGNIN-PAGE.md)
 #   /start and /team without sign-in  -> 302 (the console: IAP sends the browser to Google's sign-in)
-#   /pick/drive without sign-in       -> 302 (the console's Drive picker page, PICKERS-SPEC §5: IAP
-#                                        too; never the relay's or an open page)
 #   http://PUBLIC_HOST/v1/health      -> 301 (to https)
 #   /setup without sign-in            -> 200 from the relay with PLUGIN_MARKETPLACE set, else 404
 #                                        (M11-SPEC §5; never the console's IAP redirect)
@@ -52,8 +50,6 @@ if [[ -n "${PUBLIC_HOST:-}" ]]; then
   check "sign-in page /login" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$URL/login")"
   check "console /start without sign-in" 302 "$(curl -s -o /dev/null -w '%{http_code}' "$URL/start")"
   check "console /team without sign-in" 302 "$(curl -s -o /dev/null -w '%{http_code}' "$URL/team")"
-  check "console /pick/drive without sign-in" 302 \
-    "$(curl -s -o /dev/null -w '%{http_code}' "$URL/pick/drive")"
   check "http to https" 301 "$(curl -s -o /dev/null -w '%{http_code}' "http://${PUBLIC_HOST}/v1/health")"
   want_setup=404
   if [[ -n "${PLUGIN_MARKETPLACE:-}" ]]; then want_setup=200; fi

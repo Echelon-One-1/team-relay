@@ -33,13 +33,13 @@ Representation choices:
   credential's); ``admin_audit`` is relay-wide. Team creations count against the relay-wide
   counters in ``login_limits``. The team listing orders by document id alone, so none of
   this needs an index beyond the automatic ones.
-- Boundaries (M10-SPEC §1): ``teams/{team}/settings/boundaries``, ``drives`` a list of
-  ``{domain, shared_drive, since}`` maps, ``orgs_since`` a map of lower-case org name to the
-  version it was last added in, ``member_folders_since`` likewise (M10-SPEC §7.1); and
-  (PICKERS-SPEC §2.4) ``github_repos`` a list of ``{org, repo, id, since}`` maps and
-  ``drive_folders`` a list of ``{domain, drive_id, folder_id, folder_name, drive_name, since}``
-  maps, both absent from a document written before them (read as empty). Never expires; a
-  team's purge removes it with every other document under the team.
+- Boundaries (M10-SPEC §1): ``teams/{team}/settings/boundaries``, ``{version, topic,
+  updated_at, updated_by}`` (schema v3, local folders only, 13 Nov 2026). A document an earlier
+  relay wrote (M10's or schema v2's: ``github_orgs``, ``drives``, ``member_folders``,
+  ``github_repos``, ``drive_folders`` and their ``*_since``) reads as its topic, version and
+  who and when; the rest is ignored, and the next write replaces the whole document with the
+  v3 fields alone. Never expires; a team's purge removes it with every other document under
+  the team.
 - A member's acceptance and status (M11-SPEC §2, §3): ``teams/{team}/acceptances/{member}``
   (``{version, accepted_at}``) and ``teams/{team}/member_status/{member}`` (``{status, seen_at}``,
   ``status`` a map of counts, booleans and time strings). Neither expires; the roster
@@ -87,9 +87,7 @@ from .store import (
     BoundariesFn,
     CreateOutcome,
     CredentialRecord,
-    DriveBoundary,
     Envelope,
-    FolderBoundary,
     IdempotencyRecord,
     LoginChoice,
     LoginCode,
@@ -104,7 +102,6 @@ from .store import (
     RecipientState,
     RedeemFn,
     RedeemOutcome,
-    RepoBoundary,
     RequestDoc,
     RetiredId,
     RosterEntry,
@@ -700,101 +697,22 @@ def _admin_audit_from_doc(doc: dict[str, Any]) -> AdminAuditEntry:
 
 
 def _boundaries_to_doc(doc: TeamBoundaries) -> dict[str, Any]:
-    # The M10 fields exactly as M10 wrote them (an older relay reads these only, so members
-    # answer from less, never more: PICKERS-SPEC §2.5), then the picked lists.
+    # Written whole (``txn.set``): a field an earlier relay stored is dropped by the next write.
     return {
         "version": doc.version,
         "topic": doc.topic,
-        "github_orgs": list(doc.github_orgs),
-        "orgs_since": {o.lower(): doc.org_since[o.lower()] for o in doc.github_orgs},
-        "drives": [
-            {"domain": d.domain, "shared_drive": d.shared_drive, "since": doc.drive_since[d]}
-            for d in doc.drives
-        ],
-        "member_folders": doc.member_folders,
-        "member_folders_since": doc.member_folders_since if doc.member_folders else None,
         "updated_at": doc.updated_at,
         "updated_by": doc.updated_by,
-        "github_repos": [
-            {
-                "org": r.org,
-                "repo": r.repo,
-                "id": r.id,
-                "since": doc.repo_since[f"{r.org.lower()}/{r.repo.lower()}"],
-            }
-            for r in doc.github_repos
-        ],
-        "drive_folders": [
-            {
-                "domain": f.domain,
-                "drive_id": f.drive_id,
-                "folder_id": f.folder_id,
-                "folder_name": f.folder_name,
-                "drive_name": f.drive_name,
-                "since": doc.folder_since[f.folder_id],
-            }
-            for f in doc.drive_folders
-        ],
     }
 
 
 def _boundaries_from_doc(doc: dict[str, Any]) -> TeamBoundaries:
-    # M10-SPEC §7.1: a document saved before ``since`` was recorded counts each item as added
-    # in its own version, so a member's acceptance of an earlier version does not cover it.
-    # PICKERS-SPEC §2.3: one saved before the picked lists reads them as empty (no new version).
-    version = int(doc["version"])
-    orgs = list(doc.get("github_orgs") or [])
-    kept = doc.get("orgs_since") or {}
-    drives = [
-        (DriveBoundary(domain=d["domain"], shared_drive=d["shared_drive"]), d.get("since"))
-        for d in doc.get("drives") or []
-    ]
-    repos = [
-        (
-            RepoBoundary(
-                org=r["org"], repo=r["repo"], id=int(r["id"]) if r.get("id") is not None else None
-            ),
-            r.get("since"),
-        )
-        for r in doc.get("github_repos") or []
-    ]
-    folders = [
-        (
-            FolderBoundary(
-                domain=f["domain"],
-                drive_id=f.get("drive_id"),
-                folder_id=f["folder_id"],
-                folder_name=f["folder_name"],
-                drive_name=f.get("drive_name"),
-            ),
-            f.get("since"),
-        )
-        for f in doc.get("drive_folders") or []
-    ]
-    member_folders = bool(doc["member_folders"])
-    folders_since = doc.get("member_folders_since")
+    # Schema v3 fields only: an earlier relay's other fields (M10, schema v2) are ignored.
     return TeamBoundaries(
-        version=version,
+        version=int(doc["version"]),
         topic=doc["topic"],
-        github_orgs=orgs,
-        drives=[d for d, _ in drives],
-        member_folders=member_folders,
         updated_at=_dt(doc["updated_at"]),  # type: ignore[arg-type]
         updated_by=doc["updated_by"],
-        org_since={o.lower(): int(kept[o.lower()]) if o.lower() in kept else version for o in orgs},
-        drive_since={d: int(n) if n is not None else version for d, n in drives},
-        member_folders_since=(
-            (int(folders_since) if folders_since is not None else version)
-            if member_folders
-            else None
-        ),
-        github_repos=[r for r, _ in repos],
-        drive_folders=[f for f, _ in folders],
-        repo_since={
-            f"{r.org.lower()}/{r.repo.lower()}": int(n) if n is not None else version
-            for r, n in repos
-        },
-        folder_since={f.folder_id: int(n) if n is not None else version for f, n in folders},
     )
 
 
@@ -1779,13 +1697,9 @@ class FirestoreStore:
             await self._read_live_team(txn, team)
             snap = await _read(self._status(team, member), transaction=txn)
             entry_snap = await _read(self._roster_col(team).document(member), transaction=txn)
-            bounds_snap = await _read(self._boundaries(team), transaction=txn)
             current = _status_from_doc(snap.to_dict() or {}) if snap.exists else None
             entry = _roster_from_doc(entry_snap.to_dict() or {}) if entry_snap.exists else None
-            bounds = (
-                _boundaries_from_doc(bounds_snap.to_dict() or {}) if bounds_snap.exists else None
-            )
-            change = fn(current, entry, bounds)
+            change = fn(current, entry)
             if change.status is not None:
                 txn.set(
                     self._status(team, member),

@@ -421,10 +421,7 @@ async def test_every_route_but_the_four_reads_is_forbidden(api: Api):
         for method in sorted(route.methods):
             kwargs = {} if method == "GET" else {"json": {}}
             r = await api.delegated(method, path, EMAILS["alice"], **kwargs)
-            if method == "GET" and route.path == "/v1/teams/{team}/sources/github":
-                # Reached: this relay has no GitHub app (PICKERS-SPEC §3.6).
-                assert r.json()["error"] == "github_not_configured", r.text
-            elif method == "GET" and route.path in DELEGATE_ROUTES:
+            if method == "GET" and route.path in DELEGATE_ROUTES:
                 assert r.status_code == 200, (method, route.path, r.text)
             else:
                 assert r.status_code == 403, (method, route.path, r.text)

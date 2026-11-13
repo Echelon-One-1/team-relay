@@ -1,10 +1,10 @@
-"""M10-SPEC §1 and PICKERS-SPEC §2-§3: a team's boundaries, on both stores. The store primitive
-(read, a versioned write in one transaction with the actor's roster entry, TeamGone, the quota,
-the purge), the body's validation (the shared vectors), and the endpoints: who may read, who may
-write (owners; a delegate with manage-roster for an owner), the version check, the audit (no
-text), the rate limit, and that deleting a team removes them. The picked sources' own rules
-(keys, since rules 1-4, legacy drives, allowlists, status) are in test_picked_sources.py. The
-Firestore half needs the emulator (scripts/test-relay.sh)."""
+"""M10-SPEC §1, schema v3 (local folders only, 13 Nov 2026): a team's boundaries, its topic, on
+both stores. The store primitive (read, a versioned write in one transaction with the actor's
+roster entry, TeamGone, the quota, the purge), the body's validation (the shared vectors: valid,
+invalid, removed fields, normalised, versions), a document an earlier relay stored read as v3,
+and the endpoints: who may read, who may write (owners; a delegate with manage-roster for an
+owner), the version check, the audit (no text), the rate limit, and that deleting a team
+removes them. The Firestore half needs the emulator (scripts/test-relay.sh)."""
 
 from __future__ import annotations
 
@@ -19,16 +19,14 @@ from typing import Any
 
 import pytest
 
-from relay.boundaries import parse_set_body
+from relay.app import DELEGATE_ROUTES
+from relay.boundaries import REMOVED_FIELDS, parse_set_body
 from relay.errors import ApiError
 from relay.store import (
     AuditEntry,
     BoundariesChange,
-    DriveBoundary,
-    FolderBoundary,
     Quota,
     QuotaExceeded,
-    RepoBoundary,
     RosterEntry,
     Store,
     TeamBoundaries,
@@ -54,27 +52,13 @@ pytestmark = pytest.mark.anyio
 
 NOW = START
 
-FOLDER_ID = "1ExampleFolderClients0000000000a"
-DRIVE_ID = "0AExampleDriveId0PVA"
-FOLDER = {
-    "domain": "example.com",
-    "drive_id": DRIVE_ID,
-    "folder_id": FOLDER_ID,
-    "folder_name": "Clients",
-    "drive_name": "Example Team Drive",
-}
-# PICKERS-SPEC §3.2: every field required; no legacy drive (a PUT cannot add one).
 EXAMPLE: dict[str, Any] = {
     "topic": (
         "Example Org: our clients and their delivery, our products and tools, engineering, "
         "playbook, pipeline and team work."
     ),
-    "github_orgs": ["Example-Org"],
-    "github_repos": [{"org": "example-labs", "repo": "api", "id": 123456}],
-    "drive_folders": [FOLDER],
-    "drives": [],
-    "member_folders": False,
 }
+REMOVED_DETAIL = "no longer part of a team's boundaries (only the topic is, since 13 Nov 2026)"
 
 
 @pytest.fixture(params=["memory", "firestore"])
@@ -93,21 +77,12 @@ async def store(request: pytest.FixtureRequest) -> AsyncIterator[Store]:
         await fs.aclose()
 
 
-TEAM_DRIVE = DriveBoundary(domain="example.com", shared_drive="Example Team Drive")
-
-
 def doc(version: int, topic: str = "Our work", by: str = "owner1") -> TeamBoundaries:
     return TeamBoundaries(
         version=version,
         topic=topic,
-        github_orgs=["Example-Org", "acme"],
-        drives=[TEAM_DRIVE],
-        member_folders=True,
         updated_at=NOW + timedelta(seconds=version),
         updated_by=by,
-        org_since={"example-org": 1, "acme": version},
-        drive_since={TEAM_DRIVE: 1},
-        member_folders_since=version,
     )
 
 
@@ -257,55 +232,12 @@ def body(**changes: Any) -> dict[str, Any]:
 
 
 def test_the_example_boundaries_parse_as_given():
-    legacy = [{"domain": "example.com", "shared_drive": "Example Team Drive"}]
-    version, parsed = parse_set_body(body(drives=legacy))
-    assert version == 0
-    assert parsed.topic == EXAMPLE["topic"]
-    assert parsed.github_orgs == ["Example-Org"]
-    assert parsed.github_repos == [RepoBoundary("example-labs", "api", 123456)]
-    assert parsed.drive_folders == [
-        FolderBoundary("example.com", DRIVE_ID, FOLDER_ID, "Clients", "Example Team Drive")
-    ]
-    assert parsed.drives == [DriveBoundary("example.com", "Example Team Drive")]
-    assert parsed.member_folders is False
+    assert parse_set_body(body()) == (0, EXAMPLE["topic"])
 
 
-def test_the_topic_is_trimmed_and_lists_are_deduplicated():
-    _, parsed = parse_set_body(
-        body(
-            topic="  Our clients  ",
-            github_orgs=["Example-Org", "example-org", "acme", "ACME", "b"],
-            drives=[
-                {"domain": "example.com", "shared_drive": "Team"},
-                {"domain": "example.com", "shared_drive": "Team"},
-                {"domain": "example.com", "shared_drive": "Other"},
-                {"domain": "example.org", "shared_drive": "Team"},
-            ],
-        )
-    )
-    assert parsed.topic == "Our clients"
-    assert parsed.github_orgs == ["Example-Org", "acme", "b"]  # first spelling kept
-    assert parsed.drives == [
-        DriveBoundary("example.com", "Team"),
-        DriveBoundary("example.com", "Other"),
-        DriveBoundary("example.org", "Team"),
-    ]
-
-
-def test_limits_hold_after_deduplication():
-    orgs = [f"org{i}" for i in range(10)]
-    _, parsed = parse_set_body(body(github_orgs=orgs))
-    assert parsed.github_orgs == orgs
-    _, parsed = parse_set_body(body(github_orgs=[], drives=[]))
-    assert parsed.github_orgs == [] and parsed.drives == []
-    _, parsed = parse_set_body(body(topic="x" * 500))
-    assert len(parsed.topic) == 500
-    _, parsed = parse_set_body(body(github_orgs=["a" * 39, "A1-b", "9"]))
-    assert parsed.github_orgs == ["a" * 39, "A1-b", "9"]
-    long_domain = ".".join(["a" * 63] * 3) + "." + "b" * 61  # 253 characters
-    assert len(long_domain) == 253
-    _, parsed = parse_set_body(body(drives=[{"domain": long_domain, "shared_drive": "x" * 100}]))
-    assert parsed.drives[0].domain == long_domain
+def test_the_topic_is_trimmed_to_at_most_500():
+    assert parse_set_body(body(topic="  Our clients  "))[1] == "Our clients"
+    assert len(parse_set_body(body(topic="x" * 500))[1]) == 500
 
 
 BAD_BOUNDARIES: list[dict[str, Any]] = [
@@ -319,53 +251,11 @@ BAD_BOUNDARIES: list[dict[str, Any]] = [
     {"topic": "line\u2028separator"},
     {"topic": "zero\u200bwidth"},
     {"topic": "private \ue000 use"},
-    {"topic": "bidi ‮ override"},
+    {"topic": "bidi \u202e override"},
     {"topic": "nul \x00"},
     {"topic": 5},
     {"topic": None},
-    {"github_orgs": "Example-Org"},
-    {"github_orgs": [f"org{i}" for i in range(11)]},
-    {"github_orgs": [f"org{i % 3}" for i in range(11)]},  # capped before de-duplication
-    {"github_orgs": ["-leading"]},
-    {"github_orgs": [""]},
-    {"github_orgs": ["a" * 40]},
-    {"github_orgs": ["under_score"]},
-    {"github_orgs": ["dot.ted"]},
-    {"github_orgs": ["trailing\n"]},
-    {"github_orgs": ["ünïcode"]},
-    {"github_orgs": [1]},
-    {"drives": {"domain": "example.com", "shared_drive": "x"}},
-    {"drives": [{"domain": "example.com", "shared_drive": f"d{i}"} for i in range(11)]},
-    {"drives": [{"domain": "example.com"}]},
-    {"drives": [{"shared_drive": "x"}]},
-    {"drives": [{"domain": "example.com", "shared_drive": "x", "id": "y"}]},
-    {"drives": [{"domain": "Example.com", "shared_drive": "x"}]},
-    {"drives": [{"domain": "example", "shared_drive": "x"}]},
-    {"drives": [{"domain": "example.com.", "shared_drive": "x"}]},
-    {"drives": [{"domain": ".example.com", "shared_drive": "x"}]},
-    {"drives": [{"domain": "example..com", "shared_drive": "x"}]},
-    {"drives": [{"domain": "-example.com", "shared_drive": "x"}]},
-    {"drives": [{"domain": "example-.com", "shared_drive": "x"}]},
-    {"drives": [{"domain": "example_org.com", "shared_drive": "x"}]},
-    {"drives": [{"domain": "10.0.0.1", "shared_drive": "x"}]},
-    {"drives": [{"domain": "a" * 64 + ".com", "shared_drive": "x"}]},
-    {"drives": [{"domain": ".".join(["a" * 63] * 4), "shared_drive": "x"}]},  # 255
-    {"drives": [{"domain": "example.com\n", "shared_drive": "x"}]},
-    {"drives": [{"domain": "user@example.com", "shared_drive": "x"}]},
-    {"drives": [{"domain": "éxample.com", "shared_drive": "x"}]},
-    {"drives": [{"domain": "example.com", "shared_drive": ""}]},
-    {"drives": [{"domain": "example.com", "shared_drive": "   "}]},
-    {"drives": [{"domain": "example.com", "shared_drive": "x" * 101}]},
-    {"drives": [{"domain": "example.com", "shared_drive": "a/b"}]},
-    {"drives": [{"domain": "example.com", "shared_drive": ".."}]},
-    {"drives": [{"domain": "example.com", "shared_drive": "."}]},
-    {"drives": [{"domain": "example.com", "shared_drive": "new\nline"}]},
-    {"drives": [{"domain": "example.com", "shared_drive": "nul\x00"}]},
-    {"drives": [{"domain": "example.com", "shared_drive": "bidi‮"}]},
-    {"drives": [{"domain": "example.com", "shared_drive": 7}]},
-    {"member_folders": "yes"},
-    {"member_folders": 1},
-    {"member_folders": None},
+    {"topic": ["a list"]},
 ]
 
 
@@ -374,6 +264,7 @@ def test_invalid_boundaries_are_400(change: dict[str, Any]):
     with pytest.raises(ApiError) as caught:
         parse_set_body(body(**change))
     assert (caught.value.status, caught.value.code) == (400, "invalid_body")
+    assert (caught.value.detail or "").startswith("boundaries.topic: ")
 
 
 @pytest.mark.parametrize(
@@ -392,9 +283,9 @@ def test_invalid_boundaries_are_400(change: dict[str, Any]):
         {"version": 1.0, "boundaries": EXAMPLE},
         {"version": 2**63, "boundaries": EXAMPLE},
         {"version": 0, "boundaries": None},
+        {"version": 0, "boundaries": "topic"},
         {"version": 0, "boundaries": {**EXAMPLE, "secret": "x"}},
-        {"version": 0, "boundaries": {k: v for k, v in EXAMPLE.items() if k != "topic"}},
-        {"version": 0, "boundaries": {k: v for k, v in EXAMPLE.items() if k != "member_folders"}},
+        {"version": 0, "boundaries": {}},
     ],
 )
 def test_invalid_bodies_are_400(raw: Any):
@@ -407,24 +298,34 @@ def test_a_refusal_never_echoes_the_input():
     marker = "do-not-echo-" + uuid.uuid4().hex
     for change in (
         {"topic": marker + "\x01" + marker},
-        {"github_orgs": [marker + "!"]},
-        {"drives": [{"domain": marker + ".COM", "shared_drive": "x"}]},
-        {"drives": [{"domain": "a.com", "shared_drive": marker + "/"}]},
-        {"github_repos": [{"org": "example-org", "repo": marker + "/x", "id": None}]},
-        {"github_repos": [{"org": marker + "_", "repo": "x", "id": None}]},
-        {"drive_folders": [{**FOLDER, "folder_name": marker + "\n"}]},
-        {"drive_folders": [{**FOLDER, "folder_id": marker + "/"}]},
-        {"drive_folders": [{**FOLDER, "drive_name": " " + marker}]},
+        {"topic": marker * 20},
+        {"github_orgs": [marker]},
+        {"drive_folders": [{"folder_name": marker}]},
     ):
         with pytest.raises(ApiError) as caught:
             parse_set_body(body(**change))
         assert marker not in str(caught.value.body())
-    with pytest.raises(ApiError) as caught:
-        parse_set_body({"version": 0, "boundaries": EXAMPLE, marker: 1})
-    assert marker not in str(caught.value.body())
+    for raw in (
+        {"version": 0, "boundaries": EXAMPLE, marker: 1},
+        {"version": 0, "boundaries": {**EXAMPLE, marker: 1}},
+    ):
+        with pytest.raises(ApiError) as caught:
+            parse_set_body(raw)
+        assert marker not in str(caught.value.body())
 
 
-# M10-SPEC §7.5: the shared vectors ----------------------------------------------------------------
+@pytest.mark.parametrize("field", REMOVED_FIELDS)
+def test_each_removed_field_is_named_even_when_its_value_is_bad(field: str):
+    """A removed field is refused by name whatever it holds, before anything else of the body is
+    looked at (an older console's body is told why, never "unknown field")."""
+    for value in (None, [], "x", {"nested": True}):
+        with pytest.raises(ApiError) as caught:
+            parse_set_body({"version": 0, "boundaries": {field: value}})
+        assert caught.value.code == "invalid_body"
+        assert caught.value.detail == f"boundaries.{field}: {REMOVED_DETAIL}"
+
+
+# The shared vectors (schema v3) -------------------------------------------------------------------
 
 VECTORS_PATH = REPO_ROOT / "schema" / "boundaries-vectors.json"
 
@@ -432,24 +333,7 @@ VECTORS_PATH = REPO_ROOT / "schema" / "boundaries-vectors.json"
 def _vectors() -> dict[str, Any]:
     raw = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
     # Each placeholder's value, as the file's "placeholders" texts say.
-    placeholders = {
-        "TOPIC_501": "a" * 501,
-        "DOMAIN_253": f"{'a' * 63}.{'b' * 63}.{'c' * 63}.{'d' * 57}.com",
-        "DOMAIN_254": f"{'a' * 63}.{'b' * 63}.{'c' * 63}.{'d' * 58}.com",
-        "LABEL_63_DOMAIN": f"{'a' * 63}.example.com",
-        "LABEL_64_DOMAIN": f"{'a' * 64}.example.com",
-        "DRIVE_100": "d" * 100,
-        "DRIVE_101": "d" * 101,
-        "REPO_100": "r" * 100,
-        "REPO_101": "r" * 101,
-        "FOLDER_NAME_255": "f" * 255,
-        "FOLDER_NAME_256": "f" * 256,
-        "ID_200": "x" * 200,
-        "ID_201": "x" * 201,
-        "KEY_400": "k" * 400,
-        "KEY_401": "k" * 401,
-    }
-    assert len(placeholders["DOMAIN_253"]) == 253 and len(placeholders["DOMAIN_254"]) == 254
+    placeholders = {"TOPIC_500": "a" * 500, "TOPIC_501": "a" * 501}
     # Every placeholder the file names is one this test knows how to expand.
     assert set(raw["placeholders"]) == set(placeholders)
 
@@ -469,17 +353,19 @@ VECTORS = _vectors()
 
 
 def test_the_vectors_expand_their_placeholders():
-    topics = [case["boundaries"]["topic"] for case in VECTORS["invalid"]]
-    assert "a" * 501 in topics and "TOPIC_501" not in topics
-    text = json.dumps([VECTORS["valid"], VECTORS["invalid"]])
+    valid = [b["topic"] for b in VECTORS["valid"]]
+    invalid = [case["boundaries"].get("topic") for case in VECTORS["invalid"]]
+    assert "a" * 500 in valid and "a" * 501 in invalid
+    text = json.dumps({k: v for k, v in VECTORS.items() if k != "placeholders"})
     assert not any(f'"{name}"' in text for name in VECTORS["placeholders"])
 
 
 @pytest.mark.parametrize("boundaries", VECTORS["valid"])
 def test_every_valid_vector_is_accepted(boundaries: dict[str, Any]):
-    _, parsed = parse_set_body({"version": 0, "boundaries": boundaries})
-    assert parsed.topic == boundaries["topic"].strip()
-    assert parsed.member_folders is boundaries["member_folders"]
+    assert parse_set_body({"version": 0, "boundaries": boundaries}) == (
+        0,
+        boundaries["topic"].strip(),
+    )
 
 
 @pytest.mark.parametrize("case", VECTORS["invalid"], ids=lambda case: case["why"])
@@ -487,23 +373,27 @@ def test_every_invalid_vector_is_400(case: dict[str, Any]):
     with pytest.raises(ApiError) as caught:
         parse_set_body({"version": 0, "boundaries": case["boundaries"]})
     assert (caught.value.status, caught.value.code) == (400, "invalid_body")
-    # PICKERS-SPEC §3: the refusal names the field at fault (the body itself: no field).
+    # The refusal names the field at fault (the body itself: no field).
     detail = caught.value.detail or ""
     where = detail.split(":", 1)[0]
     if case["field"] is None:
         assert where in ("(body)", "boundaries"), detail
     else:
-        assert where == f"boundaries.{case['field']}" or where.startswith(
-            f"boundaries.{case['field']}."
-        ), detail
+        assert where == f"boundaries.{case['field']}", detail
 
 
-@pytest.mark.parametrize("raw", VECTORS["m10_documents"])
-def test_an_m10_shaped_body_is_400(raw: dict[str, Any]):
-    """PICKERS-SPEC §3.2: every field is required; an older console's body is refused."""
+@pytest.mark.parametrize("case", VECTORS["removed"], ids=lambda case: case["field"])
+def test_every_removed_vector_is_400_naming_the_field(case: dict[str, Any]):
     with pytest.raises(ApiError) as caught:
-        parse_set_body({"version": 0, "boundaries": raw})
+        parse_set_body({"version": 0, "boundaries": case["boundaries"]})
     assert (caught.value.status, caught.value.code) == (400, "invalid_body")
+    assert caught.value.detail == f"boundaries.{case['field']}: {REMOVED_DETAIL}"
+
+
+@pytest.mark.parametrize("case", VECTORS["normalised"], ids=lambda case: case["why"])
+def test_every_normalised_vector_is_stored_as_expected(case: dict[str, Any]):
+    _, topic = parse_set_body({"version": 0, "boundaries": case["boundaries"]})
+    assert {"topic": topic} == case["expect"]
 
 
 @pytest.mark.parametrize("version", VECTORS["versions"]["valid"])
@@ -518,165 +408,111 @@ def test_every_invalid_version_vector_is_400(version: Any):
     assert (caught.value.status, caught.value.code) == (400, "invalid_body")
 
 
-def test_a_topic_keeps_its_inner_newlines_and_tabs():
-    _, parsed = parse_set_body(body(topic="\n  Clients:\n\t- one\n\t- two\n\t"))
-    assert parsed.topic == "Clients:\n\t- one\n\t- two"
+def _stored_document(stored: dict[str, Any], version: int) -> dict[str, Any]:
+    """A vector's stored boundaries as an earlier relay wrote the Firestore document: its fields
+    and each item's ``since``, beside the version and who and when."""
+    out: dict[str, Any] = {
+        **stored,
+        "version": version,
+        "updated_at": NOW,
+        "updated_by": "owner1",
+    }
+    if "github_orgs" in stored:
+        out["orgs_since"] = {o.lower(): 1 for o in stored["github_orgs"]}
+    if "drives" in stored:
+        out["drives"] = [{**d, "since": 1} for d in stored["drives"]]
+    if "member_folders" in stored:
+        out["member_folders_since"] = 1 if stored["member_folders"] else None
+    if "github_repos" in stored:
+        out["github_repos"] = [{**r, "since": 1} for r in stored["github_repos"]]
+    if "drive_folders" in stored:
+        out["drive_folders"] = [{**f, "since": 1} for f in stored["drive_folders"]]
+    return out
 
 
-async def store_legacy(api: Api, drives: list[dict[str, Any]]) -> int:
-    """Store a document holding ``drives`` (as the M10 code could), over what is stored, so a
-    PUT may keep them (PICKERS-SPEC §2.1); the new version."""
-    stored = await api.store.get_boundaries(api.team)
-    version = (stored.version if stored else 0) + 1
-    held = [DriveBoundary(d["domain"], d["shared_drive"]) for d in drives]
-    saved = TeamBoundaries(
-        version=version,
-        topic="Legacy",
-        github_orgs=[],
-        drives=held,
-        member_folders=False,
-        updated_at=NOW,
-        updated_by="alice",
-        org_since={},
-        drive_since=dict.fromkeys(held, version),
-        member_folders_since=None,
+@pytest.mark.parametrize("case", VECTORS["stored"], ids=lambda case: case["why"])
+def test_every_stored_vector_reads_as_its_topic(case: dict[str, Any]):
+    """A document an earlier relay stored (M10, schema v2) reads as v3: topic, version and who
+    and when kept, the rest ignored."""
+    from relay.boundaries import boundaries_json
+    from relay.store_firestore import _boundaries_from_doc
+
+    read = _boundaries_from_doc(_stored_document(case["stored"], 3))
+    assert read == TeamBoundaries(
+        version=3, topic=case["expect"]["topic"], updated_at=NOW, updated_by="owner1"
     )
-    await api.store.set_boundaries(
-        api.team, "alice", setting(api.team, version - 1, saved, owner_only=False)
-    )
-    return version
+    assert boundaries_json("t", read)["boundaries"] == case["expect"]
+
+
+async def test_a_stored_v2_document_reads_as_v3_and_the_next_write_drops_the_rest(clock: FakeClock):
+    """On the emulator: every stored vector written as an earlier relay wrote it reads over HTTP
+    as its topic alone; members' acceptances of its version still count; an owner's next PUT
+    (of the version read) replaces the whole document with the v3 fields only."""
+    if not emulator_host():
+        pytest.skip("FIRESTORE_EMULATOR_HOST is not set; run scripts/test-relay.sh")
+    from relay.store_firestore import FirestoreStore, _read
+
+    for case in VECTORS["stored"]:
+        async with open_api("firestore", clock) as api:
+            fs = api.store
+            assert isinstance(fs, FirestoreStore)
+            ref = fs._boundaries(api.team)  # noqa: SLF001 - an earlier relay's exact shape
+            await ref.set(_stored_document(case["stored"], 4))
+            r = await api.get("bob", "/boundaries")
+            assert r.status_code == 200, r.text
+            assert r.json() == {
+                "team": api.team,
+                "version": 4,
+                "boundaries": case["expect"],
+                "updated_at": "2026-09-23T12:00:00.000Z",
+                "updated_by": "owner1",
+            }, case["why"]
+            r = await api.client.put(
+                api.url("/me/acceptance"), headers=auth("bob"), json={"version": 4}
+            )
+            assert r.status_code == 200, r.text
+            r = await put(api, "alice", {"version": 4, "boundaries": {"topic": "Changed"}})
+            assert r.status_code == 200, r.text
+            raw = (await _read(ref)).to_dict()
+            assert raw is not None
+            assert set(raw) == {"version", "topic", "updated_at", "updated_by"}, case["why"]
+            assert (raw["version"], raw["topic"], raw["updated_by"]) == (5, "Changed", "alice")
 
 
 async def test_the_vectors_hold_over_http(api: Api):
     version = 0
     for boundaries in VECTORS["valid"]:
-        if boundaries["drives"]:
-            version = await store_legacy(api, boundaries["drives"])
         r = await put(api, "alice", {"version": version, "boundaries": boundaries})
         assert r.status_code == 200, (boundaries, r.text)
         version += 1
         assert r.json()["version"] == version
+        assert r.json()["boundaries"] == {"topic": boundaries["topic"].strip()}
     for case in VECTORS["invalid"]:
-        # As JSON text (ASCII escapes), so a lone surrogate is sent as the vector has it.
         r = await api.client.put(
             api.url("/boundaries"),
             headers={**auth("alice"), "Content-Type": "application/json"},
             content=json.dumps({"version": version, "boundaries": case["boundaries"]}),
         )
-        # A lone surrogate never reaches the rule: the relay's JSON reader refuses the body.
-        lone = "lone surrogate" in case["why"]
-        want = (400, "invalid_json" if lone else "invalid_body")
-        assert (r.status_code, r.json()["error"]) == want, case["why"]
-    for raw in VECTORS["m10_documents"]:
-        r = await put(api, "alice", {"version": version, "boundaries": raw})
+        assert (r.status_code, r.json()["error"]) == (400, "invalid_body"), case["why"]
+    for case in VECTORS["removed"]:
+        r = await put(api, "alice", {"version": version, "boundaries": case["boundaries"]})
         assert (r.status_code, r.json()["error"]) == (400, "invalid_body")
+        assert r.json()["detail"] == f"boundaries.{case['field']}: {REMOVED_DETAIL}"
+    for case in VECTORS["normalised"]:
+        r = await put(api, "alice", {"version": version, "boundaries": case["boundaries"]})
+        assert r.status_code == 200, r.text
+        version += 1
+        assert r.json()["boundaries"] == case["expect"]
     for bad in VECTORS["versions"]["invalid"]:
         r = await put(api, "alice", {"version": bad, "boundaries": VECTORS["valid"][0]})
         assert (r.status_code, r.json()["error"]) == (400, "invalid_body"), bad
     assert (await api.get("bob", "/boundaries")).json()["version"] == version
 
 
-# M10-SPEC §7.2: drives only in the relay's own domains --------------------------------------------
-
-
-def test_with_allowed_domains_every_drive_domain_must_be_one():
-    allowed = frozenset({"example.com", "example.org"})
-    drives = [
-        {"domain": "example.com", "shared_drive": "A"},
-        {"domain": "example.org", "shared_drive": "B"},
-    ]
-    _, parsed = parse_set_body(body(drives=drives), allowed)
-    assert [d.domain for d in parsed.drives] == ["example.com", "example.org"]
-    for domain in ("sub.example.com", "example.net", "com.example.com", "xample.com"):
-        bad = [*drives, {"domain": domain, "shared_drive": "C"}]
-        with pytest.raises(ApiError) as caught:
-            parse_set_body(body(drives=bad), allowed)
-        assert (caught.value.status, caught.value.code) == (400, "domain_not_allowed")
-        assert domain not in str(caught.value.body())
-    # Unset: any domain, as before.
-    assert parse_set_body(body(drives=[{"domain": "example.net", "shared_drive": "C"}]))
-
-
-@pytest.mark.parametrize("kind", ["memory", "firestore"])
-async def test_a_drive_outside_the_allowed_domains_is_400(kind: str, clock: FakeClock):
-    allowed = frozenset({"example.com"})
-    async with open_api(kind, clock, allowed_domains=allowed) as api:
-        bad = {**EXAMPLE, "drives": [{"domain": "example.org", "shared_drive": "D"}]}
-        r = await put(api, "alice", {"version": 0, "boundaries": bad})
-        assert (r.status_code, r.json()["error"]) == (400, "domain_not_allowed")
-        assert (await api.get("bob", "/boundaries")).json()["version"] == 0
-        r = await put(api, "alice", {"version": 0, "boundaries": EXAMPLE})
-        assert r.status_code == 200, r.text
-
-
-@pytest.mark.parametrize("kind", ["memory", "firestore"])
-async def test_a_drive_saved_before_the_allowed_domains_were_set_is_never_handed_out(
-    kind: str, clock: FakeClock
-):
-    """Boundaries saved while RELAY_ALLOWED_DOMAINS was unset may hold a drive of another
-    domain; once it is set, GET leaves that drive out (the rest is as stored)."""
-    allowed = frozenset({"example.com"})
-    async with open_api(kind, clock, allowed_domains=allowed) as api:
-        saved = TeamBoundaries(
-            version=4,
-            topic="Our work",
-            github_orgs=["Example-Org"],
-            drives=[
-                DriveBoundary(domain="example.org", shared_drive="Other Domain Drive"),
-                DriveBoundary(domain="example.com", shared_drive="Example Team Drive"),
-                DriveBoundary(domain="sub.example.com", shared_drive="Sub Drive"),
-            ],
-            member_folders=True,
-            updated_at=NOW,
-            updated_by="alice",
-            org_since={"example-org": 2},
-            drive_since={
-                DriveBoundary(domain="example.org", shared_drive="Other Domain Drive"): 1,
-                DriveBoundary(domain="example.com", shared_drive="Example Team Drive"): 3,
-                DriveBoundary(domain="sub.example.com", shared_drive="Sub Drive"): 4,
-            },
-            member_folders_since=4,
-        )
-        stored = await api.store.set_boundaries(
-            api.team, "alice", setting(api.team, 0, saved, owner_only=False)
-        )
-        assert stored == "set"
-        for member in ("alice", "bob"):
-            r = await api.get(member, "/boundaries")
-            assert r.status_code == 200, r.text
-            body = r.json()
-            assert body["version"] == 4
-            assert body["boundaries"] == {
-                "topic": "Our work",
-                "github_orgs": ["Example-Org"],
-                "github_repos": [],
-                "drive_folders": [],
-                "drives": [{"domain": "example.com", "shared_drive": "Example Team Drive"}],
-                "member_folders": True,
-            }
-            assert body["since"] == {
-                "github_orgs": {"example-org": 2},
-                "github_repos": {},
-                "drive_folders": {},
-                "drives": [
-                    {"domain": "example.com", "shared_drive": "Example Team Drive", "since": 3}
-                ],
-                "member_folders": 4,
-            }
-            assert "example.org" not in r.text and "Sub Drive" not in r.text
-        # The store keeps what was saved: only what is handed out is narrowed.
-        assert await api.store.get_boundaries(api.team) == saved
-    # Unset: every drive, as stored.
-    async with open_api(kind, clock) as api:
-        await api.store.set_boundaries(
-            api.team, "alice", setting(api.team, 0, saved, owner_only=False)
-        )
-        r = await api.get("bob", "/boundaries")
-        assert [d["domain"] for d in r.json()["boundaries"]["drives"]] == [
-            "example.org",
-            "example.com",
-            "sub.example.com",
-        ]
+def test_a_topic_keeps_its_inner_newlines_and_tabs():
+    assert parse_set_body(body(topic="\n  Clients:\n\t- one\n\t- two\n\t"))[1] == (
+        "Clients:\n\t- one\n\t- two"
+    )
 
 
 # The endpoints ------------------------------------------------------------------------------------
@@ -702,6 +538,18 @@ async def put(api: Api, member: str, payload: Any) -> Any:
     return await api.client.put(api.url("/boundaries"), headers=auth(member), json=payload)
 
 
+async def test_the_source_routes_are_gone(api: Api):
+    """Local folders only (13 Nov 2026): no source settings, GitHub listing or Drive client,
+    for an owner, a member or a delegate reading for an owner."""
+    for path in ("/sources/config", "/sources/github", "/drive-client"):
+        for member in ("alice", "bob"):
+            r = await api.get(member, path)
+            assert r.status_code == 404, (path, member, r.text)
+        r = await api.delegated("GET", path, EMAILS["alice"])
+        assert r.status_code in (403, 404), (path, r.text)
+    assert not [route for route in DELEGATE_ROUTES if "/sources/" in route]
+
+
 async def test_never_set_boundaries_read_as_version_0(api: Api):
     r = await api.get("bob", "/boundaries")
     assert r.status_code == 200, r.text
@@ -709,7 +557,6 @@ async def test_never_set_boundaries_read_as_version_0(api: Api):
         "team": api.team,
         "version": 0,
         "boundaries": None,
-        "since": None,
         "updated_at": None,
         "updated_by": None,
     }
@@ -722,13 +569,6 @@ async def test_an_owner_sets_them_and_every_member_reads_them(api: Api):
         "team": api.team,
         "version": 1,
         "boundaries": EXAMPLE,
-        "since": {
-            "github_orgs": {"example-org": 1},
-            "github_repos": {"example-labs/api": 1},
-            "drive_folders": {FOLDER_ID: 1},
-            "drives": [],
-            "member_folders": None,
-        },
         "updated_at": "2026-09-23T12:00:00.000Z",
         "updated_by": "alice",
     }
@@ -737,175 +577,12 @@ async def test_an_owner_sets_them_and_every_member_reads_them(api: Api):
         r = await api.get(member, "/boundaries")
         assert r.status_code == 200 and r.json() == expected
     api.clock.advance(60)
-    changed = {**EXAMPLE, "member_folders": True, "github_orgs": ["Example-Org", "acme"]}
+    changed = {"topic": "Changed"}
     r = await put(api, "alice", {"version": 1, "boundaries": changed})
     assert r.status_code == 200
     assert r.json()["version"] == 2 and r.json()["boundaries"] == changed
     assert r.json()["updated_at"] == "2026-09-23T12:01:00.000Z"
     assert (await api.get("bob", "/boundaries")).json()["version"] == 2
-
-
-async def test_since_says_in_which_version_each_item_was_last_added(api: Api):
-    """M10-SPEC §7.1: an item keeps the version it was added in while it stays (whatever else
-    changes, and whatever the org's case); dropped and added back, it gets the version that
-    added it back. Member folders likewise while allowed. (PICKERS-SPEC §2.3's rules 2 and 3
-    are in test_picked_sources.py.)"""
-    other_id = "1ExampleFolderOther00000000000zz"
-    other = {**FOLDER, "folder_id": other_id, "folder_name": "Other"}
-    steps: list[tuple[dict[str, Any], dict[str, Any]]] = [
-        (
-            EXAMPLE,
-            {"github_orgs": {"example-org": 1}, "folders": {FOLDER_ID: 1}, "member_folders": None},
-        ),
-        (
-            {**EXAMPLE, "topic": "Changed", "github_orgs": ["example-org", "acme"]},
-            {
-                "github_orgs": {"example-org": 1, "acme": 2},
-                "folders": {FOLDER_ID: 1},
-                "member_folders": None,
-            },
-        ),
-        (
-            {**EXAMPLE, "github_orgs": ["acme"], "drive_folders": [], "member_folders": True},
-            {"github_orgs": {"acme": 2}, "folders": {}, "member_folders": 3},
-        ),
-        (
-            {
-                **EXAMPLE,
-                "github_orgs": ["ACME", "Example-Org"],
-                "drive_folders": [other, FOLDER],
-                "member_folders": True,
-            },
-            {
-                "github_orgs": {"acme": 2, "example-org": 4},
-                "folders": {other_id: 4, FOLDER_ID: 4},
-                "member_folders": 3,
-            },
-        ),
-        (
-            {**EXAMPLE, "github_orgs": ["acme", "Example-Org"], "member_folders": False},
-            {
-                "github_orgs": {"acme": 2, "example-org": 4},
-                "folders": {FOLDER_ID: 4},
-                "member_folders": None,
-            },
-        ),
-        (
-            {
-                **EXAMPLE,
-                "github_orgs": ["acme", "Example-Org"],
-                "drive_folders": [other, FOLDER],
-                "member_folders": True,
-            },
-            {
-                "github_orgs": {"acme": 2, "example-org": 4},
-                "folders": {other_id: 6, FOLDER_ID: 4},
-                "member_folders": 6,
-            },
-        ),
-    ]
-    for version, (boundaries, want) in enumerate(steps):
-        r = await put(api, "alice", {"version": version, "boundaries": boundaries})
-        assert r.status_code == 200, r.text
-        since = r.json()["since"]
-        assert since["github_orgs"] == want["github_orgs"], version + 1
-        assert since["drive_folders"] == want["folders"], version + 1
-        assert since["drives"] == [], version + 1
-        assert since["member_folders"] == want["member_folders"], version + 1
-        assert (await api.get("bob", "/boundaries")).json()["since"] == since
-
-
-async def test_since_is_computed_from_the_version_the_write_replaces(store: Store):
-    """The service's function gets the stored version inside the writing transaction, so
-    ``since`` is carried from exactly the version a write replaces (both stores)."""
-    from relay.boundaries import Boundaries, carried_since
-
-    team, email = new_id(), new_email()
-    await create(store, team, email)
-    plain = Boundaries(
-        topic="T",
-        github_orgs=["Example-Org"],
-        drives=[TEAM_DRIVE],
-        member_folders=False,
-        github_repos=[],
-        drive_folders=[],
-    )
-    dropped = Boundaries(
-        topic="T",
-        github_orgs=[],
-        drives=[],
-        member_folders=False,
-        github_repos=[],
-        drive_folders=[],
-    )
-
-    def write(expected: int, body: Boundaries):
-        def fn(current: TeamBoundaries | None, actor: RosterEntry | None) -> BoundariesChange[str]:
-            assert (current.version if current else 0) == expected
-            since = carried_since(current, expected + 1, body)
-            new = TeamBoundaries(
-                version=expected + 1,
-                topic=body.topic,
-                github_orgs=body.github_orgs,
-                drives=body.drives,
-                member_folders=body.member_folders,
-                updated_at=NOW,
-                updated_by="owner1",
-                org_since=since.orgs,
-                drive_since=since.drives,
-                member_folders_since=since.member_folders,
-                github_repos=body.github_repos,
-                drive_folders=body.drive_folders,
-                repo_since=since.repos,
-                folder_since=since.folders,
-            )
-            return BoundariesChange(result="set", boundaries=new)
-
-        return fn
-
-    await store.set_boundaries(team, "owner1", write(0, plain))
-    await store.set_boundaries(team, "owner1", write(1, plain))
-    stored = await store.get_boundaries(team)
-    assert stored is not None
-    assert (stored.org_since, stored.drive_since) == ({"example-org": 1}, {TEAM_DRIVE: 1})
-    await store.set_boundaries(team, "owner1", write(2, dropped))
-    await store.set_boundaries(team, "owner1", write(3, plain))
-    stored = await store.get_boundaries(team)
-    assert stored is not None
-    assert (stored.org_since, stored.drive_since) == ({"example-org": 4}, {TEAM_DRIVE: 4})
-    assert stored.member_folders_since is None
-
-
-async def test_a_document_saved_before_since_counts_each_item_from_its_own_version():
-    """A Firestore document written before ``since`` was recorded: every item counts as added
-    in that document's version, so no earlier acceptance covers it (M10-SPEC §7.1)."""
-    if not emulator_host():
-        pytest.skip("FIRESTORE_EMULATOR_HOST is not set; run scripts/test-relay.sh")
-    from relay.store_firestore import FirestoreStore
-
-    fs = FirestoreStore(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "demo-relay"))
-    try:
-        team = new_id()
-        await fs._boundaries(team).set(  # noqa: SLF001 - an older document's exact shape
-            {
-                "version": 5,
-                "topic": "T",
-                "github_orgs": ["Example-Org"],
-                "drives": [{"domain": "example.com", "shared_drive": "Example Team Drive"}],
-                "member_folders": True,
-                "updated_at": NOW,
-                "updated_by": "owner1",
-            }
-        )
-        stored = await fs.get_boundaries(team)
-        assert stored is not None
-        assert stored.org_since == {"example-org": 5}
-        assert stored.drive_since == {TEAM_DRIVE: 5}
-        assert stored.member_folders_since == 5
-        # PICKERS-SPEC §2.3: the picked lists read as empty, the version unchanged.
-        assert (stored.version, stored.github_repos, stored.drive_folders) == (5, [], [])
-    finally:
-        await fs.aclose()
 
 
 async def test_a_stale_version_is_409(api: Api):
@@ -1073,20 +750,11 @@ async def test_a_managing_delegate_sets_them_for_an_owner_only(managed: Api):
 
 async def test_the_audit_holds_the_version_and_never_the_text(api: Api):
     marker = "secret-topic-" + uuid.uuid4().hex
-    boundaries = {
-        "topic": marker,
-        "github_orgs": [marker[:30]],
-        "github_repos": [{"org": "example-org", "repo": marker[:40], "id": None}],
-        "drive_folders": [{**FOLDER, "folder_name": marker, "drive_name": marker[:50]}],
-        "drives": [],
-        "member_folders": True,
-    }
+    boundaries = {"topic": marker}
     assert (await put(api, "alice", {"version": 0, "boundaries": boundaries})).status_code == 200
     entries = [e for e in await api.store.list_audit(api.team) if e.action == "boundaries_set"]
     assert [(e.actor, e.outcome, e.detail) for e in entries] == [("alice", "set", "version 1")]
     assert marker not in repr(await api.store.list_audit(api.team))
-    assert marker[:30] not in repr(await api.store.list_audit(api.team))
-    assert FOLDER_ID not in repr(await api.store.list_audit(api.team))
 
 
 async def test_owner_writes_are_rate_limited(kind_clock: tuple[str, FakeClock]):

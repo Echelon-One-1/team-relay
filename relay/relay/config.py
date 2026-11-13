@@ -24,15 +24,12 @@ import os
 import re
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import yaml
-from cryptography.exceptions import UnsupportedAlgorithm
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import setup_script as setup_scripts
@@ -65,7 +62,7 @@ MAX_TEAM_NAME_LENGTH = 60
 _NAME_FORBIDDEN = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 # A lower-case DNS name (M10-SPEC §7.5): labels of a-z0-9- not starting or ending with "-", at
 # least two, at most 253 characters, the last not all digits (not an IPv4 address), no
-# trailing dot. Team boundaries' drive domains and RELAY_ALLOWED_DOMAINS both use it.
+# trailing dot. RELAY_ALLOWED_DOMAINS and the relay's public host name use it.
 MAX_DOMAIN_LENGTH = 253
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 DOMAIN_RE = re.compile(rf"(?:{_LABEL}\.)+{_LABEL}")
@@ -134,143 +131,6 @@ def parse_allowed_domains(raw: str | None) -> frozenset[str]:
                 "(e.g. example.com)"
             )
     return frozenset(entries)
-
-
-# PICKERS-SPEC §2.1, §4.2: a GitHub org login, and a Google Drive id (a shared drive's).
-GITHUB_ORG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
-DRIVE_ID_RE = re.compile(r"[A-Za-z0-9_-]{10,200}")
-
-
-def _comma_list(raw: str | None, name: str, valid: Any, what: str) -> list[str]:
-    """A comma-separated setting: unset or blank is empty; whitespace around an entry is
-    dropped; an empty entry or one ``valid`` refuses is a startup error naming the entry's
-    position, never its value."""
-    if raw is None or not raw.strip():
-        return []
-    entries = [entry.strip() for entry in raw.split(",")]
-    for index, entry in enumerate(entries):
-        if not entry:
-            raise ConfigError(f"{name} has an empty entry")
-        if not valid(entry):
-            raise ConfigError(f"{name} entry {index + 1} is not {what}")
-    return entries
-
-
-def parse_github_orgs(raw: str | None) -> frozenset[str]:
-    """``RELAY_GITHUB_ORGS`` (PICKERS-SPEC §2.1): comma-separated GitHub org logins, kept
-    lower case. Unset or blank: empty (any org; then the GitHub App may not be configured)."""
-    entries = _comma_list(
-        raw,
-        "RELAY_GITHUB_ORGS",
-        lambda e: GITHUB_ORG_RE.fullmatch(e) is not None,
-        "a GitHub organisation login (e.g. example-org)",
-    )
-    return frozenset(e.lower() for e in entries)
-
-
-def parse_shared_drives(raw: str | None) -> frozenset[str]:
-    """``RELAY_ALLOWED_SHARED_DRIVES`` (PICKERS-SPEC §2.1): comma-separated shared drive ids
-    (case kept). Unset or blank: empty (any shared drive)."""
-    return frozenset(
-        _comma_list(
-            raw,
-            "RELAY_ALLOWED_SHARED_DRIVES",
-            lambda e: DRIVE_ID_RE.fullmatch(e) is not None,
-            "a shared drive id (10 to 200 letters, digits, '_' and '-')",
-        )
-    )
-
-
-@dataclass(frozen=True)
-class GithubAppConfig:
-    """The relay's read-only GitHub App (PICKERS-SPEC §4.2): its id, its slug (the public
-    link's last part, for the install link) and its private key, loaded once at start. The key
-    is never logged, returned or shown."""
-
-    app_id: str
-    slug: str
-    private_key: rsa.RSAPrivateKey = field(repr=False)
-
-    @property
-    def install_url(self) -> str:
-        return f"https://github.com/apps/{self.slug}/installations/new"
-
-
-GITHUB_APP_ID_RE = re.compile(r"[0-9]{1,12}")
-GITHUB_APP_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,99}")
-MIN_GITHUB_KEY_BITS = 2048
-
-
-def _secret_json(path: str | os.PathLike[str], what: str, keys: tuple[str, ...]) -> dict[str, Any]:
-    """A mounted JSON secret holding exactly ``keys``, each a string. Error messages never
-    quote the file."""
-    try:
-        text = Path(path).read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConfigError(f"cannot read the {what} file: {exc.strerror}") from None
-    except UnicodeDecodeError:
-        raise ConfigError(f"the {what} file is not UTF-8") from None
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        raise ConfigError(f"the {what} file is not valid JSON") from None
-    if not isinstance(data, dict) or set(data) != set(keys):
-        raise ConfigError(f"the {what} file must be a JSON object of exactly {', '.join(keys)}")
-    for key in keys:
-        if not isinstance(data[key], str):
-            raise ConfigError(f"the {what} file's {key} must be a string")
-    return data
-
-
-def load_github_app(path: str | os.PathLike[str]) -> GithubAppConfig:
-    """``RELAY_GITHUB_APP_FILE`` (PICKERS-SPEC §4.2): ``{"app_id", "slug", "private_key"}``;
-    the key an RSA private key (PKCS#1 or PKCS#8 PEM, unencrypted) of at least 2048 bits."""
-    data = _secret_json(path, "GitHub App", ("app_id", "slug", "private_key"))
-    if GITHUB_APP_ID_RE.fullmatch(data["app_id"]) is None:
-        raise ConfigError("the GitHub App file's app_id must be 1 to 12 digits")
-    if GITHUB_APP_SLUG_RE.fullmatch(data["slug"]) is None:
-        raise ConfigError(
-            "the GitHub App file's slug must be 1 to 100 lower-case letters, digits and '-'"
-        )
-    try:
-        key = serialization.load_pem_private_key(data["private_key"].encode("utf-8"), None)
-    except (ValueError, TypeError, UnsupportedAlgorithm):
-        raise ConfigError(
-            "the GitHub App file's private_key is not an unencrypted PEM key"
-        ) from None
-    if not isinstance(key, rsa.RSAPrivateKey) or key.key_size < MIN_GITHUB_KEY_BITS:
-        raise ConfigError(
-            "the GitHub App file's private_key must be an RSA key of 2048 bits or more"
-        )
-    return GithubAppConfig(app_id=data["app_id"], slug=data["slug"], private_key=key)
-
-
-@dataclass(frozen=True)
-class PickerConfig:
-    """The Google Picker's settings (PICKERS-SPEC §4.2, §5): its own Web OAuth client id, the
-    browser API key and the Cloud project number. Public by design (Google restricts them);
-    owners are handed them, nothing else is."""
-
-    client_id: str
-    api_key: str
-    app_id: str
-
-
-PICKER_CLIENT_ID_RE = re.compile(r"[A-Za-z0-9.-]{1,200}\.apps\.googleusercontent\.com")
-PICKER_API_KEY_RE = re.compile(r"AIza[0-9A-Za-z_-]{35}")
-PICKER_APP_ID_RE = re.compile(r"[0-9]{6,20}")
-
-
-def load_picker(path: str | os.PathLike[str]) -> PickerConfig:
-    """``RELAY_PICKER_FILE`` (PICKERS-SPEC §4.2): ``{"client_id", "api_key", "app_id"}``."""
-    data = _secret_json(path, "Picker", ("client_id", "api_key", "app_id"))
-    if PICKER_CLIENT_ID_RE.fullmatch(data["client_id"]) is None:
-        raise ConfigError("the Picker file's client_id must be a ….apps.googleusercontent.com id")
-    if PICKER_API_KEY_RE.fullmatch(data["api_key"]) is None:
-        raise ConfigError("the Picker file's api_key must be a Google API key (AIza…)")
-    if PICKER_APP_ID_RE.fullmatch(data["app_id"]) is None:
-        raise ConfigError("the Picker file's app_id must be the project number (6 to 20 digits)")
-    return PickerConfig(client_id=data["client_id"], api_key=data["api_key"], app_id=data["app_id"])
 
 
 # The sign-in page's brand (docs/SIGNIN-PAGE.md): 1 to 40 ASCII letters, digits, spaces and
@@ -482,10 +342,6 @@ class TeamConfig:
     admins: frozenset[str] = frozenset()
     # M10-SPEC §7.2: RELAY_ALLOWED_DOMAINS; empty: every domain (the behaviour before it).
     allowed_domains: frozenset[str] = frozenset()
-    # PICKERS-SPEC §2.1: RELAY_GITHUB_ORGS (lower-case org logins) and
-    # RELAY_ALLOWED_SHARED_DRIVES (shared drive ids); empty: any.
-    allowed_github_orgs: frozenset[str] = frozenset()
-    allowed_shared_drives: frozenset[str] = frozenset()
 
     def email_allowed(self, email: str) -> bool:
         """Whether a person's email may be one on this relay (M10-SPEC §7.2): its domain is
@@ -780,42 +636,6 @@ def load_oauth_client(path: str | os.PathLike[str]) -> OAuthClient:
     return OAuthClient(client_id=client_id, client_secret=secret)  # type: ignore[arg-type]
 
 
-def load_drive_client(path: str | os.PathLike[str]) -> OAuthClient | None:
-    """The Desktop OAuth client for Drive (M10-SPEC §2a), from the optional mounted secret
-    ``RELAY_DRIVE_CLIENT_FILE``: Google's downloaded JSON (``{"installed": {client_id,
-    client_secret, ...}}``) or a flat ``{client_id, client_secret}``. No file there: None
-    (Drive is not configured). A web client (``"web"``) is refused: its secret is
-    confidential and this one is handed to every member. Error messages never quote the
-    file."""
-    try:
-        text = Path(path).read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise ConfigError(f"cannot read the Drive client file: {exc.strerror}") from None
-    except UnicodeDecodeError:
-        raise ConfigError("the Drive client file is not UTF-8") from None
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        raise ConfigError("the Drive client file is not valid JSON") from None
-    if not isinstance(data, dict):
-        raise ConfigError("the Drive client file must be a JSON object")
-    if "web" in data:
-        raise ConfigError(
-            "the Drive client file holds a web client; it must be a Desktop (installed) client"
-        )
-    if "installed" in data:
-        data = data["installed"]
-        if not isinstance(data, dict):
-            raise ConfigError("the Drive client file's 'installed' must be a JSON object")
-    client_id, secret = data.get("client_id"), data.get("client_secret")
-    for name, value in (("client_id", client_id), ("client_secret", secret)):
-        if not isinstance(value, str) or _CLIENT_FIELD.fullmatch(value) is None:
-            raise ConfigError(f"the Drive client file needs a string {name} (printable, no spaces)")
-    return OAuthClient(client_id=client_id, client_secret=secret)  # type: ignore[arg-type]
-
-
 # M10-SPEC §5: how many right-most X-Forwarded-For entries Google's infrastructure appends in
 # front of the relay: 1 directly on Cloud Run (its front end), 2 behind the external
 # Application Load Balancer (the client's address, then the forwarding rule's).
@@ -844,8 +664,6 @@ class Settings:
     # without them the login pages answer 404 (required on Cloud Run).
     public_url: str | None = None
     oauth_client: OAuthClient | None = None
-    # M10-SPEC §2a: the Desktop OAuth client for Drive members are handed; None: not set up.
-    drive_client: OAuthClient | None = None
     # M10-SPEC §5: Google's X-Forwarded-For entries in front of the relay (see
     # FORWARDED_FOR_HOPS); the per-IP limits count the left-most of them.
     forwarded_for_hops: int = 1
@@ -855,36 +673,12 @@ class Settings:
     setup_script: str | None = None
     # The sign-in page (docs/SIGNIN-PAGE.md): RELAY_BRAND_NAME, or None for the generic copy.
     brand_name: str | None = None
-    # PICKERS-SPEC §4.2: the read-only GitHub App (RELAY_GITHUB_APP_FILE; needs
-    # RELAY_GITHUB_ORGS) and the Google Picker's settings (RELAY_PICKER_FILE); None: not set up.
-    github_app: GithubAppConfig | None = None
-    picker: PickerConfig | None = None
 
     def __post_init__(self) -> None:
-        if self.github_app is not None and not self.team_config.allowed_github_orgs:
-            # PICKERS-SPEC §16 Q1: the listing names only the orgs the deployment allows.
-            raise ConfigError("RELAY_GITHUB_ORGS is required when RELAY_GITHUB_APP_FILE is set")
-        if self.picker is not None and any(
-            client is not None and client.client_id == self.picker.client_id
-            for client in (self.oauth_client, self.drive_client)
-        ):
-            raise ConfigError(
-                "RELAY_PICKER_FILE must name the picker's own OAuth client, not the login's "
-                "or the Drive client"
-            )
         if self.brand_name is not None:
             parse_brand_name(self.brand_name)
         if self.forwarded_for_hops not in FORWARDED_FOR_HOPS:
             raise ConfigError("RELAY_FORWARDED_FOR_HOPS must be 1, 2 or 3")
-        if (
-            self.drive_client is not None
-            and self.oauth_client is not None
-            and self.drive_client.client_id == self.oauth_client.client_id
-        ):
-            # The login's web client secret is confidential; the Drive one goes to members.
-            raise ConfigError(
-                "RELAY_DRIVE_CLIENT_FILE must name a Desktop client, not the login's own client"
-            )
         if self.auth_mode not in ("google", "static"):
             raise ConfigError("RELAY_AUTH_MODE must be 'google' or 'static'")
         if not isinstance(self.audiences, tuple) or not all(
@@ -926,7 +720,6 @@ class Settings:
                 "RELAY_FORWARDED_FOR_HOPS is required on Cloud Run when RELAY_PUBLIC_URL is not "
                 "a run.app address (2 behind the external Application Load Balancer)"
             )
-        drive_path = env.get("RELAY_DRIVE_CLIENT_FILE") or None
         allowed_domains = parse_allowed_domains(env.get("RELAY_ALLOWED_DOMAINS"))
         # M11-SPEC §5: checked whenever set; the script is served only with both set.
         marketplace_raw = env.get("RELAY_PLUGIN_MARKETPLACE") or None
@@ -935,13 +728,7 @@ class Settings:
         )
         brand_raw = env.get("RELAY_BRAND_NAME") or None
         brand = parse_brand_name(brand_raw) if brand_raw else None
-        app_path = env.get("RELAY_GITHUB_APP_FILE") or None
-        picker_path = env.get("RELAY_PICKER_FILE") or None
-        team_config = replace(
-            load_team_config(config_path, allowed_domains),
-            allowed_github_orgs=parse_github_orgs(env.get("RELAY_GITHUB_ORGS")),
-            allowed_shared_drives=parse_shared_drives(env.get("RELAY_ALLOWED_SHARED_DRIVES")),
-        )
+        team_config = load_team_config(config_path, allowed_domains)
         script = None
         if marketplace is not None and public_url is not None:
             script = setup_scripts.load_setup_script(
@@ -954,11 +741,8 @@ class Settings:
             audiences=parse_audiences(env.get("RELAY_AUDIENCE")),
             public_url=public_url,
             oauth_client=load_oauth_client(client_path) if client_path else None,
-            drive_client=load_drive_client(drive_path) if drive_path else None,
             forwarded_for_hops=parse_forwarded_for_hops(hops_raw) if hops_raw is not None else 1,
             plugin_marketplace=marketplace,
             setup_script=script,
             brand_name=brand,
-            github_app=load_github_app(app_path) if app_path else None,
-            picker=load_picker(picker_path) if picker_path else None,
         )
