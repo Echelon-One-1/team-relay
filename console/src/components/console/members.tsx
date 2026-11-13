@@ -8,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useJoin, useMe, useRosterChange } from '@/hooks/queries'
 import { useNav } from '@/hooks/team'
 import { addProblem, entries, isInvited, ownerCount, sortedMembers, suggestMemberId, visibleEmails } from '@/lib/roster'
-import { currentVersion, inviteMessage, missingNames, publicOrigin, SETUP_STEPS, setupCount } from '@/lib/setup'
+import { currentVersion, folderCountText, inviteMessage, publicOrigin, SETUP_STEPS, setupCount } from '@/lib/setup'
 import { readStored, writeStored } from '@/lib/stored'
 import { cn } from '@/lib/utils'
 import { CopyTextButton } from './copy'
@@ -21,8 +21,9 @@ import { Avatar, Panel } from './primitives'
 // invitation until its person accepts (at sign-in, or in the console); the owner sees it as
 // Invited, and can withdraw it (which retires nothing). The panel folds away to its header
 // (with the counts still showing), and stays as the viewer left it in this browser.
-// M11 §6: each member's setup progress ("set up", or "1 of 2 set up") and whether their Mac answers now, from
-// members-status; after inviting someone, an owner copies the invite message to send them.
+// M11 §6: each member's setup progress ("set up", or "1 of 2 set up") and whether their Mac
+// answers now, from members-status, and for owners how many folders each chose ("3 folders");
+// after inviting someone, an owner copies the invite message to send them.
 
 export const MEMBERS_STORAGE_KEY = 'team-relay-console.members'
 
@@ -90,34 +91,24 @@ function InviteCopy() {
 }
 
 /**
- * M11 §6: a member's setup progress and whether their Mac answers now. PICKERS-SPEC §7.4: what
- * their Mac can't find, by name (owners only: the relay gives no one else another member's).
+ * M11 §6: a member's setup progress and whether their Mac answers now; and, for owners only, how
+ * many folders they chose on their Mac (never which: the relay gives no one else another
+ * member's count, and never names or paths).
  */
-export type MemberProgress = { done: number; answering: boolean; missing: string[] }
+export type MemberProgress = { done: number; answering: boolean; folderCount: number | null }
 
 function Progress({ p, owner }: { p: MemberProgress; owner: boolean }) {
-  const missing = owner ? p.missing : []
+  const folders = owner ? p.folderCount : null
   return (
-    <span className="flex min-w-0 flex-col gap-0.5">
-      <span className="inline-flex items-center gap-1.5 text-[11.5px] text-subtle" data-setup-progress={p.done} data-answering={p.answering ? 'true' : 'false'}>
-        <span aria-hidden className={cn('size-1.5 shrink-0 rounded-full', p.answering ? 'bg-ok' : 'border border-faint')} />
-        <span className="tnum">{p.done === SETUP_STEPS ? 'set up' : `${p.done} of ${SETUP_STEPS} set up`}</span>
-        {p.answering ? <span className="text-ok">answering now</span> : <span className="sr-only">, not answering now</span>}
-      </span>
-      {missing.length > 0 ? (
-        <details className="group text-[11.5px]" data-missing-count={missing.length}>
-          <summary className="w-fit cursor-pointer list-none rounded text-warn outline-none focus-visible:ring-3 focus-visible:ring-ring/40 [&::-webkit-details-marker]:hidden">
-            <span className="tnum">can&apos;t find {missing.length}</span>
-            <span className="text-subtle group-open:hidden"> (show)</span>
-          </summary>
-          <ul className="mt-1 flex flex-col gap-0.5 pl-2 text-subtle" aria-label="Not found on their Mac">
-            {missing.map((n) => (
-              <li key={n} className="[overflow-wrap:anywhere]">
-                {n}
-              </li>
-            ))}
-          </ul>
-        </details>
+    <span className="inline-flex flex-wrap items-center gap-1.5 text-[11.5px] text-subtle" data-setup-progress={p.done} data-answering={p.answering ? 'true' : 'false'}>
+      <span aria-hidden className={cn('size-1.5 shrink-0 rounded-full', p.answering ? 'bg-ok' : 'border border-faint')} />
+      <span className="tnum">{p.done === SETUP_STEPS ? 'set up' : `${p.done} of ${SETUP_STEPS} set up`}</span>
+      {p.answering ? <span className="text-ok">answering now</span> : <span className="sr-only">, not answering now</span>}
+      {folders !== null ? (
+        <span className={cn('tnum', folders === 0 && 'text-warn')} data-folder-count={folders}>
+          <span aria-hidden>· </span>
+          {folderCountText(folders)}
+        </span>
       ) : null}
     </span>
   )
@@ -386,7 +377,7 @@ export function progressByMember(statuses: MembersStatus | undefined, bounds: Te
   const out = new Map<string, MemberProgress>()
   if (!statuses) return out
   const current = currentVersion(bounds, statuses.boundaries_version)
-  for (const e of statuses.members) out.set(e.member, { done: setupCount(e, bounds, current), answering: e.answering, missing: missingNames(e, bounds) })
+  for (const e of statuses.members) out.set(e.member, { done: setupCount(e, bounds, current), answering: e.answering, folderCount: e.folder_count })
   return out
 }
 

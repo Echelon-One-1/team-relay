@@ -36,7 +36,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 /**
  * What the member's answering session can answer from (M4 §3, M10 §2), by name: the plugin
- * publishes names only (repositories, shared drives, folders), never paths.
+ * publishes the names of the folders the member chose, never paths.
  */
 function Shares({ agent }: { agent: DirectoryMember }) {
   const names = (agent.manifest?.shares ?? []).map((s) => s.name)
@@ -45,7 +45,7 @@ function Shares({ agent }: { agent: DirectoryMember }) {
     <div
       className="flex min-w-0 basis-full items-center gap-1.5 pl-[38px] text-[11.5px] min-[420px]:ml-auto min-[420px]:max-w-[55%] min-[420px]:basis-auto min-[420px]:pl-0"
       data-shares={names.join(',')}
-      title={`${text}. What this member's answering session reads to answer: repositories, shared drives and folders, by name.`}
+      title={`${text}. What this member's answering session reads to answer: the folders they chose, by name.`}
     >
       <FolderOpen aria-hidden className="size-3.5 shrink-0 text-faint" />
       {names.length === 0 ? (

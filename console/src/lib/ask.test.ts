@@ -98,7 +98,7 @@ describe('refusals in words', () => {
   })
   it('an acceptance', () => {
     expect(acceptRefusal(relay(409, 'version_conflict'))).toMatch(/changed while you were reading/)
-    expect(acceptRefusal(relay(409, 'not_set'))).toMatch(/The team shares nothing at the moment/)
+    expect(acceptRefusal(relay(409, 'not_set'))).toMatch(/The team's topic isn't set yet/)
   })
 })
 

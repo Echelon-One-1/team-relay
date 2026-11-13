@@ -10,7 +10,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { useAcceptance, useBoundaries } from '@/hooks/queries'
 import { useNav } from '@/hooks/team'
-import { acceptedVersion, boundariesSet } from '@/lib/setup'
+import { acceptedVersion, boundariesSet, isAccepted } from '@/lib/setup'
 import { cn } from '@/lib/utils'
 import { Panel } from './primitives'
 import { AcceptBoundaries, SetupPage } from './setup'
@@ -18,8 +18,8 @@ import { FullPage } from './states'
 
 // /team-relay:setup: the Setup page on the member's own Mac, served by the setup page's console
 // server (plugin/src/setup-page.ts) with its own routes (/api/local/*). Each step shows whether it
-// is done, still to do, or not needed: signed in, accept what the team shares, the folders the
-// member's Claude answers from (added only with the Mac's folder chooser), background answering
+// is done, still to do, or not needed: signed in, accept the team's topic, the one list of folders
+// the member's Claude answers from (added only with the Mac's folder chooser), background answering
 // (on unless they turn it off; off and disabled, with the reason, where it cannot run), then Done.
 // Done never fails because of background answering: when turning it on fails at Done, the error
 // shows and "Finish without it" finishes anyway. The hosted console never calls /api/local, and a local
@@ -28,7 +28,12 @@ import { FullPage } from './states'
 export const localSetupKey = ['local-setup'] as const
 
 export const FOLDERS_HINT =
-  'Add every folder you use for your team: your copies of its GitHub projects, your Google Drive for desktop folders and shared documents.'
+  'Add every folder you use for your team, up to 20. Inside a git project, only the files git tracks are read.'
+
+/** The folders an earlier, longer setup held past the limit, as the member is told. */
+export function droppedText(dropped: string[]): string {
+  return `Only 20 folders can be used: ${dropped.join(', ')} ${dropped.length === 1 ? 'was' : 'were'} dropped. Add or remove a folder here to make this permanent.`
+}
 export const BACKGROUND_TEXT = "Answers teammates' questions from your folders even when Claude is closed."
 export const FINISHED_TEXT = 'All set. Go back to Claude.'
 export const BACKGROUND_FAILED_TEXT = 'Background answering could not be turned on. Press Done to try again, or finish without it.'
@@ -151,6 +156,8 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
   const bounds = useBoundaries()
   const acceptance = useAcceptance()
   const [folders, setFolders] = useState<string[]>(setup.folders)
+  // Folders past the limit when an earlier setup's lists were merged; gone once the list is saved.
+  const [dropped, setDropped] = useState<string[]>(setup.dropped ?? [])
   const [choosing, setChoosing] = useState(false)
   const [removing, setRemoving] = useState<string | null>(null)
   const [choice, setChoice] = useState<LocalChoice | null>(null)
@@ -171,11 +178,13 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
   const team = nav.teams?.teams.find((t) => t.team === setup.signed_in.team)?.name ?? setup.signed_in.team
   const who = setup.signed_in.email ?? setup.signed_in.member
   const accepted = acceptedVersion(null, acceptance.data)
-  const acceptState: StepState = boundariesSet(bounds.data) ? (accepted === bounds.data.version ? 'done' : 'todo') : bounds.data ? 'not_needed' : 'todo'
+  const acceptState: StepState = boundariesSet(bounds.data) ? (isAccepted(accepted, bounds.data.version) ? 'done' : 'todo') : bounds.data ? 'not_needed' : 'todo'
 
-  const keep = (next: string[]) => {
+  /** The list as the server now holds it; `saved`: it wrote the list (the dropped ones are gone for good). */
+  const keep = (next: string[], saved: boolean) => {
     setFolders(next)
-    qc.setQueryData<LocalSetup>(localSetupKey, (old) => (old ? { ...old, folders: next } : old))
+    if (saved) setDropped([])
+    qc.setQueryData<LocalSetup>(localSetupKey, (old) => (old ? { ...old, folders: next, ...(saved ? { dropped: [] } : {}) } : old))
   }
 
   const add = async () => {
@@ -184,7 +193,7 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
     setChoosing(true)
     try {
       const out = await api.localChoose()
-      keep(out.folders)
+      keep(out.folders, out.added.length > 0)
       setChoice(out)
     } catch (err) {
       setFolderError((err as ChangeError).message)
@@ -198,7 +207,7 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
     setChoice(null)
     setRemoving(path)
     try {
-      keep((await api.localRemove(path)).folders)
+      keep((await api.localRemove(path)).folders, true)
     } catch (err) {
       setFolderError((err as ChangeError).message)
     } finally {
@@ -255,20 +264,25 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
             </Note>
           </Step>
 
-          <Step n={2} title="Accept what the team shares" state={acceptState}>
+          <Step n={2} title="Accept the team's topic" state={acceptState}>
             {bounds.isPending ? (
               <Skeleton className="h-16 w-full" />
             ) : boundariesSet(bounds.data) ? (
               <AcceptBoundaries bounds={bounds.data} accepted={accepted} current={bounds.data.version} />
             ) : bounds.data ? (
-              <Note>A team owner hasn&apos;t chosen what the team shares yet. Nothing to accept for now.</Note>
+              <Note>A team owner hasn&apos;t set the team&apos;s topic yet. Nothing to accept for now.</Note>
             ) : (
-              <Note>What the team shares didn&apos;t load. It is read again in a moment.</Note>
+              <Note>The team&apos;s topic didn&apos;t load. It is read again in a moment.</Note>
             )}
           </Step>
 
           <Step n={3} title="Folders your Claude answers from" state={folders.length > 0 ? 'done' : 'todo'}>
             <Note>{FOLDERS_HINT}</Note>
+            {dropped.length > 0 ? (
+              <p className="text-[12.5px] leading-relaxed text-warn [overflow-wrap:anywhere]" data-dropped={dropped.length}>
+                {droppedText(dropped)}
+              </p>
+            ) : null}
             {folders.length > 0 ? (
               <ul className="flex flex-col gap-1" aria-label="Your folders">
                 {folders.map((f) => (

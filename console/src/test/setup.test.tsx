@@ -1,12 +1,12 @@
 // M11 §6 and "Simpler joining": guided joining. Accepting an invitation opens the team's Setup
-// page: two plain steps (set up your Mac, accept what the team shares) that tick as the viewer's
-// Mac reports in (read every 5 s while the page is visible), and below them "Ask the team",
-// always there and never a step. Inside the first,
-// only what is not done shows, one sentence each; the second lists what the team shares, with
-// what changed since the viewer's last acceptance marked new. The team page shows a banner when
-// a joined viewer has something new to accept; the Members panel shows each member's progress
-// ("set up", or n of 2); an owner copies an invite message after inviting someone. The console server is the
-// dev mock (src/mock/relay.ts), with every call recorded.
+// page: two plain steps (set up your Mac, accept the team's topic) that tick as the viewer's Mac
+// reports in (read every 5 s while the page is visible), and below them "Ask the team", always
+// there and never a step. Inside the first, only what is not done shows, one sentence each; the
+// second shows the topic and Accept (an acceptance of an earlier version holds: the topic widens
+// nothing). The team page shows a banner when a joined viewer has not accepted; the Members panel
+// shows each member's progress ("set up", or n of 2) and, to owners only, how many folders each
+// chose ("3 folders"); an owner copies an invite message after inviting someone. The console
+// server is the dev mock (src/mock/relay.ts), with every call recorded.
 
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -15,9 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setConsoleKey } from '@/api/key'
 import { setTransport } from '@/api/client'
 import { App } from '@/App'
-import { BACKGROUND_FAILED_TEXT, BACKGROUND_TEXT, FINISHED_TEXT, FOLDERS_HINT, NO_CHOOSER_TEXT, resetSetupFinished } from '@/components/console/local-setup'
-import { inviteMessage } from '@/lib/setup'
-import { FIXTURE_FOLDER_ID, fixtureBoundaries } from '@/mock/fixtures'
+import { BACKGROUND_FAILED_TEXT, BACKGROUND_TEXT, droppedText, FINISHED_TEXT, FOLDERS_HINT, NO_CHOOSER_TEXT, resetSetupFinished } from '@/components/console/local-setup'
+import { FOLDERS_TODO, inviteMessage } from '@/lib/setup'
 import { MockRelay, mockStatus } from '@/mock/relay'
 import { renderWithClient, setHidden } from './render'
 
@@ -84,19 +83,19 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect(window.location.pathname).toBe('/join')
     expect(tab('join')).toHaveAttribute('aria-current', 'page')
     await waitFor(() => expect(s.calls.some((c) => c.path === '/api/members-status' && c.team === 'ops')).toBe(true))
-    // A new member: nothing has reported yet, and nothing is marked new before a first acceptance.
+    // A new member: nothing has reported yet, and nothing is accepted.
     await waitFor(() => expect(within(panel).getByRole('button', { name: 'Accept' })).toBeEnabled())
     expect(doneOf()).toEqual({ mac: false, accept: false })
     expect([...panel.querySelectorAll('[data-setup-step] h3')].map((h) => h.firstChild?.textContent)).toEqual([
       'Set up your Mac',
-      'Accept what the team shares',
+      "Accept the team's topic",
     ])
     expect(within(step('mac')).getByText('Open Terminal (press Cmd+Space, type Terminal, press Enter). Paste this line, press Enter and answer its questions.')).toBeInTheDocument()
     expect(within(step('mac')).getByRole('button', { name: 'Copy setup line' })).toBeInTheDocument()
     // Nothing reported yet: no list of technical checks.
     expect(openChecks()).toEqual([])
-    expect(panel.querySelectorAll('[data-new]')).toHaveLength(0)
-    expect(within(step('accept')).getByText(/example-ops/)).toBeInTheDocument()
+    expect(within(step('accept')).getByText(/Operations at Example Co/)).toBeInTheDocument()
+    expect(step('accept').textContent).not.toMatch(/github|drive|repositor|folders of your own/i)
     expect(within(askCta()).getByRole('button', { name: 'Ask the team' })).toBeInTheDocument()
   })
 
@@ -110,19 +109,17 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect(line.closest('[data-command]')).not.toBeNull()
     await user.click(within(panel).getByRole('button', { name: 'Copy setup line' }))
     expect(await navigator.clipboard.readText()).toBe(LINE)
-    // alice's Mac: everything but Google Drive; she accepted an older version.
+    // alice's Mac: everything but a folder (it reported none chosen); she has not accepted yet.
     await waitFor(() => expect(within(panel).getByText('0 of 2 done')).toBeInTheDocument())
     expect(doneOf()).toEqual({ mac: false, accept: false })
-    expect(openChecks()).toEqual(['drive'])
-    expect(within(step('mac')).getByText("Google Drive isn't connected yet. Run the setup line again and sign in to Google when it asks.")).toBeInTheDocument()
-    expect(step('mac').textContent).not.toMatch(/daemon|LaunchAgent|plugin|channel|\bCLI\b|\bNode|boundaries|self-test/i)
-    // Step 2: what the team shares, with what was added after version 1 (own folders) marked new.
+    expect(openChecks()).toEqual(['folders'])
+    expect(within(step('mac')).getByText(FOLDERS_TODO)).toBeInTheDocument()
+    expect(step('mac').textContent).not.toMatch(/daemon|LaunchAgent|plugin|channel|\bCLI\b|\bNode|boundaries|self-test|drive|clone|repositor/i)
+    // Step 2: the topic, and Accept; no list of sources and nothing marked new.
     const accept = within(step('accept'))
     expect(accept.getByText(/Example Co: the orders and payments services/)).toBeInTheDocument()
-    expect(accept.getByText('example-org').closest('li')!.querySelector('[data-new]')).toBeNull()
-    expect(accept.getByText('Example Team Drive').closest('li')!.querySelector('[data-new]')).toBeNull()
-    expect(accept.getByText('You may add folders of your own').closest('li')!.querySelector('[data-new]')).not.toBeNull()
-    expect(accept.getByText(/Anything added since you last accepted is marked new/)).toBeInTheDocument()
+    expect(accept.queryByRole('list')).toBeNull()
+    expect(step('accept').querySelector('[data-new]')).toBeNull()
     expect(tab('join')).toHaveTextContent('Setup0/2')
   })
 
@@ -141,12 +138,22 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect(document.activeElement).toBe(box)
   })
 
-  it('the viewer accepts what the team shares for themselves; step 2 ticks and the banner goes', async () => {
-    const s = server()
+  it("the viewer accepts the team's topic for themselves; step 2 ticks and the banner goes", async () => {
+    // alice's Mac has reported in, and she accepted version 5 of an earlier team under the same id
+    // (the team is at version 2): not accepted, so the banner asks her.
+    let accepted = 5
+    const s = server({
+      override: (c) => {
+        if (c.path !== '/api/acceptance') return null
+        if (c.method === 'PUT') accepted = (c.body as { version: number }).version
+        return json({ version: accepted, accepted_at: '2026-11-13T10:00:00Z' })
+      },
+    })
+    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, 2)
     const user = userEvent.setup()
     renderWithClient(<App />)
-    const banner = await screen.findByRole('region', { name: 'Accept what the team shares' })
-    expect(banner).toHaveTextContent('What the team shares has changed.')
+    const banner = await screen.findByRole('region', { name: "Accept the team's topic" })
+    expect(banner).toHaveTextContent("Accept the team's topic, so your Mac can answer teammates.")
     await user.click(within(banner).getByRole('button', { name: 'Review and accept' }))
     const panel = await setupPanel()
     expect(window.location.pathname).toBe('/join')
@@ -154,41 +161,42 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     await waitFor(() => expect(within(panel).getByRole('button', { name: 'Accepted' })).toBeDisabled())
     expect(s.calls.filter((c) => c.method === 'PUT')).toEqual([{ method: 'PUT', path: '/api/acceptance', team: 'demo', body: { version: 2 } }])
     expect(doneOf().accept).toBe(true)
-    await waitFor(() => expect(within(panel).getByText('1 of 2 done')).toBeInTheDocument())
+    await waitFor(() => expect(within(panel).getByText('2 of 2 done')).toBeInTheDocument())
     await user.click(tab('team'))
     // The team view's own path (docs/SIGNIN-PAGE.md: / is the sign-in page on the hosted address).
     expect(window.location.pathname).toBe('/team')
     await screen.findByRole('region', { name: 'Members' })
-    expect(screen.queryByRole('region', { name: 'Accept what the team shares' })).toBeNull()
+    expect(screen.queryByRole('region', { name: "Accept the team's topic" })).toBeNull()
   })
 
-  it('what the team shares changed meanwhile: says so, and shows the latest to accept', async () => {
+  it('the topic changed meanwhile: says so and shows the latest to accept; once accepted, a later topic needs no new acceptance', async () => {
     window.history.replaceState(null, '', '/join')
     const s = server()
     const user = userEvent.setup()
-    renderWithClient(<App />)
+    const { client } = renderWithClient(<App />)
     const panel = await setupPanel()
     const button = await within(panel).findByRole('button', { name: 'Accept' })
     expect(button).toHaveAttribute('data-accept-version', '2')
-    s.relay.setBoundariesAs('demo', 'bob', {
-      topic: 'Example Co: payments only.',
-      github_orgs: ['example-org', 'payments-org'],
-      github_repos: [],
-      drive_folders: [],
-      drives: [],
-      member_folders: false,
-    })
+    s.relay.setBoundariesAs('demo', 'bob', { topic: 'Example Co: payments only.' })
     await user.click(button)
-    expect(await within(panel).findByRole('alert')).toHaveTextContent('What the team shares changed while you were reading. Read it again below, then click Accept.')
+    expect(await within(panel).findByRole('alert')).toHaveTextContent(/changed while you were reading/)
     await waitFor(() => expect(within(panel).getByRole('button', { name: 'Accept' })).toHaveAttribute('data-accept-version', '3'))
-    expect(within(step('accept')).getByText('payments-org').closest('li')!.querySelector('[data-new]')).not.toBeNull()
-    expect(within(step('accept')).getByText('No folders of your own')).toBeInTheDocument()
+    expect(within(step('accept')).getByText('Example Co: payments only.')).toBeInTheDocument()
+    await user.click(within(panel).getByRole('button', { name: 'Accept' }))
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Accepted' })).toBeDisabled())
+    // Another change: her acceptance of version 3 holds at version 4.
+    s.relay.setBoundariesAs('demo', 'bob', { topic: 'Example Co: payments and orders.' })
+    // The boundaries are read again (as on the page's next tick).
+    await act(() => client.invalidateQueries())
+    await waitFor(() => expect(within(step('accept')).getByText('Example Co: payments and orders.')).toBeInTheDocument())
+    expect(within(panel).getByRole('button', { name: 'Accepted' })).toBeDisabled()
+    expect(doneOf().accept).toBe(true)
   })
 
   it('both done: "You\'re all set", with a big button to Ask', async () => {
     window.history.replaceState(null, '', '/join')
     const s = server()
-    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true)
+    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, 3)
     const user = userEvent.setup()
     renderWithClient(<App />)
     const panel = await setupPanel()
@@ -243,7 +251,7 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect(within(askCta()).getByRole('button', { name: 'Ask the team' })).toBeInTheDocument()
     fireEvent.click(tab('team'))
     await screen.findByRole('region', { name: 'Members' })
-    expect(screen.queryByRole('region', { name: 'Accept what the team shares' })).toBeNull()
+    expect(screen.queryByRole('region', { name: "Accept the team's topic" })).toBeNull()
   })
 })
 
@@ -263,7 +271,7 @@ describe('live ticks (M11 §6: every 5 s while the page is visible)', () => {
     await flush(50)
     expect(doneOf().mac).toBe(false)
     const before = s.count('/api/members-status')
-    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true)
+    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, 3)
     await flush(5_000)
     expect(s.count('/api/members-status')).toBeGreaterThan(before)
     expect(doneOf().mac).toBe(true)
@@ -282,115 +290,40 @@ describe('live ticks (M11 §6: every 5 s while the page is visible)', () => {
   })
 })
 
-describe("what the viewer's Mac can't find (PICKERS-SPEC §7.4, ACC-021)", () => {
-  const DRIVE_TODO = "Make sure Google Drive for desktop is signed in with your work account; if it still doesn't show, ask a team owner for access to the shared drive."
-
-  it('below step 1: one line per item, a repository with its clone line to copy', async () => {
-    window.history.replaceState(null, '', '/join')
-    server()
-    const user = userEvent.setup()
-    renderWithClient(<App />)
-    await setupPanel()
-    const block = await waitFor(() => {
-      const el = step('mac').querySelector('[data-missing-sources]')
-      expect(el).not.toBeNull()
-      return el as HTMLElement
-    })
-    expect(block).toHaveTextContent("Your Mac can't find 1 of the things your team shares. It answers from the rest.")
-    const line = block.querySelector('[data-missing="repo:example-labs/handbook"]') as HTMLElement
-    expect(line).toHaveTextContent("example-labs/handbook isn't on this Mac.")
-    expect(within(line).getByText('git clone https://github.com/example-labs/handbook.git')).toBeInTheDocument()
-    expect(line).toHaveTextContent('Run it in Terminal inside the folder you picked for projects.')
-    await user.click(within(line).getByRole('button', { name: 'Copy clone line for example-labs/handbook' }))
-    expect(await navigator.clipboard.readText()).toBe('git clone https://github.com/example-labs/handbook.git')
-  })
-
-  it('Drive and whole-org guidance; missing items never untick "Set up your Mac"', async () => {
-    window.history.replaceState(null, '', '/join')
-    const s = server()
-    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, {
-      boundaries_version: 2,
-      missing: [`folder:${FIXTURE_FOLDER_ID}`, 'org:example-org', 'drive:example.com/Example Team Drive', 'repo:other-org/not-listed'],
-    })
-    renderWithClient(<App />)
-    await setupPanel()
-    await waitFor(() => expect(step('mac').querySelector('[data-missing-sources]')).toHaveAttribute('data-missing-sources', '3'))
-    expect(doneOf().mac).toBe(true)
-    const block = step('mac').querySelector('[data-missing-sources]') as HTMLElement
-    expect(block).toHaveTextContent("Your Mac can't find 3 of the things your team shares.")
-    expect(block.querySelector(`[data-missing="folder:${FIXTURE_FOLDER_ID}"]`)).toHaveTextContent(`Clients (in Example Team Drive) isn't on this Mac. ${DRIVE_TODO}`)
-    expect(block.querySelector('[data-missing="drive:example.com/Example Team Drive"]')).toHaveTextContent(`The shared drive Example Team Drive isn't on this Mac. ${DRIVE_TODO}`)
-    const org = block.querySelector('[data-missing="org:example-org"]') as HTMLElement
-    expect(org).toHaveTextContent('No example-org projects found. Clone the ones you work on into the folder you picked for projects.')
-    const link = within(org).getByRole('link', { name: /See example-org's projects on GitHub/ })
-    expect(link).toHaveAttribute('href', 'https://github.com/orgs/example-org/repositories')
-    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
-    // A key that is not one of the team's items is never shown.
-    expect(block.textContent).not.toMatch(/not-listed/)
-  })
-
-  it('items added after the version the Mac last looked at show as checking', async () => {
-    window.history.replaceState(null, '', '/join')
-    const s = server()
-    s.relay.setBoundariesAs('demo', 'bob', { ...fixtureBoundaries.boundaries!, github_repos: [...fixtureBoundaries.boundaries!.github_repos, { org: 'example-labs', repo: 'tools', id: 7002 }] })
-    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, { boundaries_version: 2, missing: [] })
-    renderWithClient(<App />)
-    await setupPanel()
-    const checking = await waitFor(() => {
-      const el = step('mac').querySelector('[data-checking="repo:example-labs/tools"]')
-      expect(el).not.toBeNull()
-      return el as HTMLElement
-    })
-    expect(checking).toHaveTextContent('example-labs/tools: checking…')
-    expect(step('mac').querySelector('[data-missing]')).toBeNull()
-    expect(step('mac').textContent).not.toMatch(/can't find/)
-  })
-
-  it('nothing shows when the Mac found everything, or has not reported what it found', async () => {
-    window.history.replaceState(null, '', '/join')
-    const s = server()
-    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, { boundaries_version: 2, missing: [] })
-    renderWithClient(<App />)
-    await setupPanel()
-    await waitFor(() => expect(doneOf().mac).toBe(true))
-    expect(step('mac').querySelector('[data-missing-sources]')).toBeNull()
-  })
-})
-
 describe('the Members panel and the invite message (M11 §6)', () => {
-  it("an owner sees each member's missing items by name, behind a disclosure (ACC-022)", async () => {
+  it('an owner sees how many folders each member chose ("1 folder", "0 folders"), never which', async () => {
     const s = server()
-    s.relay.setMemberStatus('bob', mockStatus(Date.now(), {}), true, 2, { boundaries_version: 2, missing: [`folder:${FIXTURE_FOLDER_ID}`, 'org:example-org'] })
-    const user = userEvent.setup()
+    s.relay.setMemberStatus('bob', mockStatus(Date.now(), {}), true, 2, 1)
     renderWithClient(<App />)
     const panel = await screen.findByRole('region', { name: 'Members' })
     const row = (m: string) => panel.querySelector(`[data-member="${m}"]`) as HTMLElement
-    const bob = await waitFor(() => {
-      const el = row('bob').querySelector('[data-missing-count]')
-      expect(el).not.toBeNull()
-      return el as HTMLElement
-    })
-    expect(bob).toHaveAttribute('data-missing-count', '2')
-    expect(bob).toHaveTextContent("can't find 2")
-    await user.click(within(bob).getByText("can't find 2"))
-    expect(within(bob).getByRole('list', { name: 'Not found on their Mac' })).toHaveTextContent('Clients (in Example Team Drive)example-org (whole organisation)')
-    expect(row('alice').querySelector('[data-missing-count]')).toHaveTextContent("can't find 1")
-    expect(row('carol').querySelector('[data-missing-count]')).toBeNull()
+    const count = (m: string) => row(m).querySelector('[data-folder-count]')
+    await waitFor(() => expect(count('bob')).not.toBeNull())
+    expect(count('bob')).toHaveAttribute('data-folder-count', '1')
+    expect(count('bob')).toHaveTextContent('1 folder')
+    expect(count('bob')!.textContent).not.toMatch(/folders/)
+    expect(count('alice')).toHaveTextContent('0 folders')
+    // carol's Mac has never reported: no count.
+    expect(count('carol')).toBeNull()
+    // Never a folder's name or path, and nothing about sources.
+    expect(panel.textContent).not.toMatch(/\/|~|can't find|clone|drive|repo/i)
   })
 
-  it("a member sees no one's missing items in the Members panel (ACC-022)", async () => {
+  it("a member sees no one else's folder count (the relay gives them only their own)", async () => {
     const s = server()
     s.relay.role = 'member'
-    s.relay.setMemberStatus('bob', mockStatus(Date.now(), {}), true, 2, { boundaries_version: 2, missing: ['org:example-org'] })
+    s.relay.setMemberStatus('bob', mockStatus(Date.now(), {}), true, 2, 4)
     renderWithClient(<App />)
     const panel = await screen.findByRole('region', { name: 'Members' })
     await waitFor(() => expect(panel.querySelector('[data-setup-progress]')).not.toBeNull())
-    expect(panel.querySelector('[data-missing-count]')).toBeNull()
-    expect(panel.textContent).not.toMatch(/can't find/)
-    // The relay gives a member only their own list (src/mock/relay.ts plays that rule).
-    const statuses = (await (await s.relay.handle('api/members-status', { headers: { 'X-Relay-Team': 'demo' } })).json()) as { members: Array<{ member: string; sources: unknown }> }
-    expect(statuses.members.find((m) => m.member === 'bob')!.sources).toBeNull()
-    expect(statuses.members.find((m) => m.member === 'alice')!.sources).not.toBeNull()
+    expect(panel.querySelector('[data-folder-count]')).toBeNull()
+    expect(panel.textContent).not.toMatch(/\bfolders?\b/)
+    // The relay gives a member only their own count (src/mock/relay.ts plays that rule).
+    const statuses = (await (await s.relay.handle('api/members-status', { headers: { 'X-Relay-Team': 'demo' } })).json()) as {
+      members: Array<{ member: string; folder_count: number | null }>
+    }
+    expect(statuses.members.find((m) => m.member === 'bob')!.folder_count).toBeNull()
+    expect(statuses.members.find((m) => m.member === 'alice')!.folder_count).toBe(0)
   })
 
   it("shows each member's progress (set up, or n of 2) and whether they answer now", async () => {
@@ -399,7 +332,7 @@ describe('the Members panel and the invite message (M11 §6)', () => {
     const panel = await screen.findByRole('region', { name: 'Members' })
     const row = (m: string) => panel.querySelector(`[data-member="${m}"]`) as HTMLElement
     await waitFor(() => expect(row('alice').querySelector('[data-setup-progress]')).not.toBeNull())
-    await waitFor(() => expect(row('bob').querySelector('[data-setup-progress]')).toHaveTextContent(/^set upanswering now$/))
+    await waitFor(() => expect(row('bob').querySelector('[data-setup-progress]')).toHaveTextContent(/^set upanswering now· 3 folders$/))
     expect(row('alice').querySelector('[data-setup-progress]')).toHaveTextContent('0 of 2 set up')
     expect(row('alice').querySelector('[data-setup-progress]')).toHaveAttribute('data-answering', 'true')
     // Asking is not a step: carol has asked the team questions (the activity shows them) and is 0 of 2.
@@ -451,7 +384,7 @@ describe('the Members panel and the invite message (M11 §6)', () => {
 // /api/local/*: the Setup view then shows the local steps (signed in, accept, folders, background
 // answering, Done). Folders are added only through the Mac's folder chooser (the server opens it).
 describe('the local Setup page of /team-relay:setup', () => {
-  type Local = { folders: string[]; chooser: boolean; installed: boolean; choice?: unknown; available?: boolean; reason?: string; failInstall?: boolean }
+  type Local = { folders: string[]; dropped?: string[]; chooser: boolean; installed: boolean; choice?: unknown; available?: boolean; reason?: string; failInstall?: boolean }
   function localServer(local: Local) {
     return server({
       override: (c) => {
@@ -460,6 +393,7 @@ describe('the local Setup page of /team-relay:setup', () => {
           return json({
             signed_in: { member: 'alice', team: 'demo', email: 'alice@example.com' },
             folders: local.folders,
+            ...(local.dropped ? { dropped: local.dropped } : {}),
             chooser: local.chooser,
             background: { installed: local.installed, available: local.available ?? true, ...(local.reason ? { reason: local.reason } : {}) },
             limits: { max_folders: 20 },
@@ -505,7 +439,7 @@ describe('the local Setup page of /team-relay:setup', () => {
     expect(within(panel).getByText('alice@example.com')).toBeInTheDocument()
     await waitFor(() => expect(states()).toEqual({
       'Signed in': 'done',
-      'Accept what the team shares': 'todo',
+      "Accept the team's topic": 'todo',
       'Folders your Claude answers from': 'done',
       'Answer in the background': 'todo',
     }))
@@ -536,6 +470,27 @@ describe('the local Setup page of /team-relay:setup', () => {
     ])
     // No route is ever given a folder to add.
     expect(s.calls.filter((c) => c.path === '/api/local/folders/choose').every((c) => JSON.stringify(c.body) === '{}')).toBe(true)
+  })
+
+  it('folders an earlier setup held past 20 are named as dropped, until the list is saved', async () => {
+    window.history.replaceState(null, '', '/join')
+    const folders = Array.from({ length: 20 }, (_, i) => `~/code/project-${i}`)
+    localServer({ folders, dropped: ['~/code/extra-a', '~/notes/extra-b'], chooser: true, installed: true })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    const note = await waitFor(() => {
+      const el = panel.querySelector('[data-dropped]')
+      expect(el).not.toBeNull()
+      return el as HTMLElement
+    })
+    expect(note).toHaveTextContent(droppedText(['~/code/extra-a', '~/notes/extra-b']))
+    expect(note).toHaveTextContent('Only 20 folders can be used: ~/code/extra-a, ~/notes/extra-b were dropped.')
+    // At the limit: no more can be added.
+    expect(within(panel).getByRole('button', { name: 'Add folder' })).toBeDisabled()
+    await user.click(within(panel).getByRole('button', { name: 'Remove ~/code/project-0' }))
+    await waitFor(() => expect(panel.querySelector('[data-dropped]')).toBeNull())
+    expect(droppedText(['~/a'])).toMatch(/~\/a was dropped\./)
   })
 
   it('turning background answering off applies at once, and Done then changes nothing more', async () => {

@@ -89,76 +89,10 @@ export interface Join {
 
 export type RosterRole = 'owner' | 'member'
 
-/**
- * A legacy shared drive, matched by name (M10 §1). PICKERS-SPEC §2.1: an owner may keep or remove
- * the ones already saved, never add one (they pick shared-drive folders instead).
- */
-export interface DriveBoundary {
-  /** The Google Workspace domain, lower case, e.g. example.com. */
-  domain: string
-  /** The shared drive's name, as it appears under "Shared drives". */
-  shared_drive: string
-}
-
-/** PICKERS-SPEC §2.1: one GitHub repository, matched by a clone's origin github.com/<org>/<repo>. */
-export interface RepoBoundary {
-  /** The organisation (or user) that owns it, e.g. example-org. */
-  org: string
-  /** The repository's name, e.g. api. */
-  repo: string
-  /** GitHub's id from the relay's listing; null when pasted (not checked against GitHub). */
-  id: number | null
-}
-
-/** PICKERS-SPEC §2.1: one folder of a shared drive, or a whole shared drive (folder_id == drive_id). */
-export interface FolderBoundary {
-  /** The Google Workspace domain whose Drive for desktop mount counts. */
-  domain: string
-  /** The shared drive's id; null when pasted as a link (not checked). */
-  drive_id: string | null
-  /** The folder's Drive id. */
-  folder_id: string
-  /** The folder's name when picked (or as the owner typed it with a pasted link): display text only. */
-  folder_name: string
-  /** The shared drive's name when it could be read; null otherwise ("in a shared drive"). */
-  drive_name: string | null
-}
-
-/** What a team's answerers may read and talk about (M10 §1, PICKERS-SPEC §2.1). */
+/** What a team's answerers may talk about (schema v3, 13 Nov 2026): the topic alone. */
 export interface Boundaries {
   /** 1-500 characters: what the team talks about; anything else is declined on its own. */
   topic: string
-  /** At most 10 whole GitHub orgs; members answer from the files git tracks in their clones. */
-  github_orgs: string[]
-  /** At most 100 single repositories (of orgs that are not whole-org entries). */
-  github_repos: RepoBoundary[]
-  /** At most 20 picked shared-drive folders and whole shared drives. */
-  drive_folders: FolderBoundary[]
-  /** At most 10 legacy shared drives, matched by name. */
-  drives: DriveBoundary[]
-  /** Members may add their own local folders. */
-  member_folders: boolean
-}
-
-/** PICKERS-SPEC §2.2: the one key of a boundaries item, at most 400 characters. */
-export type ItemKey = `org:${string}` | `repo:${string}` | `folder:${string}` | `drive:${string}`
-
-/**
- * M10 §7.1, PICKERS-SPEC §2.3: in which version each item was last added (kept while it stays;
- * the version that added it back after a removal). An item it does not name counts as added in
- * the document's version.
- */
-export interface BoundariesSince {
-  /** By lower-case org name. */
-  github_orgs: Record<string, number>
-  /** By lower-case org/repo. Absent from a relay before PICKERS-SPEC (read as empty). */
-  github_repos: Record<string, number>
-  /** By folder id (case kept). Absent from a relay before PICKERS-SPEC (read as empty). */
-  drive_folders: Record<string, number>
-  /** One per drive of `boundaries.drives`, in that order. */
-  drives: Array<DriveBoundary & { since: number }>
-  /** While members' folders are allowed; null while not. */
-  member_folders: number | null
 }
 
 /** GET /api/boundaries (M10 §1). Never set: version 0 and boundaries null. */
@@ -166,52 +100,9 @@ export interface TeamBoundaries {
   team: string
   version: number
   boundaries: Boundaries | null
-  /** M10 §7.1; null when `boundaries` is. */
-  since?: BoundariesSince | null
   updated_at: Iso | null
   /** The member who last set them. */
   updated_by: string | null
-}
-
-/** PICKERS-SPEC §3.5: the Google Picker's public settings (restricted by Google, not secret). */
-export interface GooglePickerConfig {
-  client_id: string
-  api_key: string
-  app_id: string
-}
-
-/** GET /api/sources/config (PICKERS-SPEC §3.5, owners only). Holds no key and no token. */
-export interface SourcesConfig {
-  github: { configured: boolean; install_url: string | null }
-  /** Null without the picker settings, and always in the local console. */
-  google_picker: GooglePickerConfig | null
-}
-
-/** PICKERS-SPEC §3.6: one repository of an installation's listing. */
-export interface GithubRepo {
-  name: string
-  id: number
-  private: boolean
-  archived: boolean
-}
-
-/** PICKERS-SPEC §3.6: the relay's GitHub App on one allowed org. */
-export interface GithubInstallation {
-  /** The org's login as GitHub spells it. */
-  account: string
-  /** suspended: the installation is suspended on GitHub and lists no repositories. */
-  state: 'ok' | 'suspended'
-  repository_selection: 'all' | 'selected'
-  /** Sorted by lower-case name; at most 1000. */
-  repos: GithubRepo[]
-  /** More repositories than listed. */
-  truncated: boolean
-}
-
-/** GET /api/sources/github (PICKERS-SPEC §3.6, owners only). */
-export interface GithubListing {
-  installations: GithubInstallation[]
-  fetched_at: Iso
 }
 
 /**
@@ -436,12 +327,10 @@ export interface Acceptance {
   accepted_at: Iso | null
 }
 
-/** What a member's background answerer last reported (M11 §3): counts and booleans only. */
+/** What a member's background answerer last reported (M11 §3): booleans and times only. */
 export interface MemberSetupStatus {
   daemon: { version: string; started_at: Iso }
   claude: { found: boolean; signed_in: boolean }
-  folders: { repo_roots: number; clones: number; extra_folders: number }
-  drive: { connected: boolean }
   self_test: { ok: boolean; at: Iso; reason: string | null }
   /** The relay's own time of the last report. */
   seen_at: Iso
@@ -456,16 +345,10 @@ export interface MemberStatusEntry {
   answering: boolean
   accepted_version: number
   /**
-   * PICKERS-SPEC §3.4: what their Mac could not find, as keys of the team's own items. Owners get
-   * every member's; anyone else only their own (others null). Null too from an older plugin or relay.
+   * How many folders they chose on their Mac (0..20), never which. Owners get every member's;
+   * anyone else only their own (others null). Null too before their Mac has reported a count.
    */
-  sources: MemberSources | null
-}
-
-/** PICKERS-SPEC §3.3: the boundaries version the Mac looked for, and the keys of items it did not find. */
-export interface MemberSources {
-  boundaries_version: number
-  missing: ItemKey[]
+  folder_count: number | null
 }
 
 export interface MembersStatus {
@@ -497,6 +380,11 @@ export interface LocalSetup {
   signed_in: { member: string; team: string; email: string | null }
   /** The folders the member's Claude answers from, ~/ for the home folder. */
   folders: string[]
+  /**
+   * Folders an earlier setup held past the limit (its repo roots and extra folders merged into
+   * one list, the first 20 kept), until the list is next saved. Absent: none.
+   */
+  dropped?: string[]
   /** Whether this computer has the Mac's folder chooser. */
   chooser: boolean
   /**
