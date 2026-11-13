@@ -104,6 +104,8 @@ new_case() {
   : >"$C/log"
   local t arch
   for t in $TOOLS; do ln -s "$(command -v "$t")" "$C/bin/$t"; done
+  # GNU tar (CI's Linux) runs gzip from PATH for -z; macOS's bsdtar has it built in.
+  ln -s "$(command -v gzip)" "$C/bin/gzip"
   cat >"$C/bin/uname" <<EOF
 #!/bin/sh
 case "\$1" in
