@@ -38,6 +38,10 @@
 # still has them from an earlier deploy, are removed without CONFIRM_REMOVE (RETIRED_VARS below),
 # and their secrets are no longer mounted.
 #
+# Roll forward only (13 Nov 2026): an older relay image cannot read the boundaries documents
+# (schema v3: the topic alone) or the member statuses (folder_count, folders_ok) this revision
+# writes. Once it is deployed, never roll back to a revision before it; fix forward instead.
+#
 # Membership lives in the relay's roster and owners change it in the console (M6-SPEC).
 # config/team.local.yaml holds the teams, their seed members (at least one owner each),
 # limits and delegates; after changing it, run scripts/gcp-bootstrap.sh (a new secret

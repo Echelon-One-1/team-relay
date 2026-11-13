@@ -13,12 +13,14 @@ wrong types and a bool for a number are refused):
 - ``claude``: ``found``, ``signed_in`` bools.
 - ``folder_count``: how many folders the member chose on their Mac (local folders only, 13 Nov
   2026), an integer 0..20, never a bool or a float; never a path or a folder name.
+- ``folders_ok``: a bool; false when the member's folders file cannot be used, and then
+  ``folder_count`` is 0.
 - ``self_test``: ``ok`` a bool, ``at`` an RFC 3339 time with a zone, ``reason`` null or at most
   200 characters with no control or formatting character other than newline and tab.
 
 An older plugin's body (with ``folders``, ``drive`` or ``sources``) is refused as an unknown
-field. A status such a plugin stored earlier still reads: its ``folder_count`` is null
-(:func:`stored_folder_count`).
+field. A status such a plugin stored earlier still reads: its ``folder_count`` and ``folders_ok``
+are null (:func:`stored_folder_count`, :func:`stored_folders_ok`).
 
 Times are stored and answered in the relay's own form (UTC, milliseconds, ``Z``). A refusal is
 ``400 invalid_body`` naming the field, never the value sent.
@@ -80,6 +82,7 @@ class _StatusBody(_Strict):
     daemon: _Daemon
     claude: _Claude
     folder_count: int = Field(ge=0, le=MAX_FOLDERS)
+    folders_ok: bool
     self_test: _SelfTest
 
 
@@ -92,6 +95,7 @@ _FIELDS = frozenset(
         "found",
         "signed_in",
         "folder_count",
+        "folders_ok",
         "self_test",
         "ok",
         "at",
@@ -156,6 +160,8 @@ def parse_status_body(raw: Any) -> dict[str, Any]:
     body = _validate(_StatusBody, raw)
     if not _clean(body.daemon.version):
         raise _invalid("daemon.version", "no control or formatting characters")
+    if not body.folders_ok and body.folder_count != 0:
+        raise _invalid("folder_count", "0 when folders_ok is false")
     reason = body.self_test.reason
     if reason is not None and not _clean(reason, REASON_CONTROLS):
         raise _invalid(
@@ -168,6 +174,7 @@ def parse_status_body(raw: Any) -> dict[str, Any]:
         },
         "claude": {"found": body.claude.found, "signed_in": body.claude.signed_in},
         "folder_count": body.folder_count,
+        "folders_ok": body.folders_ok,
         "self_test": {
             "ok": body.self_test.ok,
             "at": _time(body.self_test.at, "self_test.at"),
@@ -185,11 +192,18 @@ def stored_folder_count(status: dict[str, Any]) -> int | None:
     return None
 
 
+def stored_folders_ok(status: dict[str, Any]) -> bool | None:
+    """Whether the member's folders file could be used, as a stored status says; None when it
+    does not say (a status stored before it) or holds anything but a bool."""
+    ok = status.get("folders_ok")
+    return ok if isinstance(ok, bool) else None
+
+
 def status_json(status: dict[str, Any], seen_at: datetime) -> dict[str, Any]:
     """A stored status as the routes answer it: ``daemon``, ``claude``, ``self_test`` in their
     order, then ``seen_at``. Re-built field by field, so a stored document never hands out
-    more: never the folder count (the member's entry carries it, to whom the owner rule
-    allows), and nothing an older plugin's status held besides these groups."""
+    more: never the folder count or ``folders_ok`` (the member's entry carries them, to whom
+    the owner rule allows), and nothing an older plugin's status held besides these groups."""
     return {
         "daemon": {
             "version": status["daemon"]["version"],

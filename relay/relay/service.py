@@ -40,6 +40,7 @@ from .member_state import (
     parse_status_body,
     status_json,
     stored_folder_count,
+    stored_folders_ok,
 )
 from .models import CreateRequestBody, CursorBody, ProgressBody, ReplyBody, ToolEventBody
 from .roster import (
@@ -1645,7 +1646,7 @@ class RelayService:
         (its own clock). At most one write per member per STATUS_MIN_INTERVAL (``429``).
         Never a delegate's (the app refuses it). Not audited: like a cursor move, it is the
         transport's bookkeeping, and it holds a count, booleans and times only. The answer is
-        the status as stored, with the caller's own ``folder_count``."""
+        the status as stored, with the caller's own ``folder_count`` and ``folders_ok``."""
         status = parse_status_body(raw)
         now = self.now()
 
@@ -1669,15 +1670,20 @@ class RelayService:
             raise ApiError(
                 429, "rate_limited", "At most one status every 20 seconds; try again shortly."
             )
-        return {**status_json(written, now), "folder_count": stored_folder_count(written)}
+        return {
+            **status_json(written, now),
+            "folder_count": stored_folder_count(written),
+            "folders_ok": stored_folders_ok(written),
+        }
 
     async def members_status(self, caller: Caller) -> dict[str, Any]:
         """M11-SPEC §3: every active member's last status (null when none), whether they are
         answering (a status within ANSWERING_WINDOW), the boundaries version they accepted,
         and the team's current version. Each entry's ``folder_count`` (how many folders the
-        member chose; never their names, 13 Nov 2026) goes to an owner for every member and to
-        anyone else for their own entry only: null for the others, and when the member has no
-        status or an older plugin's status without a count."""
+        member chose; never their names, 13 Nov 2026) and ``folders_ok`` (whether their folders
+        file could be used) go to an owner for every member and to anyone else for their own
+        entry only: null for the others, and when the member has no status or a stored status
+        without them (an older plugin's)."""
         await self._count_own_read(caller, "status_reads", "members_status")
         snapshot = await self.roster.snapshot(caller.team, fresh=True)
         owner = snapshot.role(caller.member) == OWNER
@@ -1690,9 +1696,11 @@ class RelayService:
         for member in members:
             stored = statuses.get(member)
             acceptance = accepted.get(member)
-            count = None
+            count: int | None = None
+            folders_ok: bool | None = None
             if stored is not None and (owner or member == caller.member):
                 count = stored_folder_count(stored.status)
+                folders_ok = stored_folders_ok(stored.status)
             listed.append(
                 {
                     "member": member,
@@ -1700,6 +1708,7 @@ class RelayService:
                     "answering": stored is not None and now - stored.seen_at <= ANSWERING_WINDOW,
                     "accepted_version": acceptance.version if acceptance else 0,
                     "folder_count": count,
+                    "folders_ok": folders_ok,
                 }
             )
         return {

@@ -673,19 +673,21 @@ The JSON matches `plugin/src/boundaries-types.ts` (`Acceptance`, `MemberStatusBo
 - `PUT /v1/teams/{team}/me/status` (the member only; never a delegate) with the background
   answerer's report (strict, every field required: `daemon {version ≤32 chars, started_at}`,
   `claude {found, signed_in}`, `folder_count` (how many folders the member chose, an integer
-  0..20, never a bool or a float), `self_test {ok, at, reason ≤200 chars | null}`; times RFC
-  3339 with a zone, answered in the relay's form) → `200 {daemon, claude, self_test, seen_at,
-  folder_count}` with the relay's `seen_at`. At most one write per member per 20 s (`429
-  rate_limited`). A count, booleans and times only, never a folder's name or path; not
-  audited. Stored, overwritten, at `teams/{team}/member_status/{member}`. (Correction, 13 Nov
+  0..20, never a bool or a float), `folders_ok` (a bool: false when the member's folders file
+  cannot be used, and then `folder_count` must be 0), `self_test {ok, at, reason ≤200 chars |
+  null}`; times RFC 3339 with a zone, answered in the relay's form) → `200 {daemon, claude,
+  self_test, seen_at, folder_count, folders_ok}` with the relay's `seen_at`. At most one
+  write per member per 20 s (`429 rate_limited`). A count, booleans and times only, never a
+  folder's name or path; not audited. Stored, overwritten, at `teams/{team}/member_status/{member}`. (Correction, 13 Nov
   2026: `folders {repo_roots, clones, extra_folders}`, `drive {connected}` and `sources` are
   gone; an older plugin's body is `400 invalid_body` "unknown field".)
 - `GET /v1/teams/{team}/members/status` (any active member; a delegate reading for one) →
   `{"members": [{member, status: {daemon, claude, self_test, seen_at} | null, answering,
-  accepted_version, folder_count}], "boundaries_version"}` for every active member;
-  `answering` is a status received in the last 180 s. `folder_count` goes to an owner for
-  every member and to anyone else for their own entry only (null for the others); it is also
-  null without a status, and for a status an older plugin stored (no count).
+  accepted_version, folder_count, folders_ok}], "boundaries_version"}` for every active
+  member; `answering` is a status received in the last 180 s. `folder_count` and `folders_ok`
+  go to an owner for every member and to anyone else (a delegate reading for a member
+  included) for their own entry only (null for the others); each is also null without a
+  status, and for a stored status that lacks it (an older plugin's).
 - `GET /v1/teams/{team}/requests/{id}` also answers each visible recipient's
   `answer_preview` and, to the asker only (a delegate reading for the asker included),
   `answer`: the full reply text. It is kept at `teams/{team}/requests/{id}/answers/{member}`

@@ -12,8 +12,8 @@ version and ``not_set`` checks, the strict body, the audit (the version, never t
 budget; ``PUT me/status`` (the member itself only, never a delegate), its strict schema, the
 relay's ``seen_at`` and the 20-second rule; ``GET members/status`` (``answering`` within 180 s,
 ``accepted_version``, active members only, and, local folders only since 13 Nov 2026, each
-member's ``folder_count``: to an owner for everyone, to anyone else only their own; a status an
-older plugin stored reads with a null count). The Firestore half needs the emulator
+member's ``folder_count`` and ``folders_ok``: to an owner for everyone, to anyone else only
+their own; a status an older plugin stored reads with nulls). The Firestore half needs the emulator
 (scripts/test-relay.sh)."""
 
 from __future__ import annotations
@@ -72,10 +72,11 @@ STATUS: dict[str, Any] = {
     "daemon": {"version": "0.11.0", "started_at": "2026-09-23T11:59:00.000Z"},
     "claude": {"found": True, "signed_in": True},
     "folder_count": 5,
+    "folders_ok": True,
     "self_test": {"ok": True, "at": "2026-09-23T11:59:30.000Z", "reason": None},
 }
-# What a status entry of members/status shows: never the folder count.
-SHOWN = {k: v for k, v in STATUS.items() if k != "folder_count"}
+# What a status entry of members/status shows: never the folder count or folders_ok.
+SHOWN = {k: v for k, v in STATUS.items() if k not in ("folder_count", "folders_ok")}
 # A status an older plugin reported, as an earlier relay stored it (before 13 Nov 2026).
 OLD_STATUS: dict[str, Any] = {
     "daemon": {"version": "0.10.0", "started_at": "2026-09-23T11:59:00.000Z"},
@@ -601,7 +602,7 @@ async def test_a_member_reports_and_every_member_reads_it(api: Api):
     # The answer: the status as stored, with the caller's own count.
     assert r.json() == {**STATUS, "seen_at": STAMP}
 
-    def expected(bob_count: int | None) -> dict[str, Any]:
+    def expected(bob_count: int | None, bob_ok: bool | None) -> dict[str, Any]:
         return {
             "members": [
                 {
@@ -610,6 +611,7 @@ async def test_a_member_reports_and_every_member_reads_it(api: Api):
                     "answering": False,
                     "accepted_version": 0,
                     "folder_count": None,
+                    "folders_ok": None,
                 },
                 {
                     "member": "bob",
@@ -617,6 +619,7 @@ async def test_a_member_reports_and_every_member_reads_it(api: Api):
                     "answering": True,
                     "accepted_version": 0,
                     "folder_count": bob_count,
+                    "folders_ok": bob_ok,
                 },
                 {
                     "member": "carol",
@@ -624,15 +627,16 @@ async def test_a_member_reports_and_every_member_reads_it(api: Api):
                     "answering": False,
                     "accepted_version": 0,
                     "folder_count": None,
+                    "folders_ok": None,
                 },
             ],
             "boundaries_version": 0,
         }
 
     # alice is an owner: bob's count; bob: his own; carol (a member): not bob's.
-    assert await members_status(api, "alice") == expected(5)
-    assert await members_status(api, "bob") == expected(5)
-    assert await members_status(api, "carol") == expected(None)
+    assert await members_status(api, "alice") == expected(5, True)
+    assert await members_status(api, "bob") == expected(5, True)
+    assert await members_status(api, "carol") == expected(None, None)
 
 
 async def test_an_owner_sees_every_count_and_a_member_only_their_own(api: Api):
@@ -651,6 +655,15 @@ async def test_an_owner_sees_every_count_and_a_member_only_their_own(api: Api):
     assert counts(r.json()) == {"alice": 0, "bob": 20, "carol": 1}
     r = await api.delegated("GET", "/members/status", EMAILS["carol"])
     assert counts(r.json()) == {"alice": None, "bob": None, "carol": 1}
+    # A delegate for a member who is not an owner (bob): his own count and folders_ok only.
+    r = await api.delegated("GET", "/members/status", EMAILS["bob"])
+    assert r.status_code == 200, r.text
+    assert counts(r.json()) == {"alice": None, "bob": 20, "carol": None}
+    assert {m["member"]: m["folders_ok"] for m in r.json()["members"]} == {
+        "alice": None,
+        "bob": True,
+        "carol": None,
+    }
     # The status groups never carry a count, a folder or a path.
     for body in (await members_status(api, "alice"), await members_status(api, "carol")):
         for entry in body["members"]:
@@ -668,6 +681,7 @@ async def test_a_status_an_older_plugin_stored_reads_with_a_null_count(api: Api)
     for member in ("alice", "bob"):
         bob = (await members_status(api, member))["members"][1]
         assert bob["member"] == "bob" and bob["folder_count"] is None
+        assert bob["folders_ok"] is None
         assert bob["answering"] is True
         assert bob["status"] == {
             "daemon": OLD_STATUS["daemon"],
@@ -681,6 +695,56 @@ async def test_a_status_an_older_plugin_stored_reads_with_a_null_count(api: Api)
     stored = (await api.store.get_member_statuses(api.team, ["bob"]))["bob"].status
     assert stored == STATUS
     assert (await members_status(api, "alice"))["members"][1]["folder_count"] == 5
+
+
+async def test_folders_ok_is_stored_and_shown_like_the_count(api: Api):
+    """folders_ok false: the member's folders file cannot be used, and the count is then 0."""
+    r = await put_status(api, "carol", {**STATUS, "folder_count": 0, "folders_ok": False})
+    assert r.status_code == 200, r.text
+    assert (r.json()["folder_count"], r.json()["folders_ok"]) == (0, False)
+    stored = (await api.store.get_member_statuses(api.team, ["carol"]))["carol"].status
+    assert stored["folders_ok"] is False and stored["folder_count"] == 0
+    assert (await put_status(api, "bob", STATUS)).status_code == 200
+
+    def oks(body: dict[str, Any]) -> dict[str, bool | None]:
+        return {m["member"]: m["folders_ok"] for m in body["members"]}
+
+    assert oks(await members_status(api, "alice")) == {"alice": None, "bob": True, "carol": False}
+    assert oks(await members_status(api, "carol")) == {"alice": None, "bob": None, "carol": False}
+    assert oks(await members_status(api, "bob")) == {"alice": None, "bob": True, "carol": None}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {**STATUS, "folders_ok": None},
+        {**STATUS, "folders_ok": 1},
+        {**STATUS, "folders_ok": "true"},
+        {k: v for k, v in STATUS.items() if k != "folders_ok"},
+        {**STATUS, "folders_ok": False, "folder_count": 3},
+    ],
+    ids=["null", "int", "string", "missing", "false with a count"],
+)
+async def test_an_invalid_folders_ok_is_400(api: Api, body: dict[str, Any]):
+    r = await put_status(api, "bob", body)
+    assert (r.status_code, r.json()["error"]) == (400, "invalid_body"), r.text
+    assert r.json()["detail"].split(":", 1)[0] in ("folders_ok", "folder_count")
+    assert await api.store.get_member_statuses(api.team, ["bob"]) == {}
+
+
+async def test_a_stored_status_without_a_bool_folders_ok_reads_null(api: Api):
+    """A status stored before folders_ok (an int count only), or holding a non-bool: null."""
+    for value in (None, 1, "yes"):
+        stored = {k: v for k, v in STATUS.items() if k != "folders_ok"}
+        if value is not None:
+            stored["folders_ok"] = value
+
+        def fn(current, entry, stored=stored) -> StatusChange[None]:
+            return StatusChange(result=None, status=MemberStatus(status=stored, seen_at=NOW))
+
+        await api.store.set_member_status(api.team, "bob", fn)
+        bob = (await members_status(api, "alice"))["members"][1]
+        assert (bob["folder_count"], bob["folders_ok"]) == (5, None), value
 
 
 @pytest.mark.parametrize("count", FOLDER_COUNTS["valid"])
