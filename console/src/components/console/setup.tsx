@@ -22,6 +22,7 @@ import {
   boundariesSet,
   CHECKING,
   currentVersion,
+  hasJoined,
   isAccepted,
   publicOrigin,
   SETUP_STEPS,
@@ -69,6 +70,11 @@ export function useViewerSetup(intervalMs?: number) {
     /** Everything the steps are worked out from has loaded at least once. */
     known: !!me.data && !!statuses.data && !!bounds.data,
   }
+}
+
+/** Whether the join card shows: progress has loaded and the viewer has not joined yet. */
+export function joinCardShows(v: ReturnType<typeof useViewerSetup>): boolean {
+  return v.known && !v.missing && !hasJoined(v.entry, v.bounds.data, v.accepted)
 }
 
 /** Step 2: the team's topic, and Accept. An acceptance of any version up to the current one holds. */
@@ -138,7 +144,14 @@ function OpenChecks({ checks }: { checks: MacCheck[] }) {
 
 function StepItem({ n, step, children }: { n: number; step: SetupStep; children?: ReactNode }) {
   return (
-    <li className="flex gap-3 py-3.5" data-setup-step={step.id} data-done={step.done ? 'true' : 'false'}>
+    <li
+      id={`setup-step-${step.id}`}
+      // The join card's "Go to Accept" brings this step into view and focuses it when its button cannot be.
+      tabIndex={-1}
+      className="-mx-2 flex gap-3 rounded-sm px-2 py-3.5 outline-none focus-visible:ring-2 focus-visible:ring-ring data-[focus-ring=true]:ring-2 data-[focus-ring=true]:ring-ring"
+      data-setup-step={step.id}
+      data-done={step.done ? 'true' : 'false'}
+    >
       {step.done ? (
         <CircleCheck aria-hidden className="mt-px size-5 shrink-0 text-ok" />
       ) : (
@@ -160,7 +173,8 @@ function StepItem({ n, step, children }: { n: number; step: SetupStep; children?
   )
 }
 
-export function SetupPage() {
+/** `join`: shown above the steps (the join card, for a viewer who has not joined yet). */
+export function SetupPage({ join: joinCard }: { join?: ReactNode } = {}) {
   const join = useJoin()
   const nav = useNav()
   const v = useViewerSetup(SETUP_INTERVAL_MS)
@@ -177,6 +191,8 @@ export function SetupPage() {
   const origin = publicOrigin(window.location, join.data)
   const command = origin ? setupCommand(origin) : null
   const allDone = !loading && done === SETUP_STEPS
+  // The join card above already has the Terminal steps and the setup line: say them once.
+  const cardShown = joinCard !== undefined && joinCardShows(v)
 
   const macBody = (step: SetupStep) => (
     <>
@@ -184,6 +200,15 @@ export function SetupPage() {
         <p className="text-[12.5px] leading-relaxed text-subtle">
           Your Mac answers teammates in the background. To change your folders, run the setup line again.
         </p>
+      ) : cardShown ? (
+        <>
+          <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-see-card>
+            Follow &quot;Join in 2 minutes&quot; above.
+          </p>
+          <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-command>
+            Or, in Claude Code, type <span className="font-mono text-[12px] text-foreground">/team-relay:setup</span>
+          </p>
+        </>
       ) : (
         <>
           <p className="text-[12.5px] leading-relaxed text-subtle">
@@ -194,7 +219,7 @@ export function SetupPage() {
           </p>
         </>
       )}
-      {command ? (
+      {cardShown ? null : command ? (
         step.done ? (
           <CopyCommand text={command} label="setup line" />
         ) : (
@@ -235,6 +260,7 @@ export function SetupPage() {
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+      {joinCard}
       <Panel
         id="setup"
         title="Your setup"
@@ -286,9 +312,9 @@ export function SetupPage() {
 }
 
 /**
- * On the team page, once the viewer has joined: they have not accepted the team's topic (never,
- * or only on an earlier team under the same id). A link to the Setup page, where they read and
- * accept it. Hidden while the join card shows (it says the same).
+ * On the team page: the viewer has not accepted the team's topic (never, or only on an earlier
+ * team under the same id). A link to the Setup page, where they read and accept it (and where the
+ * join card is, until they have joined).
  */
 export function AcceptBanner() {
   const acceptance = useAcceptance()
@@ -300,7 +326,7 @@ export function AcceptBanner() {
     <div
       role="region"
       aria-label="Accept the team's topic"
-      className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-warn/30 bg-warn-soft px-4 py-2.5"
+      className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg bg-warn-soft px-4 py-2.5"
       data-accept-banner={bounds.data.version}
     >
       <ShieldAlert aria-hidden className="size-4 shrink-0 text-warn" />
@@ -318,31 +344,36 @@ const VIEWS: Array<{ view: ConsoleView; label: string }> = [
   { view: 'ask', label: 'Ask' },
   { view: 'team', label: 'Team' },
   { view: 'join', label: 'Setup' },
+  { view: 'settings', label: 'Team settings' },
 ]
 
-/** The team's pages (M11): Ask first, then the team view and Setup (the landing page stays the team's). */
-export function ViewTabs({ setup }: { setup: { done: number } | null }) {
+/**
+ * The team's pages (M11): Ask first, then the team view, Setup and Team settings (the landing page
+ * stays the team's), as pills in a segmented track. `settings`: whether the team has a settings
+ * page (a console server that serves one team names none).
+ */
+export function ViewTabs({ setup, settings = true }: { setup: { done: number } | null; settings?: boolean }) {
   const nav = useNav()
   return (
-    <nav aria-label="Pages" className="-mb-1">
-      <ul className="flex items-center gap-1">
-        {VIEWS.map((v) => {
+    <nav aria-label="Pages" className="max-w-full">
+      <ul className="flex w-fit max-w-full items-center gap-0.5 overflow-x-auto rounded-full bg-muted p-0.5">
+        {VIEWS.filter((v) => settings || v.view !== 'settings').map((v) => {
           const current = nav.view === v.view
           return (
-            <li key={v.view}>
+            <li key={v.view} className="shrink-0">
               <button
                 type="button"
                 onClick={() => nav.setView(v.view)}
                 aria-current={current ? 'page' : undefined}
                 data-view-tab={v.view}
                 className={cn(
-                  'inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-[12.5px] font-medium text-subtle outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/40',
-                  current && 'bg-card text-foreground shadow-[0_0_0_1px_var(--border)]',
+                  'inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium whitespace-nowrap text-subtle outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset sm:px-4',
+                  current && 'bg-thumb text-foreground shadow-thumb',
                 )}
               >
                 {v.label}
                 {v.view === 'join' && setup && setup.done < SETUP_STEPS ? (
-                  <span className="tnum text-[11px] font-normal text-subtle" data-setup-tab-count>
+                  <span className="tnum rounded-full bg-muted px-1.5 text-[11px] leading-4 font-medium text-foreground" data-setup-tab-count>
                     {setup.done}/{SETUP_STEPS}
                   </span>
                 ) : null}

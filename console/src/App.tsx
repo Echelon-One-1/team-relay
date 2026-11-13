@@ -6,7 +6,6 @@ import { AdminPage } from '@/components/console/admin'
 import { Agents } from '@/components/console/agents'
 import { AskPage } from '@/components/console/ask'
 import { Header } from '@/components/console/header'
-import { JoinCard, useShowJoinCard } from '@/components/console/join'
 import { SetupFinished, SetupView, useSetupFinished } from '@/components/console/local-setup'
 import { Members, progressByMember } from '@/components/console/members'
 import { RequestSheet } from '@/components/console/request-sheet'
@@ -59,7 +58,6 @@ export function Console() {
   const viewerSetup = useViewerSetup()
   const progress = useMemo(() => progressByMember(statuses.data, bounds.data), [statuses.data, bounds.data])
   const setupDone = statuses.data ? viewerSetup.done : null
-  const joinCard = useShowJoinCard()
 
   // M6 §4 (hosted): a signed-in account the relay does not know sees this, and no data. With
   // several teams (M9 §5) it means this team is no longer theirs: their teams are read again.
@@ -67,6 +65,13 @@ export function Console() {
   useEffect(() => {
     if (stranger && nav.teams) void qc.invalidateQueries({ queryKey: teamsKey })
   }, [stranger, nav.teams, qc])
+  // A console server that serves one team names no team, so it has no settings page: /settings
+  // shows the team, and the address says so (in place, so Back does not return to it).
+  const noSettings = nav.view === 'settings' && entry === null
+  const { replaceView } = nav
+  useEffect(() => {
+    if (noSettings) replaceView('team')
+  }, [noSettings, replaceView])
   if (stranger) return nav.teams ? <NoTeamPage teams={nav.teams} lost={nav.team} /> : <NotOnTeam email={stranger.email} />
   if (conn.state === 'session_expired' || me.error?.kind === 'session_expired') return <SessionExpired />
   if (conn.state === 'unauthorized' || me.error?.kind === 'unauthorized') return <Expired />
@@ -76,8 +81,8 @@ export function Console() {
       <Header />
       <main className="mx-auto flex max-w-[1440px] flex-col gap-4 px-3 py-4 sm:px-6 sm:py-5">
         {conn.state === 'unreachable' ? <UnreachableBanner conn={conn} /> : null}
-        <ViewTabs setup={setupDone !== null ? { done: setupDone } : null} />
-        {nav.view === 'ask' ? <AskPage /> : nav.view === 'join' ? <SetupView /> : teamView()}
+        <ViewTabs setup={setupDone !== null ? { done: setupDone } : null} settings={entry !== null} />
+        {nav.view === 'ask' ? <AskPage /> : nav.view === 'join' ? <SetupView /> : nav.view === 'settings' && entry ? settingsView(entry) : teamView()}
       </main>
       <RequestSheet req={selected} me={member} now={now} onClose={() => setOpenId(null)} />
     </div>
@@ -87,7 +92,7 @@ export function Console() {
   function teamView() {
     return (
       <>
-        {joinCard ? <JoinCard /> : <AcceptBanner />}
+        <AcceptBanner />
         <ResizableRow className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
           {(sized) => (
             <>
@@ -110,26 +115,33 @@ export function Console() {
           <Members roster={roster.data} loading={roster.isPending} failed={roster.isError} me={member} owner={owner} progress={progress} />
         )}
         <Activity requests={requests} me={member} now={now} loading={activity.isPending} onOpen={setOpenId} />
-        {entry ? (
-          <TeamSettings
-            entry={entry}
-            owner={entry.role === 'owner' && owner}
-            roleKnown={roster.data !== undefined || me.data !== undefined || roster.isError}
-          />
-        ) : null}
       </>
+    )
+  }
+
+  // Team settings (its own page, /settings): everyone reads them, owners change them.
+  function settingsView(team: NonNullable<typeof entry>) {
+    return (
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4" data-settings-team={team.team}>
+        <TeamSettings
+          entry={team}
+          owner={team.role === 'owner' && owner}
+          roleKnown={roster.data !== undefined || me.data !== undefined || roster.isError}
+        />
+      </div>
     )
   }
 }
 
 /**
  * The view from the address: /admin is the admin page (M9 §4), /join the Join checklist and /ask
- * the Ask page (M11), /team and anything else the team (the local console opens at /). On the
+ * the Ask page (M11), /settings the team's settings, /team and anything else the team (the local
+ * console opens at /). On the
  * hosted address / and /login are the relay's sign-in page and /setup its setup script
  * (docs/SIGNIN-PAGE.md); the page's button leads to /start (see startRequested).
  */
 function viewFromLocation(): ConsoleView {
-  const m = /\/(admin|join|ask|team)\/?$/.exec(window.location.pathname)
+  const m = /\/(admin|join|ask|team|settings)\/?$/.exec(window.location.pathname)
   return m ? (m[1] as ConsoleView) : 'team'
 }
 
@@ -232,8 +244,8 @@ function Teams() {
   // Only once that team is the one shown (a new team appears after the teams are read again).
   const focus = focusOn !== null && focusOn.team === team ? focusOn.part : null
   const nav = useMemo<Nav>(
-    () => ({ teams: data ?? null, team, selectTeam, view, setView, openCreate: () => setCreating(true), focus, clearFocus }),
-    [data, team, selectTeam, view, setView, focus, clearFocus],
+    () => ({ teams: data ?? null, team, selectTeam, view, setView, replaceView, openCreate: () => setCreating(true), focus, clearFocus }),
+    [data, team, selectTeam, view, setView, replaceView, focus, clearFocus],
   )
 
   if (teams.isPending) return <Loading />

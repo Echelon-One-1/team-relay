@@ -25,7 +25,7 @@ function Chip({ pressed, onClick, children, answering }: { pressed: boolean; onC
       onClick={onClick}
       data-recipient={children}
       className={cn(
-        'inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[12.5px] outline-none transition-colors hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/40',
+        'inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[12.5px] outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring',
         pressed && 'border-signal/50 bg-signal-soft text-signal hover:bg-signal-soft',
       )}
     >
@@ -110,7 +110,7 @@ function AskForm({ onAsked }: { onAsked: (id: string) => void }) {
               }}
               data-recipient="*"
               className={cn(
-                'inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[12.5px] font-medium outline-none transition-colors hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/40',
+                'inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[12.5px] font-medium outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring',
                 everyone && 'border-signal/50 bg-signal-soft text-signal hover:bg-signal-soft',
               )}
             >
@@ -142,7 +142,7 @@ function AskForm({ onAsked }: { onAsked: (id: string) => void }) {
           aria-invalid={over || undefined}
           aria-describedby={`${counterId}${error ? ` ${errorId}` : ''}`}
           placeholder="What do you want to know?"
-          className="min-h-28 w-full resize-y rounded-md border border-input bg-background px-2.5 py-2 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-faint focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 aria-invalid:border-bad"
+          className="min-h-28 w-full resize-y rounded-sm border border-input bg-field px-2.5 py-2 text-[13px] leading-relaxed text-foreground outline-none placeholder:text-faint focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring aria-invalid:border-bad"
         />
         <div className="flex items-center justify-between gap-2">
           <span className="text-[11.5px] text-subtle">Teammates answer from what the team&apos;s boundaries allow.</span>
@@ -204,7 +204,7 @@ function AskItem({ req, open, onToggle, now }: { req: MyRequest; open: boolean; 
         aria-expanded={open}
         aria-controls={bodyId}
         onClick={onToggle}
-        className="flex w-full items-start gap-2 px-4 py-2.5 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/40"
+        className="flex w-full items-start gap-2 px-4 py-2.5 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring"
       >
         <ChevronRight
           aria-hidden

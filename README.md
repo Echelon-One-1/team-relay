@@ -102,7 +102,7 @@ where it cannot run, the page says why and leaves it off), and click Done. The p
 set. Go back to Claude." The plugin gets the Node.js it needs by itself.
 
 If you prefer Terminal: open your team's page (the link in your invitation), click "Sign in
-with Google", accept the invitation, and follow the card "Join in 2 minutes": open Terminal, paste the one setup line
+with Google", accept the invitation, and follow the card "Join in 2 minutes" on the Setup page: open Terminal, paste the one setup line
 it shows, answer its questions (it gets what it needs, Node.js included, and opens the Mac's
 own folder chooser), then click Accept on the page. The Setup page shows what is left in plain
 words. The steps below are the manual way, for developers and other systems.

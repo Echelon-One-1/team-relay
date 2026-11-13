@@ -282,6 +282,16 @@ decisions; where they differ from §5 and §6, these win.
   a check failing) or something new to accept does not bring the card back: the Setup tab's
   count and the accept banner show those. While the card shows, the accept banner does not. A
   relay without setup progress (404) shows no card.
+- *Correction (13 Nov 2026, console restyle):* the card is no longer on the Team page. It sits
+  at the top of the Setup page (`/join`, hosted and in the plain local console; not on the
+  `/team-relay:setup` page, where the member is setting up that Mac then). "See your progress" is
+  gone (the progress is right below). "Go to Accept" stays on the page: it brings the Accept step
+  into view and focuses its button (the step itself while the button is disabled). While the card
+  shows, the "Set up your Mac" step does not repeat the Terminal steps or the setup line; it
+  points up to the card, so the page has one big Copy button. The Team page shows the accept
+  banner whenever the viewer has not accepted the current topic, joined or not. Team settings
+  (boundaries, team details, Delete team) moved from the Team page to their own tab, at
+  `/settings`.
 - The owner's **Copy invite message** is plain text, no markdown:
 
   ```

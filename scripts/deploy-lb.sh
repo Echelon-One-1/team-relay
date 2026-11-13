@@ -7,7 +7,8 @@
 #   https://PUBLIC_HOST/v1/*, /healthz, /setup -> the relay (no IAP: the relay signs people in
 #                                         itself; /setup is the public setup script, M11-SPEC §5)
 #   https://PUBLIC_HOST/<everything else>  -> the console (IAP, custom OAuth client, IAP_ACCESS):
-#                                            /start, /team, /join, /ask, /admin, /api/*, assets
+#                                            /start, /team, /join, /ask, /settings, /admin, /api/*,
+#                                            assets
 #   http://PUBLIC_HOST/*                 -> a redirect to https
 #   any other Host (the bare IP, ...)    -> a redirect to https://PUBLIC_HOST
 # The path matcher uses route rules (exact paths and one prefix, in priority order) and the map

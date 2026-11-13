@@ -714,7 +714,7 @@ it back as `X-Console-Key` on every API call. The server:
 The console's header has a team switcher (your teams, your open invitations with Accept and
 Decline, *Create team*, and *Admin* for relay admins); it remembers the last team in the
 browser (`localStorage`, when the browser allows it). An owner's Members panel shows people
-they invited as *Invited* with *Withdraw*, and *Team settings* has *Delete team* (type the id to
+they invited as *Invited* with *Withdraw*, and the *Team settings* tab (`/settings`) has *Delete team* (type the id to
 confirm; the relay refuses its configured teams). Someone on no team sees their invitations
 and *Create a team*. The admin page (`/admin`) lists every team a page at a time (id, name,
 status, members, owners, created, last activity; no emails, no content) with *Delete* after the

@@ -234,7 +234,7 @@ export function Activity({
             <ToggleGroupItem
               key={f}
               value={f}
-              className="h-7 gap-1.5 px-2.5 text-[12px] data-[state=on]:bg-signal-soft data-[state=on]:text-signal"
+              className="h-7 gap-1.5 px-3 text-[12px]"
             >
               {f === 'all' ? 'All' : f === 'mine' ? 'Mine' : 'Open'}
               <span className="tnum text-[11px] opacity-70">{counts[f]}</span>

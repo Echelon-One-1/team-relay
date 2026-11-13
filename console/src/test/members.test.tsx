@@ -358,8 +358,10 @@ describe('owner from /me (M6 §2)', () => {
         if (url.pathname === '/api/roster') return new Promise<Response>(() => {})
         return json({ error: 'not_found' }, 404)
       })
+      // The team's settings page (an earlier test here left window.location a plain URL).
+      Object.defineProperty(window, 'location', { configurable: true, value: new URL('http://127.0.0.1:4317/settings') })
       const r = renderWithClient(<App />)
-      await waitFor(() => expect(document.querySelector('[data-agent="bob"]')).not.toBeNull())
+      await screen.findByRole('region', { name: 'Team settings' })
       // The team's settings offer Delete team only to an owner, by /me's role until the roster is read.
       if (role === 'owner') await waitFor(() => expect(document.querySelector('[data-delete-team]')).not.toBeNull())
       else {
@@ -367,6 +369,7 @@ describe('owner from /me (M6 §2)', () => {
         expect(document.querySelector('[data-delete-team]')).toBeNull()
       }
       r.unmount()
+      Object.defineProperty(window, 'location', { configurable: true, value: new URL('http://127.0.0.1:4317/') })
     }
   })
 })

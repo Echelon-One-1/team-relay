@@ -10,9 +10,9 @@ export function useTeam(): string | null {
 
 /**
  * The page shown: the team's, the admin page (M9 §4), the Join checklist (M11 §6, at /join; the
- * relay serves /setup on the same host) or Ask (M11 §4, at /ask).
+ * relay serves /setup on the same host), Ask (M11 §4, at /ask) or the team's settings (at /settings).
  */
-export type ConsoleView = 'team' | 'admin' | 'join' | 'ask'
+export type ConsoleView = 'team' | 'admin' | 'join' | 'ask' | 'settings'
 
 /** A part of the team's page to bring into view once it is shown (M10 §1: after creating a team). */
 export type ConsoleFocus = 'boundaries'
@@ -29,6 +29,8 @@ export interface Nav {
   selectTeam: (team: string, focus?: ConsoleFocus, view?: ConsoleView) => void
   view: ConsoleView
   setView: (view: ConsoleView) => void
+  /** The same, in place of the current history entry (an address that shows another page). */
+  replaceView: (view: ConsoleView) => void
   openCreate: () => void
   /** What to bring into view, until the page has done so (clearFocus). */
   focus: ConsoleFocus | null
@@ -41,6 +43,7 @@ export const NavContext = createContext<Nav>({
   selectTeam: () => {},
   view: 'team',
   setView: () => {},
+  replaceView: () => {},
   openCreate: () => {},
   focus: null,
   clearFocus: () => {},

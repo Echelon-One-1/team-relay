@@ -403,7 +403,7 @@ describe('console server: static files', () => {
     expect((await req(port, '/assets/app.css')).headers['content-type']).toMatch(/^text\/css/);
     expect((await req(port, '/requests/abc')).body).toContain('<title>console</title>');
     // The console's own views (docs/SIGNIN-PAGE.md: /team, and /start where the sign-in page leads).
-    for (const path of ['/team', '/start', '/join', '/ask', '/admin']) {
+    for (const path of ['/team', '/start', '/join', '/ask', '/settings', '/admin']) {
       const page = await req(port, path);
       expect(page.status, path).toBe(200);
       expect(page.body, path).toContain('<title>console</title>');

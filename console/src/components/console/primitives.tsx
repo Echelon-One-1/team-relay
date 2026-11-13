@@ -141,24 +141,24 @@ export function Panel({
   return (
     <section
       aria-labelledby={headingId}
-      className={cn('flex min-w-0 flex-col rounded-xl border bg-card shadow-[0_1px_0_0_var(--hairline)]', className)}
+      className={cn('flex min-w-0 flex-col rounded-lg bg-card', className)}
       data-collapsed={collapse ? (open ? 'open' : 'closed') : undefined}
     >
       <header
         className={cn(
-          'flex min-h-11 flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2',
+          'flex min-h-12 flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5',
           open && 'border-b border-hairline',
           collapse && 'pl-2',
         )}
       >
-        <h2 id={headingId} className="text-[13px] font-semibold tracking-[-0.005em]">
+        <h2 id={headingId} className="text-base leading-[22px] font-semibold">
           {collapse ? (
             <button
               type="button"
               aria-expanded={open}
               aria-controls={bodyId}
               onClick={collapse.onToggle}
-              className="-my-1 flex items-center gap-1.5 rounded-md px-2 py-1 text-left transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/40 focus-visible:outline-none"
+              className="-my-1 flex items-center gap-1.5 rounded-md px-2 py-1 text-left transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             >
               <ChevronRight
                 aria-hidden

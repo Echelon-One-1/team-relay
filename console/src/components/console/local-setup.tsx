@@ -13,6 +13,7 @@ import { useNav } from '@/hooks/team'
 import { acceptedVersion, boundariesSet, isAccepted } from '@/lib/setup'
 import { cn } from '@/lib/utils'
 import { Panel } from './primitives'
+import { JoinCard } from './join'
 import { AcceptBoundaries, SetupPage } from './setup'
 import { FullPage } from './states'
 
@@ -72,9 +73,13 @@ export function SetupFinished() {
 
 // -- the view ---------------------------------------------------------------------------------------
 
-/** The Setup view: on the member's Mac with the setup routes, the local steps; else the usual page. */
+/**
+ * The Setup view: on the member's Mac with the setup routes, the local steps; else the usual page,
+ * with the join card above it until the viewer has joined. The local steps have no join card: the
+ * member is setting up this Mac right then, so its "open Terminal and paste the line" is done.
+ */
 export function SetupView() {
-  if (isHosted()) return <SetupPage />
+  if (isHosted()) return <SetupPage join={<JoinCard />} />
   return <LocalSetupGate />
 }
 
@@ -87,7 +92,7 @@ function LocalSetupGate() {
   })
   if (q.isPending) {
     return (
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-3 rounded-xl border bg-card p-4" aria-label="Loading your setup">
+      <div className="mx-auto flex w-full max-w-3xl flex-col gap-3 rounded-lg bg-card p-4" aria-label="Loading your setup">
         <Skeleton className="h-5 w-2/5" />
         <Skeleton className="h-9 w-full" />
         <Skeleton className="h-5 w-1/3" />
@@ -95,10 +100,10 @@ function LocalSetupGate() {
     )
   }
   // A console started without the setup page's routes: the usual Setup page.
-  if (q.error?.kind === 'not_found') return <SetupPage />
+  if (q.error?.kind === 'not_found') return <SetupPage join={<JoinCard />} />
   if (q.error || !q.data) {
     return (
-      <div className="mx-auto flex w-full max-w-3xl flex-col items-start gap-3 rounded-xl border bg-card p-4" role="alert" data-local-setup-error>
+      <div className="mx-auto flex w-full max-w-3xl flex-col items-start gap-3 rounded-lg bg-card p-4" role="alert" data-local-setup-error>
         <p className="text-[13px]">Your setup didn&apos;t load. Check that Claude is still open, then try again.</p>
         <Button size="sm" variant="outline" onClick={() => void q.refetch()}>
           Try again

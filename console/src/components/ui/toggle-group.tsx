@@ -13,7 +13,7 @@ const ToggleGroupContext = React.createContext<
 >({
   size: "default",
   variant: "default",
-  spacing: 2,
+  spacing: 0.5,
   orientation: "horizontal",
 })
 
@@ -21,7 +21,7 @@ function ToggleGroup({
   className,
   variant,
   size,
-  spacing = 2,
+  spacing = 0.5,
   orientation = "horizontal",
   children,
   ...props
@@ -39,7 +39,8 @@ function ToggleGroup({
       data-orientation={orientation}
       style={{ "--gap": spacing } as React.CSSProperties}
       className={cn(
-        "group/toggle-group flex w-fit flex-row items-center gap-[--spacing(var(--gap))] rounded-lg data-[size=sm]:rounded-[min(var(--radius-md),10px)] data-vertical:flex-col data-vertical:items-stretch",
+        // The segmented track: a pill of the muted tint, 2px inside, the chosen item raised in it.
+        "group/toggle-group flex w-fit flex-row items-center gap-[--spacing(var(--gap))] rounded-full bg-muted p-0.5 data-vertical:flex-col data-vertical:items-stretch data-vertical:rounded-lg",
         className
       )}
       {...props}

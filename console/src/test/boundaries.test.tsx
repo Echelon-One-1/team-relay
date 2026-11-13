@@ -5,7 +5,7 @@
 // one of those fields is refused by name, and a document an earlier relay stored reads as its
 // topic alone. The console server is the dev mock (src/mock/relay.ts), with every call recorded.
 
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it } from 'vitest'
 
@@ -65,7 +65,8 @@ const ownerForm = async () => within(await section()).findByRole('form', { name:
 
 beforeEach(() => {
   setConsoleKey(KEY)
-  window.history.replaceState(null, '', '/')
+  // Team settings are their own page (/settings).
+  window.history.replaceState(null, '', '/settings')
   window.localStorage.clear()
 })
 
@@ -273,7 +274,8 @@ describe('loading, older relays, and a failed read', () => {
 
 describe('creating a team goes straight to its boundaries (M10 §1)', () => {
   it('opens Team settings at Boundaries with the topic focused', async () => {
-    server()
+    window.history.replaceState(null, '', '/team')
+    const s = server()
     const user = userEvent.setup()
     renderWithClient(<App />)
     await waitFor(() => expect(screen.getByRole('button', { name: /Switch team/ })).toHaveTextContent('Demo'))
@@ -281,11 +283,49 @@ describe('creating a team goes straight to its boundaries (M10 §1)', () => {
     await user.click(within(await screen.findByRole('dialog', { name: 'Your teams' })).getByRole('button', { name: /Create team/ }))
     const dialog = await screen.findByRole('dialog', { name: 'Create a team' })
     await user.type(within(dialog).getByLabelText('Team name'), 'Payments')
+    // Every team whose settings are drawn from here on: only the new one, never another in between
+    // (the teams are read again slowly, so a page drawn before they arrive would show).
+    s.relay.latency = [80, 80]
+    const drawn = new Set<string>()
+    const seen = new MutationObserver(() => {
+      for (const el of document.querySelectorAll('[data-settings-team]')) drawn.add(el.getAttribute('data-settings-team') ?? '')
+    })
+    seen.observe(document.body, { childList: true, subtree: true, attributes: true })
     await user.click(within(dialog).getByRole('button', { name: 'Create team' }))
     await waitFor(() => expect(screen.getByRole('button', { name: /Switch team/ })).toHaveTextContent('Payments'))
     const form = await ownerForm()
     expect(within(form).getByText(UNSET_LINE)).toBeInTheDocument()
     await waitFor(() => expect(document.activeElement).toBe(within(form).getByLabelText('Topic')))
+    // On the settings page, its own address.
+    expect(window.location.pathname).toBe('/settings')
+    expect(screen.getByRole('button', { name: 'Team settings' })).toHaveAttribute('aria-current', 'page')
+    seen.disconnect()
+    expect([...drawn]).toEqual(['payments'])
+  })
+})
+
+describe('Team settings: a page of its own (/settings)', () => {
+  it('is a tab after Setup with its own address; the team page no longer holds it', async () => {
+    window.history.replaceState(null, '', '/team')
+    server()
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    await screen.findByRole('region', { name: 'Members' })
+    expect(screen.queryByRole('region', { name: 'Team settings' })).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Boundaries' })).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Team settings' }))
+    expect(window.location.pathname).toBe('/settings')
+    const settings = await screen.findByRole('region', { name: 'Team settings' })
+    expect(within(settings).getByText('Team id')).toBeInTheDocument()
+    expect(within(settings).getByRole('form', { name: 'Delete this team' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Members' })).toBeNull()
+    // Back and forward through the history move between the pages.
+    await act(async () => {
+      window.history.back()
+      await new Promise((r) => setTimeout(r, 50))
+    })
+    await screen.findByRole('region', { name: 'Members' })
+    expect(window.location.pathname).toBe('/team')
   })
 })
 
