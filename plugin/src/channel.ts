@@ -927,9 +927,11 @@ class AskerConnection {
     const fp = credentialFingerprint(this.path);
     if (fp === null) return 'none';
     if (this.refusedAt !== undefined && this.refusedAt === fp) return 'refused';
-    // A file the connection found no usable sign-in in (an expired one, say).
-    if (this.lastAttempt === 'not_signed_in') return 'none';
-    return 'present';
+    // Waiting is worth it only while the connection has not tried yet, is connected, or the
+    // relay did not answer. A file it found no usable sign-in in (expired, unreadable, corrupt:
+    // not_signed_in or config) or one for another team (wrong_team) needs a new sign-in.
+    const a = this.lastAttempt;
+    return a === null || a === 'unreachable' || a === 'connected' ? 'present' : 'none';
   }
 
   /**

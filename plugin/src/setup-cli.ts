@@ -32,6 +32,7 @@ import { AgentError, type Exec } from './daemon-launch.js';
 import type { DriveCliOutcome } from './drive-cli.js';
 import { MAC_ONLY } from './drive-login.js';
 import { defaultKeychain, type Keychain } from './google-drive.js';
+import type { FetchPinnedNode } from './locate.js';
 import { LoginError, connectedAs, identityChange, startLogin, type LoginFlow, type LoginOptions } from './login.js';
 import { MAX_FOLDERS, MemberFoldersError, expandPath, memberFolderProblem, memberFoldersPath, readMemberSettings, teamSettings } from './member-folders.js';
 import { configValue, parseRelayUrl, type RelayClient } from './relay-client.js';
@@ -42,6 +43,7 @@ import {
   currentUid,
   defaultChooser,
   driveConnect,
+  backgroundNode,
   installBackground,
   saveTeamFolders,
   teamBoundaries,
@@ -76,8 +78,13 @@ export type SetupDeps = {
   io: SetupIO;
   platform?: NodeJS.Platform;
   uid?: number;
-  /** The absolute path of node, for the LaunchAgent (default: this process's). */
+  /**
+   * The absolute path of node, for the LaunchAgent (default: the pinned private copy, got first
+   * when missing, else a stable PATH node: setup-steps.ts backgroundNode, as the setup page does).
+   */
   node?: string;
+  /** Tests: what gets the pinned node (default: bin/run-node --fetch-only). */
+  fetchNode?: FetchPinnedNode;
   /** Runs launchctl (tests: a fake). */
   exec?: Exec;
   /** Waits between launchctl calls (tests: a fake). */
@@ -442,7 +449,7 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
     await installBackground({
       env,
       uid,
-      node: d.node ?? process.execPath,
+      node: d.node ?? (await backgroundNode(env, d.fetchNode)),
       claude,
       pluginKey: plugin,
       ...(d.exec ? { exec: d.exec } : {}),

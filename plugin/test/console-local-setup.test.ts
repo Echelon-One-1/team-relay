@@ -18,7 +18,7 @@ import { MAX_FOLDERS, memberFoldersPath, readTeamSettings, withTeam, writeMember
 import { RelayClient, staticTokenProvider } from '../src/relay-client.js';
 import { runSetup } from '../src/setup-cli.js';
 import { SetupPages, type Schedule } from '../src/setup-page.js';
-import { BACKGROUND_MAC_ONLY, BACKGROUND_NO_CLAUDE, backgroundAvailability, type ChooseResult } from '../src/setup-steps.js';
+import { BACKGROUND_MAC_ONLY, BACKGROUND_NO_CLAUDE, BACKGROUND_NO_NODE, backgroundAvailability, type ChooseResult } from '../src/setup-steps.js';
 import { FakeRelay, TOKEN_OF } from './helpers/fake-relay.js';
 
 const NO_UI = join(tmpdir(), 'team-relay-no-such-console');
@@ -242,6 +242,7 @@ describe('GET /api/local/setup', () => {
     expect((await req(port, '/api/local/setup', { key })).json().background).toEqual({ installed: false, available: true });
     expect(backgroundAvailability('linux', env)).toEqual({ available: false, reason: BACKGROUND_MAC_ONLY });
     expect(backgroundAvailability('darwin', env)).toEqual({ available: true });
+    expect(backgroundAvailability('darwin', env, () => '/x/claude', () => false)).toEqual({ available: false, reason: BACKGROUND_NO_NODE });
   });
 });
 
@@ -396,7 +397,7 @@ describe('ACC-5: background answering', () => {
     expect({ plist: readFileSync(plist, 'utf8'), launcher: readFileSync(launcher, 'utf8') }).toEqual(fromPage);
   });
 
-  it("the background answerer runs the pinned private node when it is there, else a PATH node by its PATH name, never this process's own", async () => {
+  it("the background answerer runs the pinned private node, got first when missing; else a stable PATH node; never this process's own", async () => {
     const plist = join(home, 'Library', 'LaunchAgents', 'com.team-relay.answerer.plist');
     const pin = pinnedNodeVersion()!;
     const nodeStub = (path: string, version: string) => {
@@ -407,20 +408,41 @@ describe('ACC-5: background answering', () => {
     };
     const onPath = nodeStub(join(claudeDir, 'node'), 'v24.0.0');
     const arch = process.arch === 'x64' ? 'x64' : 'arm64';
-    const ownPages = new SetupPages({ env, log: () => {}, platform: 'darwin', staticDir: NO_UI, open: () => {}, schedule, exec, sleep: async () => {}, uid: 501 });
+    let fetches = 0;
+    let fetchInstalls = false;
+    const fetchNode = async () => {
+      fetches++;
+      if (fetchInstalls) nodeStub(pinnedNodePath(home, pin, arch), pin);
+    };
+    const ownPages = new SetupPages({ env, log: () => {}, platform: 'darwin', staticDir: NO_UI, open: () => {}, schedule, exec, sleep: async () => {}, uid: 501, fetchNode });
     const client = new RelayClient({ url: relay.url, team: 'demo', token: staticTokenProvider(TOKEN_OF.bob!), attempts: 1 });
     try {
       const { url } = await ownPages.open({ client, member: 'bob', team: 'demo', email: null });
       const m = /^http:\/\/127\.0\.0\.1:(\d+)\/join#k=([A-Za-z0-9_-]{43})$/.exec(url)!;
       const put = () => req(Number(m[1]), '/api/local/background', { ...write('PUT', { on: true }), key: m[2]! });
       const programs = () => [...readFileSync(plist, 'utf8').matchAll(/<string>([^<]*)<\/string>/g)].map((x) => x[1]);
+      // The pinned copy is missing and cannot be got: the PATH node.
       expect((await put()).status).toBe(200);
+      expect(fetches).toBe(1);
       expect(programs()).toContain(onPath);
       expect(programs()).not.toContain(process.execPath);
-      const pinned = nodeStub(pinnedNodePath(home, pin, arch), pin);
+      // Got first, then used.
+      fetchInstalls = true;
       expect((await put()).status).toBe(200);
+      expect(fetches).toBe(2);
+      const pinned = pinnedNodePath(home, pin, arch);
       expect(programs()).toContain(pinned);
       expect(programs()).not.toContain(onPath);
+      // There now: not got again.
+      expect((await put()).status).toBe(200);
+      expect(fetches).toBe(2);
+      // Neither: refused with a plain reason, nothing installed.
+      rmSync(join(home, '.local'), { recursive: true });
+      rmSync(onPath);
+      fetchInstalls = false;
+      const none = await put();
+      expect(none.status).toBe(500);
+      expect(none.json()).toEqual({ error: 'background_failed', detail: BACKGROUND_NO_NODE });
     } finally {
       await ownPages.stop();
     }

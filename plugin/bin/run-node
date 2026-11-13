@@ -21,6 +21,13 @@
 #      Any failure says in one plain line why, then exits 1.
 # Elsewhere, with none found, it says in one plain line what to do and exits 1.
 #
+#   /bin/sh run-node --fetch-only
+#
+# only makes sure the pinned copy (3.) is there, getting it as above (the same lock, download and
+# check) when it is not, and exits 0 without running anything; 1, with one plain line, when it
+# cannot (or on a computer that has no pinned build). The setup uses it before it points the
+# background answerer at that copy.
+#
 # POSIX sh. Its stdin and stdout belong to the bundle (the MCP servers speak on them), so every
 # tool it runs reads nothing and writes nothing there; the tools are found on PATH.
 
@@ -67,14 +74,19 @@ first_path_node() {
   done
 }
 
+FETCH_ONLY=""
+if [ "${1:-}" = --fetch-only ] && [ $# -eq 1 ]; then FETCH_ONLY=1; fi
+
 found=""
-path_node=$(first_path_node)
-case "$path_node" in /*) ;; *) path_node= ;; esac
-if [ -n "$path_node" ] && node_version "$path_node" && new_enough; then
-  found=$path_node
+if [ -z "$FETCH_ONLY" ]; then
+  path_node=$(first_path_node)
+  case "$path_node" in /*) ;; *) path_node= ;; esac
+  if [ -n "$path_node" ] && node_version "$path_node" && new_enough; then
+    found=$path_node
+  fi
 fi
 
-if [ -z "$found" ] && [ -n "${HOME:-}" ]; then
+if [ -z "$found" ] && [ -z "$FETCH_ONLY" ] && [ -n "${HOME:-}" ]; then
   bmaj=-1
   bmin=0
   bpat=0
@@ -202,8 +214,10 @@ download_node() {
     curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 \
       -C - -o "$PARTIAL" "https://nodejs.org/dist/$NODE_VERSION/$name.tar.gz" >/dev/null 2>&1 </dev/null || rc=$?
     if [ "$rc" -ne 0 ]; then
-      # The server cannot resume this file (33, 36): the next start begins again.
-      case "$rc" in 33 | 36) rm -f "$PARTIAL" >/dev/null 2>&1 ;; esac
+      # The server cannot resume this file (33, 36), or refused the request (22: an HTTP error,
+      # among them 416 for a file already as long as the build, which then is not the build): the
+      # next start begins again rather than asking for the same thing forever.
+      case "$rc" in 22 | 33 | 36) rm -f "$PARTIAL" >/dev/null 2>&1 ;; esac
       cannot_get "the download did not work"
     fi
     if ! partial_ok; then
@@ -267,17 +281,24 @@ if [ -z "$found" ] && [ -n "${HOME:-}" ]; then
     if ! mkdir -p "$PRIVATE_DIR" >/dev/null 2>&1 || ! chmod 700 "$PRIVATE_DIR" >/dev/null 2>&1; then
       cannot_get "its folder could not be made"
     fi
-    if take_lock; then
+    if pinned_ok; then
+      :
+    elif take_lock; then
       # The start that held the lock before may have finished just now.
       pinned_ok || download_node
     fi
     cleanup
     trap - EXIT HUP INT TERM
+    [ -n "$FETCH_ONLY" ] && exit 0
     found=$PINNED_NODE
     exec "$found" "$@"
   fi
 fi
 
+if [ -n "$FETCH_ONLY" ]; then
+  echo "Could not get Node.js for the team relay: there is no pinned build of it for this computer." >&2
+  exit 1
+fi
 if [ -z "$found" ]; then
   echo "Team relay needs its helper: paste the setup line from your team page into Terminal again." >&2
   exit 1

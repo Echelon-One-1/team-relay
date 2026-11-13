@@ -149,7 +149,12 @@ export type HostOptions = {
   /** Where the bundles are (dist/). */
   distDir?: string;
   node?: string;
-  claudeBin?: string;
+  /**
+   * The claude each run starts: a path, or a function asked afresh before every run (the
+   * background answerer's: an update of the Claude desktop app moves its claude while the host
+   * runs). Null from the function: claude on PATH.
+   */
+  claudeBin?: string | (() => string | null);
   lockFile?: string;
   stateFile?: string;
   lockRetryMs?: number;
@@ -902,7 +907,8 @@ export class AnswerHost {
   // -- one answerer run -------------------------------------------------------------------------
 
   private claudeBin(): string {
-    const b = (this.o.claudeBin ?? this.env.TEAM_RELAY_CLAUDE_BIN ?? '').trim();
+    const given = typeof this.o.claudeBin === 'function' ? this.o.claudeBin() : this.o.claudeBin;
+    const b = (given ?? this.env.TEAM_RELAY_CLAUDE_BIN ?? '').trim();
     return b && isAbsolute(b) ? b : 'claude';
   }
 

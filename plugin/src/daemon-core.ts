@@ -138,8 +138,9 @@ export class DaemonLog {
  * The claude to run: TEAM_RELAY_CLAUDE_BIN while it is an absolute path to an executable file;
  * when it was set but no longer runs (the Claude desktop app keeps its claude in a folder named
  * after its version, which an update replaces), claude is looked up again as setup found it
- * (locate.ts). Null when it is not set or nothing is found. Asked afresh at each use, so an
- * update while the answerer runs needs no new install.
+ * (locate.ts). Null when it is not set or nothing is found. Asked afresh at each use: the
+ * status, the self-test, and the answer host before each answer it starts (its claudeBin is a
+ * function calling this), so an update while the answerer runs needs no new install.
  */
 export function claudeBinFrom(env: NodeJS.ProcessEnv): string | null {
   return resolveClaudeBin(env);
@@ -468,7 +469,9 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
         push: () => {},
         log,
         background: true,
-        claudeBin: bin,
+        // Asked again before every answer: a claude the desktop app replaced while the host runs
+        // is found anew, never started from its old path.
+        claudeBin: () => claudeBinFrom(env),
         distDir: o.dist,
         lockRetryMs: iv.lockRetryMs,
         // M8: a desktop notification, unless TEAM_RELAY_DESKTOP_NOTIFY=0.

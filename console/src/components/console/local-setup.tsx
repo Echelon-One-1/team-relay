@@ -322,9 +322,10 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
             <div className="flex items-center gap-3">
               <Switch
                 id={switchId}
-                checked={available && background}
+                // Where it cannot be turned on, it shows what is installed and can only be turned off.
+                checked={available ? background : installed}
                 onCheckedChange={toggle}
-                disabled={!available || applying || finishing}
+                disabled={(!available && !installed) || applying || finishing}
                 aria-describedby={hintId}
               />
               <label htmlFor={switchId} className="text-[12.5px] font-medium">

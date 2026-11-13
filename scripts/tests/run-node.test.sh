@@ -146,7 +146,9 @@ fi
 if [ "\$resume" = - ] && [ -f "\$out" ]; then
   have=\$("$REAL_WC" -c <"\$out")
   have=\$((have + 0))
-  if [ "\$have" -lt "\$size" ]; then "$REAL_TAIL" -c +\$((have + 1)) "\$f" >>"\$out"; fi
+  # A range past the end: the server answers 416, which -f turns into exit 22.
+  [ "\$have" -ge "\$size" ] && exit 22
+  "$REAL_TAIL" -c +\$((have + 1)) "\$f" >>"\$out"
   exit 0
 fi
 /bin/cp "\$f" "\$out"
@@ -198,6 +200,8 @@ pin_hashes() {
 # run_case [STDIN]: runs the copy as Claude Code does (/bin/sh run-node <bundle> <args>), with
 # only the stubs on PATH (RUN_PATH when set) and STDIN (default STDIN-MARK) on stdin; RUN_VAR, when
 # set (NAME=value), is one more variable in its environment.
+RUN_VAR=""
+RUN_PATH=""
 run_case() {
   set +e
   OUT="$(printf '%s\n' "${1:-STDIN-MARK}" | env -i ${RUN_VAR:+"$RUN_VAR"} HOME="$C/home" PATH="${RUN_PATH:-$C/bin}" /bin/sh "$C/plugin/bin/run-node" "${ARGS[@]}" 2>"$C/stderr")"
@@ -440,7 +444,7 @@ check "a partial file that is already whole (the pinned SHA-256): used without d
 
 new_case partial-corrupt
 mkdir -p "$P"
-head -c 4096 /dev/zero >"$PARTIAL_ARM"
+printf 'garbage' >"$PARTIAL_ARM"
 run_case
 check "a partial file that resumes into the wrong file: refused, and the partial file deleted" \
   eval 'failed_with "the download was not the file it should be" && [[ "$(curl_calls)" == 1 && ! -e "$PARTIAL_ARM" ]] && nothing_left'
@@ -468,7 +472,11 @@ check "a partial file that is a symlink is removed, never written through" \
 new_case path-var-last
 mkdir -p "$C/empty"
 node_stub "$C/bin/node" path-node v22.12.0
-RUN_VAR=last=1 RUN_PATH="$C/empty:$C/bin" run_case
+RUN_VAR=last=1
+RUN_PATH="$C/empty:$C/bin"
+run_case
+RUN_VAR=""
+RUN_PATH=""
 check "a variable named last in the environment does not cut the PATH search short" \
   eval '[[ "$STATUS" -eq 0 && "$OUT" == "path-node ${ARGS[*]} <STDIN-MARK>" && "$(curl_calls)" == 0 ]]'
 
@@ -497,6 +505,45 @@ lock_race() {
     && "$(cat "$P/.node-download.lock/pid")" == "$$" && "$(ls -A "$P/.node-download.lock")" == pid ]]
 }
 check "two starts and one dead lock: a lock taken again meanwhile is never removed" lock_race
+
+new_case partial-full-wrong
+mkdir -p "$P"
+"$REAL_HEAD" -c "$("$REAL_WC" -c <"$C/served/node-${NODE_V}-darwin-arm64.tar.gz")" /dev/zero >"$PARTIAL_ARM"
+run_case
+check "a partial file as long as the build but not it (killed before its delete): the refused resume deletes it" \
+  eval 'failed_with "the download did not work" && [[ "$(curl_calls)" == 1 && ! -e "$PARTIAL_ARM" ]] && nothing_left'
+run_case
+check "so the next start downloads afresh, not the same refused request forever" \
+  eval '[[ "$STATUS" -eq 0 && "$OUT" == "private(arm64) ${ARGS[*]} <STDIN-MARK>" && "$(curl_calls)" == 2 ]] && only_pinned_left arm64'
+
+# ---------------------------------------------------------------- 10. --fetch-only (the setup's)
+SAVED_ARGS=("${ARGS[@]}")
+ARGS=(--fetch-only)
+new_case fetch-only
+node_stub "$C/bin/node" path-node v24.0.0
+run_case
+fetched_only() {
+  [[ "$STATUS" -eq 0 && -z "$OUT" && -z "$ERR" && "$(curl_calls)" == 1 && "$LOG" == *"curl "*" -C - -o $PARTIAL_ARM "*" <>"* ]] \
+    && only_pinned_left arm64 && [[ -x "$P/node-${NODE_V}-darwin-arm64/bin/node" ]]
+}
+check "--fetch-only gets the pinned copy even with a new node on PATH, runs nothing, prints nothing, exits 0" fetched_only
+: >"$C/log"
+run_case
+check "--fetch-only with the pinned copy there: nothing downloaded, no lock taken, exits 0" \
+  eval '[[ "$STATUS" -eq 0 && -z "$OUT" && -z "$ERR" && "$(curl_calls)" == 0 ]] && only_pinned_left arm64'
+
+new_case fetch-only-fails
+: >"$C/state/curl-fails"
+run_case
+check "--fetch-only that cannot download: one plain line, exit non-zero" \
+  eval 'failed_with "the download did not work"'
+
+new_case fetch-only-linux
+echo Linux >"$C/state/os"
+run_case
+check "--fetch-only where there is no pinned build: one plain line, exit 1, nothing downloaded" \
+  eval '[[ "$STATUS" -eq 1 && -z "$OUT" && "$ERR" == "Could not get Node.js for the team relay: there is no pinned build of it for this computer." && "$(curl_calls)" == 0 ]]'
+ARGS=("${SAVED_ARGS[@]}")
 
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
 [[ "$failed" -eq 0 ]]

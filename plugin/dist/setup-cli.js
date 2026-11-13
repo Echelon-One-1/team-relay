@@ -7960,11 +7960,11 @@ var require_codegen = __commonJS({
         const rhs = this.rhs === void 0 ? "" : ` = ${this.rhs}`;
         return `${varKind} ${this.name}${rhs};` + _n;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         if (!names[this.name.str])
           return;
         if (this.rhs)
-          this.rhs = optimizeExpr(this.rhs, names, constants2);
+          this.rhs = optimizeExpr(this.rhs, names, constants3);
         return this;
       }
       get names() {
@@ -7981,10 +7981,10 @@ var require_codegen = __commonJS({
       render({ _n }) {
         return `${this.lhs} = ${this.rhs};` + _n;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
           return;
-        this.rhs = optimizeExpr(this.rhs, names, constants2);
+        this.rhs = optimizeExpr(this.rhs, names, constants3);
         return this;
       }
       get names() {
@@ -8045,8 +8045,8 @@ var require_codegen = __commonJS({
       optimizeNodes() {
         return `${this.code}` ? this : void 0;
       }
-      optimizeNames(names, constants2) {
-        this.code = optimizeExpr(this.code, names, constants2);
+      optimizeNames(names, constants3) {
+        this.code = optimizeExpr(this.code, names, constants3);
         return this;
       }
       get names() {
@@ -8075,12 +8075,12 @@ var require_codegen = __commonJS({
         }
         return nodes.length > 0 ? this : void 0;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         const { nodes } = this;
         let i = nodes.length;
         while (i--) {
           const n = nodes[i];
-          if (n.optimizeNames(names, constants2))
+          if (n.optimizeNames(names, constants3))
             continue;
           subtractNames(names, n.names);
           nodes.splice(i, 1);
@@ -8133,12 +8133,12 @@ var require_codegen = __commonJS({
           return void 0;
         return this;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         var _a;
-        this.else = (_a = this.else) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants2);
-        if (!(super.optimizeNames(names, constants2) || this.else))
+        this.else = (_a = this.else) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants3);
+        if (!(super.optimizeNames(names, constants3) || this.else))
           return;
-        this.condition = optimizeExpr(this.condition, names, constants2);
+        this.condition = optimizeExpr(this.condition, names, constants3);
         return this;
       }
       get names() {
@@ -8161,10 +8161,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.iteration})` + super.render(opts);
       }
-      optimizeNames(names, constants2) {
-        if (!super.optimizeNames(names, constants2))
+      optimizeNames(names, constants3) {
+        if (!super.optimizeNames(names, constants3))
           return;
-        this.iteration = optimizeExpr(this.iteration, names, constants2);
+        this.iteration = optimizeExpr(this.iteration, names, constants3);
         return this;
       }
       get names() {
@@ -8200,10 +8200,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
       }
-      optimizeNames(names, constants2) {
-        if (!super.optimizeNames(names, constants2))
+      optimizeNames(names, constants3) {
+        if (!super.optimizeNames(names, constants3))
           return;
-        this.iterable = optimizeExpr(this.iterable, names, constants2);
+        this.iterable = optimizeExpr(this.iterable, names, constants3);
         return this;
       }
       get names() {
@@ -8245,11 +8245,11 @@ var require_codegen = __commonJS({
         (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNodes();
         return this;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         var _a, _b;
-        super.optimizeNames(names, constants2);
-        (_a = this.catch) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants2);
-        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants2);
+        super.optimizeNames(names, constants3);
+        (_a = this.catch) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants3);
+        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants3);
         return this;
       }
       get names() {
@@ -8550,7 +8550,7 @@ var require_codegen = __commonJS({
     function addExprNames(names, from) {
       return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
     }
-    function optimizeExpr(expr, names, constants2) {
+    function optimizeExpr(expr, names, constants3) {
       if (expr instanceof code_1.Name)
         return replaceName(expr);
       if (!canOptimize(expr))
@@ -8565,14 +8565,14 @@ var require_codegen = __commonJS({
         return items;
       }, []));
       function replaceName(n) {
-        const c = constants2[n.str];
+        const c = constants3[n.str];
         if (c === void 0 || names[n.str] !== 1)
           return n;
         delete names[n.str];
         return c;
       }
       function canOptimize(e) {
-        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants2[c.str] !== void 0);
+        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants3[c.str] !== void 0);
       }
     }
     function subtractNames(names, from) {
@@ -15679,7 +15679,7 @@ var init_relay_client = __esm({
 
 // src/setup-cli.ts
 import { createReadStream, openSync as openSync4 } from "node:fs";
-import { basename as basename6, join as join9 } from "node:path";
+import { basename as basename6, join as join10 } from "node:path";
 import { createInterface } from "node:readline";
 
 // src/boundaries-rule.ts
@@ -17527,7 +17527,7 @@ async function connectOnce(env, opts = {}) {
 }
 
 // src/setup-steps.ts
-import { execFile as execFile6 } from "node:child_process";
+import { execFile as execFile7 } from "node:child_process";
 import { existsSync as existsSync2 } from "node:fs";
 
 // src/drive-cli.ts
@@ -17605,8 +17605,86 @@ if (process.argv[1] && /drive-cli\.[jt]s$/.test(process.argv[1])) {
 }
 
 // src/locate.ts
+import { execFile as execFile6, execFileSync } from "node:child_process";
+import { accessSync as accessSync2, constants as constants2, readFileSync as readFileSync6, readdirSync as readdirSync2, statSync as statSync3 } from "node:fs";
+import { delimiter, isAbsolute as isAbsolute7, join as join9 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+function executableFile(path) {
+  try {
+    if (!statSync3(path).isFile()) return false;
+    accessSync2(path, constants2.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 var NODE_PINS_FILE = fileURLToPath2(new URL("../bin/node-pins.sh", import.meta.url));
+function pinnedNodeVersion(file = NODE_PINS_FILE) {
+  let text;
+  try {
+    text = readFileSync6(file, "utf8");
+  } catch {
+    return null;
+  }
+  const found = [...text.matchAll(/^NODE_VERSION='(v\d{1,9}\.\d{1,9}\.\d{1,9})'$/gm)];
+  return found.length === 1 ? found[0][1] : null;
+}
+function nodeArch(arch) {
+  return arch === "arm64" ? "arm64" : arch === "x64" ? "x64" : null;
+}
+function pinnedNodePath(home2, version, arch) {
+  return join9(home2, ".local", "share", "team-relay", `node-${version}-darwin-${arch}`, "bin", "node");
+}
+var realNodeVersion = (path) => {
+  try {
+    return execFileSync(path, ["--version"], { encoding: "utf8", timeout: 1e4, stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return null;
+  }
+};
+function newEnoughNode(version) {
+  const m = /^v(\d{1,9})\.(\d{1,9})\.\d{1,9}$/.exec(version ?? "");
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 22 || major === 22 && minor >= 12;
+}
+function versionedNodePath(path) {
+  if (/\/(\.nvm|\.fnm|fnm|fnm_multishells|\.asdf\/installs|mise\/installs|\.volta\/tools|Cellar|\.n\/n\/versions)\//.test(path)) return true;
+  return path.split("/").some((seg) => /^(node[@-])?v\d+(\.\d+){0,2}$/.test(seg) || /^(node[@-])?\d+\.\d+(\.\d+)?$/.test(seg) || /^node@\d/.test(seg));
+}
+function pinnedNode(o) {
+  const pin = pinnedNodeVersion(o.pinsFile);
+  const arch = nodeArch(o.arch ?? process.arch);
+  if (!pin || !arch) return null;
+  const pinned = pinnedNodePath(homeDir(o.env), pin, arch);
+  return executableFile(pinned) && newEnoughNode((o.version ?? realNodeVersion)(pinned)) ? pinned : null;
+}
+function stablePathNode(o) {
+  const version = o.version ?? realNodeVersion;
+  for (const dir of (o.env.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute7(dir)) continue;
+    const n = join9(dir, "node");
+    if (versionedNodePath(n)) continue;
+    if (executableFile(n) && newEnoughNode(version(n))) return n;
+  }
+  return null;
+}
+var RUN_NODE_FILE = fileURLToPath2(new URL("../bin/run-node", import.meta.url));
+var FETCH_NODE_TIMEOUT_MS = 15 * 60 * 1e3;
+var runNodeFetch = (env) => new Promise((resolve) => {
+  execFile6("/bin/sh", [RUN_NODE_FILE, "--fetch-only"], { env, timeout: FETCH_NODE_TIMEOUT_MS, windowsHide: true }, () => resolve()).stdin?.end();
+});
+async function ensureAnswererNode(o) {
+  const have = pinnedNode(o);
+  if (have) return have;
+  if (nodeArch(o.arch ?? process.arch) && pinnedNodeVersion(o.pinsFile)) {
+    await (o.fetch ?? runNodeFetch)(o.env);
+    const got = pinnedNode(o);
+    if (got) return got;
+  }
+  return stablePathNode(o);
+}
 
 // src/setup-steps.ts
 var CHOOSE_FOLDER_SCRIPT = [
@@ -17625,7 +17703,7 @@ var CHOOSER_TIMEOUT_MS = 10 * 60 * 1e3;
 function chosenPaths(stdout) {
   return stdout.replace(/\n$/, "").split("\0").filter((p) => p !== "").map((p) => p.length > 1 ? p.replace(/\/+$/, "") || "/" : p);
 }
-var runExecFile = (f, a, o, cb) => void execFile6(f, a, o, (e, out, err) => cb(e, String(out), String(err)));
+var runExecFile = (f, a, o, cb) => void execFile7(f, a, o, (e, out, err) => cb(e, String(out), String(err)));
 function osascriptChooser(run = runExecFile) {
   return (prompt) => new Promise((resolve) => {
     const args = CHOOSE_FOLDER_SCRIPT.flatMap((line) => ["-e", line]);
@@ -17698,6 +17776,12 @@ async function installBackground(i) {
 function uninstallBackground(i) {
   return uninstallAgent({ home: homeDir(i.env), configDir: configDir(i.env), uid: i.uid, ...i.exec ? { exec: i.exec } : {} });
 }
+var BACKGROUND_NO_NODE = "Background answering needs Node.js, which could not be found or downloaded on this Mac.";
+async function backgroundNode(env, fetch2) {
+  const node = await ensureAnswererNode({ env, ...fetch2 ? { fetch: fetch2 } : {} });
+  if (!node) throw new AgentError(BACKGROUND_NO_NODE);
+  return node;
+}
 function currentUid() {
   return typeof process.getuid === "function" ? process.getuid() : -1;
 }
@@ -17716,7 +17800,7 @@ var HELP = [
 ].join("\n");
 var NOT_SIGNED_IN = "You are not signed in to your team on this Mac yet. Run the setup line again.";
 var UNREACHABLE_BOUNDARIES = "Could not reach your team just now. Run the setup line again in a minute.";
-var PROTECTED_DIRS = ["Documents", "Desktop", "Downloads", join9("Library", "Mobile Documents")];
+var PROTECTED_DIRS = ["Documents", "Desktop", "Downloads", join10("Library", "Mobile Documents")];
 var PRIVACY_FOLDERS_NOTE = 'The first time your Mac answers from a folder in Documents, Desktop, Downloads or iCloud Drive, macOS may ask whether "node" may open it: click Allow.';
 var PRIVACY_DRIVE_NOTE = 'The first time your Mac answers from Google Drive, macOS may ask whether "node" may open it: click Allow.';
 function privacyProtected(raw, env) {
@@ -17725,7 +17809,7 @@ function privacyProtected(raw, env) {
   const home2 = homeDir(env);
   const p = path.toLowerCase();
   return PROTECTED_DIRS.some((d) => {
-    const dir = join9(home2, d).toLowerCase();
+    const dir = join10(home2, d).toLowerCase();
     return p === dir || p.startsWith(`${dir}/`);
   });
 }
@@ -18015,7 +18099,7 @@ async function daemon(argv, d) {
     await installBackground({
       env,
       uid: uid3,
-      node: d.node ?? process.execPath,
+      node: d.node ?? await backgroundNode(env, d.fetchNode),
       claude,
       pluginKey: plugin,
       ...d.exec ? { exec: d.exec } : {},

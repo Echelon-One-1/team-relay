@@ -26872,7 +26872,8 @@ var AnswerHost = class {
   }
   // -- one answerer run -------------------------------------------------------------------------
   claudeBin() {
-    const b = (this.o.claudeBin ?? this.env.TEAM_RELAY_CLAUDE_BIN ?? "").trim();
+    const given = typeof this.o.claudeBin === "function" ? this.o.claudeBin() : this.o.claudeBin;
+    const b = (given ?? this.env.TEAM_RELAY_CLAUDE_BIN ?? "").trim();
     return b && isAbsolute9(b) ? b : "claude";
   }
   /** One answerer run for the job; false when it was declined without running one. */
@@ -27805,6 +27806,8 @@ function resolveClaudeBin(env2) {
   return findClaude(env2);
 }
 var NODE_PINS_FILE = fileURLToPath4(new URL("../bin/node-pins.sh", import.meta.url));
+var RUN_NODE_FILE = fileURLToPath4(new URL("../bin/run-node", import.meta.url));
+var FETCH_NODE_TIMEOUT_MS = 15 * 60 * 1e3;
 
 // src/daemon-core.ts
 init_relay_client();
@@ -28145,7 +28148,9 @@ async function runDaemon(o) {
         },
         log: log2,
         background: true,
-        claudeBin: bin,
+        // Asked again before every answer: a claude the desktop app replaced while the host runs
+        // is found anew, never started from its old path.
+        claudeBin: () => claudeBinFrom(env2),
         distDir: o.dist,
         lockRetryMs: iv.lockRetryMs,
         // M8: a desktop notification, unless TEAM_RELAY_DESKTOP_NOTIFY=0.

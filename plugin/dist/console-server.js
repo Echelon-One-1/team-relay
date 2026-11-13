@@ -25104,6 +25104,8 @@ if (process.argv[1] && /drive-cli\.[jt]s$/.test(process.argv[1])) {
 // src/locate.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 var NODE_PINS_FILE = fileURLToPath3(new URL("../bin/node-pins.sh", import.meta.url));
+var RUN_NODE_FILE = fileURLToPath3(new URL("../bin/run-node", import.meta.url));
+var FETCH_NODE_TIMEOUT_MS = 15 * 60 * 1e3;
 
 // src/setup-steps.ts
 var CHOOSER_TIMEOUT_MS = 10 * 60 * 1e3;

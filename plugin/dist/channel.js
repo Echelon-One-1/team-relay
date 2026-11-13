@@ -38014,7 +38014,8 @@ var AnswerHost = class {
   }
   // -- one answerer run -------------------------------------------------------------------------
   claudeBin() {
-    const b = (this.o.claudeBin ?? this.env.TEAM_RELAY_CLAUDE_BIN ?? "").trim();
+    const given = typeof this.o.claudeBin === "function" ? this.o.claudeBin() : this.o.claudeBin;
+    const b = (given ?? this.env.TEAM_RELAY_CLAUDE_BIN ?? "").trim();
     return b && isAbsolute9(b) ? b : "claude";
   }
   /** One answerer run for the job; false when it was declined without running one. */
@@ -39087,7 +39088,7 @@ async function uninstallAgent(i) {
 }
 
 // src/setup-steps.ts
-import { execFile as execFile10 } from "node:child_process";
+import { execFile as execFile11 } from "node:child_process";
 import { existsSync as existsSync2 } from "node:fs";
 
 // src/drive-cli.ts
@@ -39454,7 +39455,7 @@ if (process.argv[1] && /drive-cli\.[jt]s$/.test(process.argv[1])) {
 }
 
 // src/locate.ts
-import { execFileSync } from "node:child_process";
+import { execFile as execFile10, execFileSync } from "node:child_process";
 import { accessSync as accessSync3, constants as constants4, readFileSync as readFileSync10, readdirSync as readdirSync2, statSync as statSync5 } from "node:fs";
 import { delimiter, isAbsolute as isAbsolute11, join as join16 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
@@ -39551,20 +39552,53 @@ function newEnoughNode(version2) {
   const minor = Number(m[2]);
   return major > 22 || major === 22 && minor >= 12;
 }
-function answererNode(o) {
-  const version2 = o.version ?? realNodeVersion;
+function versionedNodePath(path) {
+  if (/\/(\.nvm|\.fnm|fnm|fnm_multishells|\.asdf\/installs|mise\/installs|\.volta\/tools|Cellar|\.n\/n\/versions)\//.test(path)) return true;
+  return path.split("/").some((seg) => /^(node[@-])?v\d+(\.\d+){0,2}$/.test(seg) || /^(node[@-])?\d+\.\d+(\.\d+)?$/.test(seg) || /^node@\d/.test(seg));
+}
+function pinnedNode(o) {
   const pin = pinnedNodeVersion(o.pinsFile);
   const arch = nodeArch(o.arch ?? process.arch);
-  if (pin && arch) {
-    const pinned = pinnedNodePath(homeDir(o.env), pin, arch);
-    if (executableFile(pinned) && newEnoughNode(version2(pinned))) return pinned;
-  }
+  if (!pin || !arch) return null;
+  const pinned = pinnedNodePath(homeDir(o.env), pin, arch);
+  return executableFile(pinned) && newEnoughNode((o.version ?? realNodeVersion)(pinned)) ? pinned : null;
+}
+function stablePathNode(o) {
+  const version2 = o.version ?? realNodeVersion;
   for (const dir of (o.env.PATH ?? "").split(delimiter)) {
     if (!isAbsolute11(dir)) continue;
     const n = join16(dir, "node");
+    if (versionedNodePath(n)) continue;
     if (executableFile(n) && newEnoughNode(version2(n))) return n;
   }
-  return o.execPath ?? process.execPath;
+  return null;
+}
+function answererNode(o) {
+  return pinnedNode(o) ?? stablePathNode(o);
+}
+var RUN_NODE_FILE = fileURLToPath5(new URL("../bin/run-node", import.meta.url));
+var FETCH_NODE_TIMEOUT_MS = 15 * 60 * 1e3;
+var runNodeFetch = (env) => new Promise((resolve) => {
+  execFile10("/bin/sh", [RUN_NODE_FILE, "--fetch-only"], { env, timeout: FETCH_NODE_TIMEOUT_MS, windowsHide: true }, () => resolve()).stdin?.end();
+});
+async function ensureAnswererNode(o) {
+  const have = pinnedNode(o);
+  if (have) return have;
+  if (nodeArch(o.arch ?? process.arch) && pinnedNodeVersion(o.pinsFile)) {
+    await (o.fetch ?? runNodeFetch)(o.env);
+    const got = pinnedNode(o);
+    if (got) return got;
+  }
+  return stablePathNode(o);
+}
+function answererNodeObtainable(o) {
+  if (answererNode(o)) return true;
+  if (nodeArch(o.arch ?? process.arch) === null || pinnedNodeVersion(o.pinsFile) === null) return false;
+  try {
+    return statSync5(o.runNode ?? RUN_NODE_FILE).isFile();
+  } catch {
+    return false;
+  }
 }
 
 // src/setup-steps.ts
@@ -39584,7 +39618,7 @@ var CHOOSER_TIMEOUT_MS = 10 * 60 * 1e3;
 function chosenPaths(stdout) {
   return stdout.replace(/\n$/, "").split("\0").filter((p) => p !== "").map((p) => p.length > 1 ? p.replace(/\/+$/, "") || "/" : p);
 }
-var runExecFile = (f, a, o, cb) => void execFile10(f, a, o, (e, out, err) => cb(e, String(out), String(err)));
+var runExecFile = (f, a, o, cb) => void execFile11(f, a, o, (e, out, err) => cb(e, String(out), String(err)));
 function osascriptChooser(run3 = runExecFile) {
   return (prompt) => new Promise((resolve) => {
     const args = CHOOSE_FOLDER_SCRIPT.flatMap((line) => ["-e", line]);
@@ -39639,10 +39673,17 @@ function uninstallBackground(i) {
 }
 var BACKGROUND_MAC_ONLY = "Background answering works on a Mac only.";
 var BACKGROUND_NO_CLAUDE = "Background answering needs Claude Code, which was not found on this Mac.";
-function backgroundAvailability(platform, env, find = findClaude) {
+var BACKGROUND_NO_NODE = "Background answering needs Node.js, which could not be found or downloaded on this Mac.";
+function backgroundAvailability(platform, env, find = findClaude, node2 = (e) => answererNodeObtainable({ env: e })) {
   if (platform !== "darwin") return { available: false, reason: BACKGROUND_MAC_ONLY };
   if (!find(env)) return { available: false, reason: BACKGROUND_NO_CLAUDE };
+  if (!node2(env)) return { available: false, reason: BACKGROUND_NO_NODE };
   return { available: true };
+}
+async function backgroundNode(env, fetch2) {
+  const node2 = await ensureAnswererNode({ env, ...fetch2 ? { fetch: fetch2 } : {} });
+  if (!node2) throw new AgentError(BACKGROUND_NO_NODE);
+  return node2;
 }
 function backgroundInstalled(env) {
   return existsSync2(agentPlistPath(homeDir(env)));
@@ -40983,7 +41024,7 @@ var SetupPages = class {
           const claude = findClaude(env);
           if (!claude) throw new AgentError("Claude Code was not found on this Mac, so it cannot answer in the background. Install Claude Code from claude.ai/download, then try again.");
           const { plugin, marketplace } = pluginRef(env);
-          await installBackground({ env, uid: uid3, node: this.o.node ?? answererNode({ env }), claude, pluginKey: `${plugin}@${marketplace}`, ...launchctl, ...this.o.sleep ? { sleep: this.o.sleep } : {} });
+          await installBackground({ env, uid: uid3, node: this.o.node ?? await backgroundNode(env, this.o.fetchNode), claude, pluginKey: `${plugin}@${marketplace}`, ...launchctl, ...this.o.sleep ? { sleep: this.o.sleep } : {} });
         },
         uninstall: () => uninstallBackground({ env, uid: uid3, ...launchctl })
       },
@@ -41812,8 +41853,8 @@ var AskerConnection = class {
     const fp = credentialFingerprint(this.path);
     if (fp === null) return "none";
     if (this.refusedAt !== void 0 && this.refusedAt === fp) return "refused";
-    if (this.lastAttempt === "not_signed_in") return "none";
-    return "present";
+    const a = this.lastAttempt;
+    return a === null || a === "unreachable" || a === "connected" ? "present" : "none";
   }
   /**
    * /team-relay:setup: the same sign-in as login, waited for as login_wait waits (at most

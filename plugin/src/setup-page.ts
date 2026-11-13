@@ -8,9 +8,10 @@
 // /team-relay:setup opens: that one gets a fresh server), after 30 minutes without a request, or
 // when the MCP server exits (stop()).
 //
-// The background answerer it installs runs the pinned private node when it is there, else a node
-// on PATH by its PATH name (locate.ts answererNode), never this process's resolved node, which a
-// Homebrew or version-manager upgrade removes.
+// The background answerer it installs runs the pinned private node, got first through
+// bin/run-node --fetch-only when it is missing; only when that fails a node on PATH whose name is
+// not under a version folder (locate.ts ensureAnswererNode); never this process's resolved node,
+// which a Homebrew or version-manager upgrade removes.
 
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -20,8 +21,8 @@ import { openInBrowser, type OpenOptions } from './console-open.js';
 import { pluginRef } from './channel-mode.js';
 import { createLocalSetup, type LocalSetupDeps } from './local-setup.js';
 import type { RelayClient } from './relay-client.js';
-import { answererNode } from './locate.js';
-import { backgroundAvailability, backgroundInstalled, chooserAvailable, currentUid, findClaude, installBackground, osascriptChooser, uninstallBackground } from './setup-steps.js';
+import type { FetchPinnedNode } from './locate.js';
+import { backgroundAvailability, backgroundInstalled, backgroundNode, chooserAvailable, currentUid, findClaude, installBackground, osascriptChooser, uninstallBackground } from './setup-steps.js';
 import { AgentError, type Exec } from './daemon-launch.js';
 
 /** The page stops after this long without a request. */
@@ -57,6 +58,8 @@ export type SetupPagesOptions = {
   sleep?: (ms: number) => Promise<void>;
   uid?: number;
   node?: string;
+  /** Tests: what gets the pinned node (default: bin/run-node --fetch-only). */
+  fetchNode?: FetchPinnedNode;
   /** Tests: what replaces the setup routes' Mac-side parts. */
   localDeps?: (live: SetupLive) => Partial<LocalSetupDeps>;
 };
@@ -130,7 +133,7 @@ export class SetupPages {
           const claude = findClaude(env);
           if (!claude) throw new AgentError('Claude Code was not found on this Mac, so it cannot answer in the background. Install Claude Code from claude.ai/download, then try again.');
           const { plugin, marketplace } = pluginRef(env);
-          await installBackground({ env, uid, node: this.o.node ?? answererNode({ env }), claude, pluginKey: `${plugin}@${marketplace}`, ...launchctl, ...(this.o.sleep ? { sleep: this.o.sleep } : {}) });
+          await installBackground({ env, uid, node: this.o.node ?? (await backgroundNode(env, this.o.fetchNode)), claude, pluginKey: `${plugin}@${marketplace}`, ...launchctl, ...(this.o.sleep ? { sleep: this.o.sleep } : {}) });
         },
         uninstall: () => uninstallBackground({ env, uid, ...launchctl }),
       },

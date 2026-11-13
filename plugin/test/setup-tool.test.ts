@@ -4,7 +4,7 @@
 // the same page; the page stops after Done or 30 minutes without a request, and with the server.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
@@ -370,6 +370,18 @@ describe('the setup tool in the relay server', () => {
     expect(r.isError).toBe(true);
     expect(textOf(r)).toMatch(/^Not connected: the relay did not answer \(.*\) Run \/team-relay:setup again in a moment\.$/);
     expect(entries()).toEqual([]);
+  });
+
+  it('a stored sign-in that cannot be used (a corrupt file): no waiting for a connection that cannot come; the sign-in says what to do', async () => {
+    mkdirSync(join(xdg, 'team-relay'), { recursive: true, mode: 0o700 });
+    chmodSync(join(xdg, 'team-relay'), 0o700);
+    writeFileSync(join(xdg, 'team-relay', 'credentials.json'), '{not json', { mode: 0o600 });
+    const s = await server();
+    await waitFor(async () => (/not valid JSON/.test(textOf(await s.client.callTool({ name: 'whoami', arguments: {} }))) ? true : null), 20_000, 'a first attempt');
+    const r = await s.client.callTool({ name: 'setup', arguments: {} });
+    expect(r.isError).toBe(true);
+    // The sign-in's own answer (sign out first), not "run /team-relay:setup again in a moment".
+    expect(textOf(r)).toMatch(/^not signed in: the stored sign-in on this computer cannot be used \(the credential file is not valid JSON\); nothing was changed\. Run \/team-relay:logout, then \/team-relay:login\. Then run \/team-relay:setup again\.$/);
   });
 
   it('a sign-in replaced by a newer one while setup waits: setup waits for the newer one', async () => {

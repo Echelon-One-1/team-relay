@@ -13,7 +13,9 @@ import type { MemberSources, TeamBoundaries } from '../src/boundaries-types.js';
 import type { Exec } from '../src/daemon-launch.js';
 import type { Keychain } from '../src/google-drive.js';
 import type { LoginOptions } from '../src/login.js';
+import { pinnedNodePath, pinnedNodeVersion } from '../src/locate.js';
 import { memberFoldersPath, readTeamSettings } from '../src/member-folders.js';
+import { BACKGROUND_NO_NODE } from '../src/setup-steps.js';
 import { RelayClient } from '../src/relay-client.js';
 import {
   CHOOSE_FOLDER_SCRIPT,
@@ -556,6 +558,32 @@ describe('daemon install and uninstall (M11-SPEC §5)', () => {
     expect(existsSync(plist)).toBe(false);
   });
 
+  it('with no node given, the LaunchAgent runs the pinned private node, got first (run-node --fetch-only) when missing, as the setup page does', async () => {
+    const pin = pinnedNodeVersion()!;
+    const arch = process.arch === 'x64' ? 'x64' : 'arm64';
+    const pinned = pinnedNodePath(home, pin, arch);
+    let fetches = 0;
+    const fetchNode = async () => {
+      fetches++;
+      mkdirSync(join(pinned, '..'), { recursive: true });
+      writeFileSync(pinned, `#!/bin/sh\necho ${pin}\n`);
+      chmodSync(pinned, 0o755);
+    };
+    const t = term();
+    expect(await runSetup(['daemon', 'install', '--claude', claude, '--plugin', KEY], deps(t, { platform: 'darwin', uid: 501, exec, sleep, fetchNode }))).toBe(0);
+    expect(fetches).toBe(1);
+    const plist = readFileSync(join(home, 'Library', 'LaunchAgents', 'com.team-relay.answerer.plist'), 'utf8');
+    expect(plist).toContain(`<key>ProgramArguments</key><array><string>${pinned}</string>`);
+    expect(plist).not.toContain(process.execPath);
+    // No node to be had: a plain line, nothing installed.
+    const u = term();
+    expect(await runSetup(['daemon', 'uninstall'], deps(u, { platform: 'darwin', uid: 501, exec }))).toBe(0);
+    rmSync(join(home, '.local'), { recursive: true });
+    const v = term();
+    expect(await runSetup(['daemon', 'install', '--claude', claude, '--plugin', KEY], deps(v, { platform: 'darwin', uid: 501, exec, sleep, fetchNode: async () => {}, env: { ...env, PATH: '' } }))).toBe(1);
+    expect(v.text()).toBe(BACKGROUND_NO_NODE);
+  });
+
   it('needs --claude with an executable absolute path, --plugin with a key that is installed, and macOS', async () => {
     const t1 = term();
     expect(await runSetup(['daemon', 'install', '--plugin', KEY], deps(t1, { platform: 'darwin', uid: 501, exec, sleep }))).toBe(2);
@@ -564,13 +592,13 @@ describe('daemon install and uninstall (M11-SPEC §5)', () => {
     expect(await runSetup(['daemon', 'install', '--claude', claude], deps(t1b, { platform: 'darwin', uid: 501, exec, sleep }))).toBe(2);
     expect(t1b.text()).toBe('daemon install needs --plugin team-relay@<marketplace name>, the plugin as the setup command installed it.');
     const t2 = term();
-    expect(await runSetup(['daemon', 'install', '--claude', 'claude', '--plugin', KEY], deps(t2, { platform: 'darwin', uid: 501, exec, sleep }))).toBe(1);
+    expect(await runSetup(['daemon', 'install', '--claude', 'claude', '--plugin', KEY], deps(t2, { platform: 'darwin', uid: 501, exec, sleep , fetchNode: async () => {} }))).toBe(1);
     expect(t2.text()).toBe('--claude claude cannot be used: it is not an absolute path');
     const t3 = term();
     expect(await runSetup(['daemon', 'install', '--claude', claude, '--plugin', KEY], deps(t3, { platform: 'linux', uid: 501, exec, sleep }))).toBe(1);
     expect(t3.text()).toBe('The background answerer runs on macOS only.');
     const t4 = term();
-    expect(await runSetup(['daemon', 'install', '--claude', claude, '--plugin', 'team-relay@other'], deps(t4, { platform: 'darwin', uid: 501, exec, sleep }))).toBe(1);
+    expect(await runSetup(['daemon', 'install', '--claude', claude, '--plugin', 'team-relay@other'], deps(t4, { platform: 'darwin', uid: 501, exec, sleep , fetchNode: async () => {} }))).toBe(1);
     expect(t4.text()).toContain('team-relay@other is not installed for this user');
     expect(calls).toEqual([]);
   });

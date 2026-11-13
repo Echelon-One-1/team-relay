@@ -240,7 +240,7 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the first status');
     const o = hosts[0]!.opts;
     expect(o.background).toBe(true);
-    expect(o.claudeBin).toBe(claude);
+    expect(typeof o.claudeBin === 'function' ? o.claudeBin() : o.claudeBin).toBe(claude);
     expect(o.me.member).toBe('bob');
     expect(o.lockRetryMs).toBe(50);
     const st = relay.memberStatus.get('bob')!;
@@ -282,7 +282,18 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
       intervals,
     });
     await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the status');
-    expect(hosts[0]!.opts.claudeBin).toBe(fresh);
+    const bin = hosts[0]!.opts.claudeBin;
+    expect(typeof bin).toBe('function');
+    expect((bin as () => string | null)()).toBe(fresh);
+    // Updated again while the host runs: the host's next answer starts the newest build.
+    rmSync(join(tmp, 'Library', 'Application Support', 'Claude', 'claude-code', '2.1.10'), { recursive: true });
+    const newer = join(tmp, 'Library', 'Application Support', 'Claude', 'claude-code', '2.1.11', 'cccc');
+    mkdirSync(join(newer, 'claude.app', 'Contents', 'MacOS'), { recursive: true });
+    writeFileSync(join(newer, 'claude.app', 'Contents', 'MacOS', 'claude'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(newer, 'claude.app', 'Contents', 'MacOS', 'claude'), 0o755);
+    writeFileSync(join(newer, '.verified'), 'x');
+    expect((bin as () => string | null)()).toBe(join(newer, 'claude.app', 'Contents', 'MacOS', 'claude'));
+    expect(hosts).toHaveLength(1);
     expect(relay.memberStatus.get('bob')).toMatchObject({ claude: { found: true } });
     ac.abort();
     expect(await done).toBe('stopped');

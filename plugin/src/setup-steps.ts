@@ -9,9 +9,9 @@ import { existsSync } from 'node:fs';
 import { configDir } from './answering-lock.js';
 import type { TeamBoundaries } from './boundaries-types.js';
 import { homeDir, validBoundaries } from './boundary-set.js';
-import { agentPlistPath, installAgent, uninstallAgent, type Exec } from './daemon-launch.js';
+import { AgentError, agentPlistPath, installAgent, uninstallAgent, type Exec } from './daemon-launch.js';
 import { runDriveCli, type DriveCliOutcome } from './drive-cli.js';
-import { findClaude } from './locate.js';
+import { answererNodeObtainable, ensureAnswererNode, findClaude, type FetchPinnedNode } from './locate.js';
 import type { Keychain } from './google-drive.js';
 import {
   MAX_FOLDERS,
@@ -206,15 +206,30 @@ export const BACKGROUND_MAC_ONLY = 'Background answering works on a Mac only.';
 /** Why background answering cannot be turned on here: no Claude Code found. */
 export const BACKGROUND_NO_CLAUDE = 'Background answering needs Claude Code, which was not found on this Mac.';
 
+/** Why background answering cannot be turned on here: no Node.js to run it with. */
+export const BACKGROUND_NO_NODE = 'Background answering needs Node.js, which could not be found or downloaded on this Mac.';
+
 /** Whether background answering can be turned on here, and why not when it cannot. */
 export function backgroundAvailability(
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
   find: (env: NodeJS.ProcessEnv) => string | null = findClaude,
+  node: (env: NodeJS.ProcessEnv) => boolean = (e) => answererNodeObtainable({ env: e }),
 ): { available: true } | { available: false; reason: string } {
   if (platform !== 'darwin') return { available: false, reason: BACKGROUND_MAC_ONLY };
   if (!find(env)) return { available: false, reason: BACKGROUND_NO_CLAUDE };
+  if (!node(env)) return { available: false, reason: BACKGROUND_NO_NODE };
   return { available: true };
+}
+
+/**
+ * The node for the background answerer (locate.ts ensureAnswererNode: the pinned private copy,
+ * got first when missing; else a stable PATH node). Throws AgentError when there is none.
+ */
+export async function backgroundNode(env: NodeJS.ProcessEnv, fetch?: FetchPinnedNode): Promise<string> {
+  const node = await ensureAnswererNode({ env, ...(fetch ? { fetch } : {}) });
+  if (!node) throw new AgentError(BACKGROUND_NO_NODE);
+  return node;
 }
 
 /** Whether the background answerer's LaunchAgent is installed for this member. */

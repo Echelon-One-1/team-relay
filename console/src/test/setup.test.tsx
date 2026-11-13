@@ -574,6 +574,30 @@ describe('the local Setup page of /team-relay:setup', () => {
     expect(writes(s)).toEqual([['POST', '/api/local/done', {}]])
   })
 
+  it('installed but no longer able to run here: the switch shows on and can still be turned off', async () => {
+    window.history.replaceState(null, '', '/join')
+    const reason = 'Background answering needs Claude Code, which was not found on this Mac.'
+    const s = localServer({ folders: [], chooser: true, installed: true, available: false, reason })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    const sw = within(panel).getByRole('switch', { name: 'Background answering' })
+    expect(sw).toBeChecked()
+    expect(sw).toBeEnabled()
+    expect(within(panel).getByText(reason)).toBeInTheDocument()
+    await user.click(sw)
+    await waitFor(() => expect(writes(s)).toEqual([['PUT', '/api/local/background', { on: false }]]))
+    await waitFor(() => expect(sw).not.toBeChecked())
+    // Off now, and it cannot be turned on again here.
+    expect(sw).toBeDisabled()
+    await user.click(within(panel).getByRole('button', { name: 'Done' }))
+    await screen.findByText(FINISHED_TEXT)
+    expect(writes(s)).toEqual([
+      ['PUT', '/api/local/background', { on: false }],
+      ['POST', '/api/local/done', {}],
+    ])
+  })
+
   it('turning background answering on fails at Done: the error shows, Done tries again, and "Finish without it" finishes', async () => {
     window.history.replaceState(null, '', '/join')
     const s = localServer({ folders: [], chooser: true, installed: false, failInstall: true })

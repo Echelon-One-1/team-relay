@@ -11,11 +11,13 @@
 //
 // node: the pinned private copy bin/run-node and the setup line install
 // (~/.local/share/team-relay/node-<pin>-darwin-<arch>/bin/node; the pin is read from
-// bin/node-pins.sh, never copied here) when it is there and runs, else the first node on PATH
-// that is new enough, by its PATH name (never the resolved path of a Homebrew or version-manager
-// build, which an upgrade removes).
+// bin/node-pins.sh, never copied here). When it is missing it is got first, through
+// `bin/run-node --fetch-only` (the same download, SHA-256 check and lock). Only when that fails,
+// the first node on PATH that is new enough and whose PATH name is not under a folder named
+// after one version (nvm, fnm, asdf, mise, volta, Homebrew's Cellar): such a name stops working
+// when that version is removed. Never this process's own resolved node.
 
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { accessSync, constants, readFileSync, readdirSync, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -171,34 +173,91 @@ export function newEnoughNode(version: string | null): boolean {
   return major > 22 || (major === 22 && minor >= 12);
 }
 
+/**
+ * Whether a node's PATH name sits in a folder named after one Node.js version (nvm, fnm, asdf,
+ * mise, volta's images, Homebrew's Cellar or node@<n>, or any folder named like a version): the
+ * name stops working when that version is removed, so the background answerer never uses it.
+ */
+export function versionedNodePath(path: string): boolean {
+  if (/\/(\.nvm|\.fnm|fnm|fnm_multishells|\.asdf\/installs|mise\/installs|\.volta\/tools|Cellar|\.n\/n\/versions)\//.test(path)) return true;
+  return path.split('/').some((seg) => /^(node[@-])?v\d+(\.\d+){0,2}$/.test(seg) || /^(node[@-])?\d+\.\d+(\.\d+)?$/.test(seg) || /^node@\d/.test(seg));
+}
+
 export type AnswererNodeOptions = {
   env: NodeJS.ProcessEnv;
   /** process.arch (default). */
   arch?: string;
   /** node-pins.sh (default: NODE_PINS_FILE). */
   pinsFile?: string;
-  /** What runs when nothing else is found (default: process.execPath). */
-  execPath?: string;
   version?: NodeVersion;
 };
 
-/**
- * The node the background answerer's LaunchAgent runs: the pinned private copy when it is there
- * and runs; else the first `node` on PATH (absolute entries only) that runs and is new enough, by
- * that PATH name; else this process's own node.
- */
-export function answererNode(o: AnswererNodeOptions): string {
-  const version = o.version ?? realNodeVersion;
+/** The pinned private copy when it is there and runs (22.12 or newer). */
+export function pinnedNode(o: AnswererNodeOptions): string | null {
   const pin = pinnedNodeVersion(o.pinsFile);
   const arch = nodeArch(o.arch ?? process.arch);
-  if (pin && arch) {
-    const pinned = pinnedNodePath(homeDir(o.env), pin, arch);
-    if (executableFile(pinned) && newEnoughNode(version(pinned))) return pinned;
-  }
+  if (!pin || !arch) return null;
+  const pinned = pinnedNodePath(homeDir(o.env), pin, arch);
+  return executableFile(pinned) && newEnoughNode((o.version ?? realNodeVersion)(pinned)) ? pinned : null;
+}
+
+/** The first `node` on PATH (absolute entries only) that runs, is new enough and is not under a version folder. */
+export function stablePathNode(o: AnswererNodeOptions): string | null {
+  const version = o.version ?? realNodeVersion;
   for (const dir of (o.env.PATH ?? '').split(delimiter)) {
     if (!isAbsolute(dir)) continue;
     const n = join(dir, 'node');
+    if (versionedNodePath(n)) continue;
     if (executableFile(n) && newEnoughNode(version(n))) return n;
   }
-  return o.execPath ?? process.execPath;
+  return null;
+}
+
+/**
+ * The node the background answerer's LaunchAgent runs, as it is now: the pinned private copy,
+ * else a stable PATH node (stablePathNode); null when there is neither.
+ */
+export function answererNode(o: AnswererNodeOptions): string | null {
+  return pinnedNode(o) ?? stablePathNode(o);
+}
+
+/** bin/run-node beside this bundle. */
+export const RUN_NODE_FILE = fileURLToPath(new URL('../bin/run-node', import.meta.url));
+
+/** Gets the pinned private copy (bin/run-node --fetch-only); resolves when that ended. */
+export type FetchPinnedNode = (env: NodeJS.ProcessEnv) => Promise<void>;
+
+/** How long getting the pinned copy may take (a ~45 MB download on a slow link). */
+export const FETCH_NODE_TIMEOUT_MS = 15 * 60 * 1000;
+
+export const runNodeFetch: FetchPinnedNode = (env) =>
+  new Promise((resolve) => {
+    execFile('/bin/sh', [RUN_NODE_FILE, '--fetch-only'], { env, timeout: FETCH_NODE_TIMEOUT_MS, windowsHide: true }, () => resolve()).stdin?.end();
+  });
+
+/**
+ * The node for the background answerer, getting it first when needed: the pinned private copy;
+ * when it is missing, bin/run-node --fetch-only gets it (the same download, check and lock as at
+ * the plugin's start), then it is used; only when that fails a stable PATH node. Null: none.
+ */
+export async function ensureAnswererNode(o: AnswererNodeOptions & { fetch?: FetchPinnedNode }): Promise<string | null> {
+  const have = pinnedNode(o);
+  if (have) return have;
+  if (nodeArch(o.arch ?? process.arch) && pinnedNodeVersion(o.pinsFile)) {
+    await (o.fetch ?? runNodeFetch)(o.env);
+    const got = pinnedNode(o);
+    if (got) return got;
+  }
+  return stablePathNode(o);
+}
+
+/** Whether ensureAnswererNode can give a node here (without getting anything now). */
+export function answererNodeObtainable(o: AnswererNodeOptions & { runNode?: string }): boolean {
+  if (answererNode(o)) return true;
+  if (nodeArch(o.arch ?? process.arch) === null || pinnedNodeVersion(o.pinsFile) === null) return false;
+  try {
+    return statSync(o.runNode ?? RUN_NODE_FILE).isFile();
+  } catch {
+    return false;
+  }
 }

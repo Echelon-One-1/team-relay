@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { NODE_PINS_FILE, answererNode, desktopClaude, findClaude, newEnoughNode, pinnedNodePath, pinnedNodeVersion } from '../src/locate.js';
+import { NODE_PINS_FILE, RUN_NODE_FILE, answererNode, answererNodeObtainable, desktopClaude, ensureAnswererNode, findClaude, newEnoughNode, pinnedNodePath, pinnedNodeVersion, versionedNodePath } from '../src/locate.js';
 import { PLUGIN_ROOT } from './helpers/mcp.js';
 
 let tmp: string;
@@ -98,23 +98,72 @@ describe("the background answerer's node", () => {
     const pinned = node(pinnedNodePath(home, 'v22.23.4', 'arm64'), 'v22.23.4');
     node(join(tmp, 'bin', 'node'), 'v24.0.0');
     expect(pinned).toBe(join(home, '.local', 'share', 'team-relay', 'node-v22.23.4-darwin-arm64', 'bin', 'node'));
-    expect(answererNode({ env: { HOME: home, PATH: join(tmp, 'bin') }, arch: 'arm64', pinsFile: pins(), execPath: '/x/node', version })).toBe(pinned);
+    expect(answererNode({ env: { HOME: home, PATH: join(tmp, 'bin') }, arch: 'arm64', pinsFile: pins(), version })).toBe(pinned);
     // Another processor: its own copy, which is not there.
-    expect(answererNode({ env: { HOME: home, PATH: join(tmp, 'bin') }, arch: 'x64', pinsFile: pins(), execPath: '/x/node', version })).toBe(join(tmp, 'bin', 'node'));
+    expect(answererNode({ env: { HOME: home, PATH: join(tmp, 'bin') }, arch: 'x64', pinsFile: pins(), version })).toBe(join(tmp, 'bin', 'node'));
   });
 
-  it('else the first new-enough node on PATH, by its PATH name (a symlink is not resolved)', () => {
+  it('else the first new-enough node on PATH whose name is not under a version folder (a symlink is not resolved)', () => {
     node(pinnedNodePath(home, 'v22.23.4', 'arm64'), 'broken');  // does not say a version: does not run
     node(join(tmp, 'old', 'node'), 'v20.1.0');
-    const real = node(join(tmp, 'Cellar', 'node', '24.1.0', 'bin', 'node'), 'v24.1.0');
+    const versioned = [
+      join(home, '.nvm', 'versions', 'node', 'v24.1.0', 'bin'),
+      join(home, '.local', 'state', 'fnm_multishells', '123_456', 'bin'),
+      join(home, '.asdf', 'installs', 'nodejs', '24.1.0', 'bin'),
+      join(home, '.volta', 'tools', 'image', 'node', '24.1.0', 'bin'),
+      join(tmp, 'opt', 'homebrew', 'Cellar', 'node', '24.1.0', 'bin'),
+      join(tmp, 'opt', 'homebrew', 'opt', 'node@24', 'bin'),
+    ];
+    for (const d of versioned) node(join(d, 'node'), 'v24.1.0');
+    const real = join(tmp, 'opt', 'homebrew', 'Cellar', 'node', '24.1.0', 'bin', 'node');
     mkdirSync(join(tmp, 'brew'));
     symlinkSync(real, join(tmp, 'brew', 'node'));
-    const env = { HOME: home, PATH: ['relative', join(tmp, 'old'), join(tmp, 'brew')].join(':') };
-    expect(answererNode({ env, arch: 'arm64', pinsFile: pins(), execPath: real, version })).toBe(join(tmp, 'brew', 'node'));
+    const env = { HOME: home, PATH: ['relative', join(tmp, 'old'), ...versioned, join(tmp, 'brew')].join(':') };
+    expect(answererNode({ env, arch: 'arm64', pinsFile: pins(), version })).toBe(join(tmp, 'brew', 'node'));
+    expect(answererNode({ env: { ...env, PATH: versioned.join(':') }, arch: 'arm64', pinsFile: pins(), version })).toBeNull();
+    for (const d of versioned) expect(versionedNodePath(join(d, 'node')), d).toBe(true);
+    for (const p of ['/opt/homebrew/bin/node', '/usr/local/bin/node', join(home, '.volta', 'bin', 'node'), join(home, '.asdf', 'shims', 'node')]) expect(versionedNodePath(p), p).toBe(false);
   });
 
-  it("else this process's own node", () => {
-    expect(answererNode({ env: { HOME: home, PATH: '' }, arch: 'arm64', pinsFile: join(tmp, 'missing.sh'), execPath: '/x/node', version })).toBe('/x/node');
+  it('none: null (never this process\'s own node)', () => {
+    expect(answererNode({ env: { HOME: home, PATH: '' }, arch: 'arm64', pinsFile: join(tmp, 'missing.sh'), version })).toBeNull();
+  });
+
+  it('a missing pinned copy is got first (run-node --fetch-only), then used; when that fails, a stable PATH node; else none', async () => {
+    const env = { HOME: home, PATH: join(tmp, 'bin') };
+    const fetched: NodeJS.ProcessEnv[] = [];
+    const fetch = async (e: NodeJS.ProcessEnv) => {
+      fetched.push(e);
+      node(pinnedNodePath(home, 'v22.23.4', 'arm64'), 'v22.23.4');
+    };
+    node(join(tmp, 'bin', 'node'), 'v24.0.0');
+    expect(await ensureAnswererNode({ env, arch: 'arm64', pinsFile: pins(), version, fetch })).toBe(pinnedNodePath(home, 'v22.23.4', 'arm64'));
+    expect(fetched).toEqual([env]);
+    // There now: not fetched again.
+    expect(await ensureAnswererNode({ env, arch: 'arm64', pinsFile: pins(), version, fetch })).toBe(pinnedNodePath(home, 'v22.23.4', 'arm64'));
+    expect(fetched).toHaveLength(1);
+    // A fetch that fails: the PATH node; none there either: null.
+    rmSync(join(home, '.local'), { recursive: true });
+    expect(await ensureAnswererNode({ env, arch: 'arm64', pinsFile: pins(), version, fetch: async () => {} })).toBe(join(tmp, 'bin', 'node'));
+    expect(await ensureAnswererNode({ env: { HOME: home, PATH: '' }, arch: 'arm64', pinsFile: pins(), version, fetch: async () => {} })).toBeNull();
+    // A processor nodejs.org has no pinned build for: nothing fetched.
+    expect(await ensureAnswererNode({ env, arch: 'ia32', pinsFile: pins(), version, fetch: async () => void fetched.push(env) })).toBe(join(tmp, 'bin', 'node'));
+    expect(fetched).toHaveLength(1);
+  });
+
+  it('obtainable: a node now, or a pinned build run-node can fetch for this processor', () => {
+    const env = { HOME: home, PATH: '' };
+    const runNode = exe(join(tmp, 'run-node'));
+    expect(answererNodeObtainable({ env, arch: 'arm64', pinsFile: pins(), version, runNode })).toBe(true);
+    expect(answererNodeObtainable({ env, arch: 'arm64', pinsFile: pins(), version, runNode: join(tmp, 'none') })).toBe(false);
+    expect(answererNodeObtainable({ env, arch: 'ia32', pinsFile: pins(), version, runNode })).toBe(false);
+    node(join(tmp, 'bin', 'node'), 'v24.0.0');
+    expect(answererNodeObtainable({ env: { HOME: home, PATH: join(tmp, 'bin') }, arch: 'ia32', pinsFile: pins(), version, runNode: join(tmp, 'none') })).toBe(true);
+  });
+
+  it('the real run-node --fetch-only is what fetches (it exists beside the pins)', () => {
+    expect(RUN_NODE_FILE).toBe(join(PLUGIN_ROOT, 'bin', 'run-node'));
+    expect(readFileSync(RUN_NODE_FILE, 'utf8')).toContain('--fetch-only');
   });
 
   it('22.12 or newer', () => {
