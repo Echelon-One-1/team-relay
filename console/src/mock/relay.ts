@@ -8,9 +8,9 @@
 // answer preview only; the asker sees every one.
 //
 // M11: the viewer's acceptance of the boundaries (alice has not accepted `demo`'s topic yet),
-// every member's setup status (bob is set up with 3 folders, alice has chosen no
-// folders yet, carol's Mac has never reported), and questions asked from the console: on `demo` bob acknowledges
-// after 1 s and answers after 4 s, carol acknowledges after 2 s and does not answer; nobody
+// every member's setup status (bob is set up with 3 folders, alice has chosen no folders yet,
+// carol's Mac reported in but cannot read her folders settings and is not answering), and
+// questions asked from the console: on `demo` bob acknowledges after 1 s and answers after 4 s, carol acknowledges after 2 s and does not answer; nobody
 // answers on a quiet team.
 
 import type {
@@ -539,7 +539,7 @@ function json(body: unknown, status = 200): Response {
 }
 
 /** What a member's Mac last reported on `demo`, as the mock keeps it. */
-type MockMemberStatus = { status: MemberSetupStatus | null; answering: boolean; accepted?: number; folderCount?: number | null }
+type MockMemberStatus = { status: MemberSetupStatus | null; answering: boolean; accepted?: number; folderCount?: number | null; foldersOk?: boolean | null }
 
 export class MockRelay {
   readonly startedAt: number
@@ -833,8 +833,14 @@ export class MockRelay {
   // --- M11: acceptance, members' status, asking ------------------------------------------
 
   /** Sets what a member's Mac last reported on `demo` (tests and the dev view). */
-  setMemberStatus(member: string, status: MemberSetupStatus | null, answering: boolean, accepted?: number, folderCount?: number | null): void {
-    this.statuses.set(member, { status, answering, ...(accepted !== undefined ? { accepted } : {}), ...(folderCount !== undefined ? { folderCount } : {}) })
+  setMemberStatus(member: string, status: MemberSetupStatus | null, answering: boolean, accepted?: number, folderCount?: number | null, foldersOk?: boolean | null): void {
+    this.statuses.set(member, {
+      status,
+      answering,
+      ...(accepted !== undefined ? { accepted } : {}),
+      ...(folderCount !== undefined ? { folderCount } : {}),
+      ...(foldersOk !== undefined ? { foldersOk } : {}),
+    })
   }
 
   private memberStatus(team: string): MembersStatus {
@@ -846,14 +852,15 @@ export class MockRelay {
     if (team !== 'demo') {
       const roster = (this.quiet.get(team) ?? []).filter((m) => m.status !== 'invited')
       return {
-        members: roster.map((m) => ({ member: m.member, status: null, answering: false, accepted_version: m.member === mine.member ? viewerAccepted : 0, folder_count: null })),
+        members: roster.map((m) => ({ member: m.member, status: null, answering: false, accepted_version: m.member === mine.member ? viewerAccepted : 0, folder_count: null, folders_ok: null })),
         boundaries_version: version,
       }
     }
     const defaults: Record<string, MockMemberStatus> = {
-      alice: { status: mockStatus(now, {}), answering: true, folderCount: 0 },
-      bob: { status: mockStatus(now, {}), answering: true, accepted: version, folderCount: 3 },
-      carol: { status: null, answering: false, accepted: 0 },
+      alice: { status: mockStatus(now, {}), answering: true, folderCount: 0, foldersOk: true },
+      bob: { status: mockStatus(now, {}), answering: true, accepted: version, folderCount: 3, foldersOk: true },
+      // carol's Mac reported in, but cannot use her folders file (so a count of 0).
+      carol: { status: mockStatus(now, {}), answering: false, accepted: 0, folderCount: 0, foldersOk: false },
     }
     // Owners get every member's folder count; anyone else only their own (others null).
     const owner = this.viewerRole() === 'owner'
@@ -862,8 +869,15 @@ export class MockRelay {
       .map((m) => {
         const s = this.statuses.get(m.member) ?? defaults[m.member] ?? { status: null, answering: false }
         const accepted = m.member === this.viewer ? viewerAccepted : (s.accepted ?? 0)
-        const count = s.status !== null && (owner || m.member === this.viewer) ? (s.folderCount ?? null) : null
-        return { member: m.member, status: s.status, answering: s.answering, accepted_version: accepted, folder_count: count }
+        const shown = s.status !== null && (owner || m.member === this.viewer)
+        return {
+          member: m.member,
+          status: s.status,
+          answering: s.answering,
+          accepted_version: accepted,
+          folder_count: shown ? (s.folderCount ?? null) : null,
+          folders_ok: shown ? (s.foldersOk ?? null) : null,
+        }
       })
     return { members, boundaries_version: version }
   }

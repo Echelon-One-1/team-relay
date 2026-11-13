@@ -349,6 +349,12 @@ export interface MemberStatusEntry {
    * anyone else only their own (others null). Null too before their Mac has reported a count.
    */
   folder_count: number | null
+  /**
+   * Whether the member's folders file can be used (false: it cannot, and folder_count is 0).
+   * Shown as folder_count is: owners get every member's, anyone else only their own; null when
+   * hidden or not known.
+   */
+  folders_ok: boolean | null
 }
 
 export interface MembersStatus {

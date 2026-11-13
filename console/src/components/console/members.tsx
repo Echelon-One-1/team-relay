@@ -8,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useJoin, useMe, useRosterChange } from '@/hooks/queries'
 import { useNav } from '@/hooks/team'
 import { addProblem, entries, isInvited, ownerCount, sortedMembers, suggestMemberId, visibleEmails } from '@/lib/roster'
-import { currentVersion, folderCountText, inviteMessage, publicOrigin, SETUP_STEPS, setupCount } from '@/lib/setup'
+import { currentVersion, folderCountText, FOLDERS_UNREADABLE, inviteMessage, publicOrigin, SETUP_STEPS, setupCount } from '@/lib/setup'
 import { readStored, writeStored } from '@/lib/stored'
 import { cn } from '@/lib/utils'
 import { CopyTextButton } from './copy'
@@ -22,7 +22,8 @@ import { Avatar, Panel } from './primitives'
 // Invited, and can withdraw it (which retires nothing). The panel folds away to its header
 // (with the counts still showing), and stays as the viewer left it in this browser.
 // M11 §6: each member's setup progress ("set up", or "1 of 2 set up") and whether their Mac
-// answers now, from members-status, and for owners how many folders each chose ("3 folders");
+// answers now, from members-status, and for owners how many folders each chose ("3 folders", or
+// "folders unreadable" when their Mac cannot use its folders file);
 // after inviting someone, an owner copies the invite message to send them.
 
 export const MEMBERS_STORAGE_KEY = 'team-relay-console.members'
@@ -95,16 +96,22 @@ function InviteCopy() {
  * many folders they chose on their Mac (never which: the relay gives no one else another
  * member's count, and never names or paths).
  */
-export type MemberProgress = { done: number; answering: boolean; folderCount: number | null }
+export type MemberProgress = { done: number; answering: boolean; folderCount: number | null; foldersOk: boolean | null }
 
 function Progress({ p, owner }: { p: MemberProgress; owner: boolean }) {
   const folders = owner ? p.folderCount : null
+  const unreadable = owner && p.foldersOk === false
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5 text-[11.5px] text-subtle" data-setup-progress={p.done} data-answering={p.answering ? 'true' : 'false'}>
       <span aria-hidden className={cn('size-1.5 shrink-0 rounded-full', p.answering ? 'bg-ok' : 'border border-faint')} />
       <span className="tnum">{p.done === SETUP_STEPS ? 'set up' : `${p.done} of ${SETUP_STEPS} set up`}</span>
       {p.answering ? <span className="text-ok">answering now</span> : <span className="sr-only">, not answering now</span>}
-      {folders !== null ? (
+      {unreadable ? (
+        <span className="text-warn" data-folders-unreadable>
+          <span aria-hidden>· </span>
+          {FOLDERS_UNREADABLE}
+        </span>
+      ) : folders !== null ? (
         <span className={cn('tnum', folders === 0 && 'text-warn')} data-folder-count={folders}>
           <span aria-hidden>· </span>
           {folderCountText(folders)}
@@ -377,7 +384,7 @@ export function progressByMember(statuses: MembersStatus | undefined, bounds: Te
   const out = new Map<string, MemberProgress>()
   if (!statuses) return out
   const current = currentVersion(bounds, statuses.boundaries_version)
-  for (const e of statuses.members) out.set(e.member, { done: setupCount(e, bounds, current), answering: e.answering, folderCount: e.folder_count })
+  for (const e of statuses.members) out.set(e.member, { done: setupCount(e, bounds, current), answering: e.answering, folderCount: e.folder_count, foldersOk: e.folders_ok })
   return out
 }
 

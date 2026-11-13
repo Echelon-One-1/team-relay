@@ -62,6 +62,7 @@ export function boundariesSet(bounds: TeamBoundaries | null | undefined): bounds
 }
 
 export const SETUP_LINE_TODO = 'Paste the setup line into Terminal on your Mac, press Enter and answer its questions.'
+export const FOLDERS_UNREADABLE_TODO = "Your Mac can't read your folders settings. Run /team-relay:folders in Claude to see why and fix them."
 export const FOLDERS_TODO = "Your Mac has no folders chosen yet, so your Claude can't read anything for teammates. Run the setup line again and choose your folders."
 export const CHECKING = 'Your Mac is checking that everything works. This takes about a minute.'
 
@@ -91,8 +92,8 @@ export function macChecks(entry: MemberStatusEntry | null): MacCheck[] {
     {
       id: 'folders',
       // Null: not known (another member's count, which only owners read): never shown as missing.
-      done: entry?.folder_count !== 0,
-      todo: FOLDERS_TODO,
+      done: entry?.folders_ok !== false && entry?.folder_count !== 0,
+      todo: entry?.folders_ok === false ? FOLDERS_UNREADABLE_TODO : FOLDERS_TODO,
     },
     { id: 'self_test', done: s.self_test.ok, todo: selfTestTodo(s.self_test.reason) },
   ]
@@ -131,6 +132,9 @@ function plainLine(v: string | null | undefined): string | null {
   const t = v.replace(/\s+/g, ' ').trim().replace(/[.]+$/, '')
   return t && t.length <= 200 ? t : null
 }
+
+/** An owner's line for a member whose folders file cannot be used (in place of a count). */
+export const FOLDERS_UNREADABLE = 'folders unreadable'
 
 /** A member's folder count as an owner reads it: "1 folder", "0 folders". */
 export function folderCountText(n: number): string {
@@ -233,6 +237,7 @@ export function readMembersStatus(raw: unknown): MembersStatus | null {
       answering: m.answering === true,
       accepted_version: count(m.accepted_version, 2 ** 31 - 1) ? (m.accepted_version as number) : 0,
       folder_count: count(m.folder_count, MAX_FOLDERS) ? (m.folder_count as number) : null,
+      folders_ok: typeof m.folders_ok === 'boolean' ? m.folders_ok : null,
     })
   }
   return { members, boundaries_version: raw.boundaries_version as number }

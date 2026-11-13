@@ -16,7 +16,7 @@ import { setConsoleKey } from '@/api/key'
 import { setTransport } from '@/api/client'
 import { App } from '@/App'
 import { BACKGROUND_FAILED_TEXT, BACKGROUND_TEXT, FINISHED_TEXT, FOLDERS_HINT, NO_CHOOSER_TEXT, PREVIOUS_TEXT, resetSetupFinished } from '@/components/console/local-setup'
-import { FOLDERS_TODO, inviteMessage } from '@/lib/setup'
+import { FOLDERS_TODO, FOLDERS_UNREADABLE_TODO, inviteMessage } from '@/lib/setup'
 import { MockRelay, mockStatus } from '@/mock/relay'
 import { renderWithClient, setHidden } from './render'
 
@@ -121,6 +121,17 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect(accept.queryByRole('list')).toBeNull()
     expect(step('accept').querySelector('[data-new]')).toBeNull()
     expect(tab('join')).toHaveTextContent('Setup0/2')
+  })
+
+  it("the viewer's Mac can't read its folders settings: the folders check says how to see why and fix it", async () => {
+    window.history.replaceState(null, '', '/join')
+    const s = server()
+    s.relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, 0, false)
+    renderWithClient(<App />)
+    await setupPanel()
+    await waitFor(() => expect(openChecks()).toEqual(['folders']))
+    expect(within(step('mac')).getByText(FOLDERS_UNREADABLE_TODO)).toBeInTheDocument()
+    expect(within(step('mac')).queryByText(FOLDERS_TODO)).toBeNull()
   })
 
   it('the copy falls back to a selected text box when the clipboard refuses', async () => {
@@ -303,8 +314,10 @@ describe('the Members panel and the invite message (M11 §6)', () => {
     expect(count('bob')).toHaveTextContent('1 folder')
     expect(count('bob')!.textContent).not.toMatch(/folders/)
     expect(count('alice')).toHaveTextContent('0 folders')
-    // carol's Mac has never reported: no count.
+    // carol's Mac can't use her folders file: "folders unreadable", not "0 folders".
     expect(count('carol')).toBeNull()
+    expect(row('carol').querySelector('[data-folders-unreadable]')).toHaveTextContent('folders unreadable')
+    expect(row('bob').querySelector('[data-folders-unreadable]')).toBeNull()
     // Never a folder's name or path, and nothing about sources.
     expect(panel.textContent).not.toMatch(/\/|~|can't find|clone|drive|repo/i)
   })
@@ -317,6 +330,7 @@ describe('the Members panel and the invite message (M11 §6)', () => {
     const panel = await screen.findByRole('region', { name: 'Members' })
     await waitFor(() => expect(panel.querySelector('[data-setup-progress]')).not.toBeNull())
     expect(panel.querySelector('[data-folder-count]')).toBeNull()
+    expect(panel.querySelector('[data-folders-unreadable]')).toBeNull()
     expect(panel.textContent).not.toMatch(/\bfolders?\b/)
     // The relay gives a member only their own count (src/mock/relay.ts plays that rule).
     const statuses = (await (await s.relay.handle('api/members-status', { headers: { 'X-Relay-Team': 'demo' } })).json()) as {
@@ -324,6 +338,9 @@ describe('the Members panel and the invite message (M11 §6)', () => {
     }
     expect(statuses.members.find((m) => m.member === 'bob')!.folder_count).toBeNull()
     expect(statuses.members.find((m) => m.member === 'alice')!.folder_count).toBe(0)
+    const ok = statuses.members as unknown as Array<{ member: string; folders_ok: boolean | null }>
+    expect(ok.find((m) => m.member === 'carol')!.folders_ok).toBeNull()
+    expect(ok.find((m) => m.member === 'alice')!.folders_ok).toBe(true)
   })
 
   it("shows each member's progress (set up, or n of 2) and whether they answer now", async () => {

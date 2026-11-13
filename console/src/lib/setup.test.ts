@@ -11,6 +11,7 @@ import {
   currentVersion,
   folderCountText,
   FOLDERS_TODO,
+  FOLDERS_UNREADABLE_TODO,
   inviteMessage,
   hasJoined,
   isAccepted,
@@ -36,12 +37,13 @@ function status(o: Partial<{ found: boolean; signedIn: boolean; ok: boolean; rea
   }
 }
 
-const entry = (s: MemberSetupStatus | null, answering = true, accepted = 3, folderCount: number | null = 2): MemberStatusEntry => ({
+const entry = (s: MemberSetupStatus | null, answering = true, accepted = 3, folderCount: number | null = 2, foldersOk: boolean | null = true): MemberStatusEntry => ({
   member: 'alice',
   status: s,
   answering,
   accepted_version: accepted,
   folder_count: folderCount,
+  folders_ok: foldersOk,
 })
 
 const BOUNDS: TeamBoundaries = {
@@ -121,6 +123,19 @@ describe('setupSteps: two plain steps', () => {
     // Not known (another member's count, which only owners read): never shown as missing.
     expect(checks(entry(status(), true, 3, null)).folders).toBe(true)
     for (const c of macChecks(entry(status(), true, 3, 0))) expect(c.todo).not.toMatch(/drive|github|clone|source|repo/i)
+  })
+
+  it("folders: a folders file the Mac can't use says how to see why and fix it; a readable one does not", () => {
+    const bad = entry(status(), true, 3, 0, false)
+    expect(checks(bad).folders).toBe(false)
+    expect(todo(bad, 'folders')).toBe(FOLDERS_UNREADABLE_TODO)
+    expect(FOLDERS_UNREADABLE_TODO).toBe("Your Mac can't read your folders settings. Run /team-relay:folders in Claude to see why and fix them.")
+    expect(done(setupSteps(bad, BOUNDS, 3, 3)).mac).toBe(false)
+    // false wins whatever the count says; true or null (not known) leaves the count to decide.
+    expect(checks(entry(status(), true, 3, 2, false)).folders).toBe(false)
+    expect(todo(entry(status(), true, 3, 0, true), 'folders')).toBe(FOLDERS_TODO)
+    expect(todo(entry(status(), true, 3, 0, null), 'folders')).toBe(FOLDERS_TODO)
+    expect(checks(entry(status(), true, 3, 2, null)).folders).toBe(true)
   })
 
   it('the self-test: a failure says what to do and what to show an owner; not run yet is checking, not failed', () => {
@@ -217,7 +232,7 @@ describe('reading the answers', () => {
     }
     const out = readMembersStatus(raw)!
     expect(out.members.map((m) => m.member)).toEqual(['alice', 'bob', 'dana'])
-    expect(out.members[2]).toEqual({ member: 'dana', status: null, answering: false, accepted_version: 0, folder_count: null })
+    expect(out.members[2]).toEqual({ member: 'dana', status: null, answering: false, accepted_version: 0, folder_count: null, folders_ok: null })
     expect(readMembersStatus({ members: 'x', boundaries_version: 1 })).toBeNull()
     expect(readMembersStatus({ ok: true })).toBeNull()
     expect(readMembersStatus(null)).toBeNull()
@@ -238,7 +253,15 @@ describe('reading the answers', () => {
       drive: { connected: true },
     }
     const out = readMembersStatus({ boundaries_version: 2, members: [{ member: 'alice', status: old, answering: true, accepted_version: 1, folder_count: 3, sources: { boundaries_version: 2, missing: [] } }] })!
-    expect(out.members[0]).toEqual({ member: 'alice', status: status(), answering: true, accepted_version: 1, folder_count: 3 })
+    expect(out.members[0]).toEqual({ member: 'alice', status: status(), answering: true, accepted_version: 1, folder_count: 3, folders_ok: null })
+  })
+
+  it("members-status: a member's folders_ok is kept only when it is a boolean", () => {
+    const read = (folders_ok: unknown) =>
+      readMembersStatus({ boundaries_version: 2, members: [{ member: 'alice', status: status(), answering: false, accepted_version: 0, folder_count: 0, folders_ok }] })!.members[0]!.folders_ok
+    expect(read(true)).toBe(true)
+    expect(read(false)).toBe(false)
+    for (const v of [null, undefined, 0, 1, 'false', {}]) expect(read(v)).toBeNull()
   })
 
   it('acceptance: {version, accepted_at} or null', () => {
