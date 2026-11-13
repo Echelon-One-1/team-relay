@@ -440,7 +440,7 @@ fetches only `GET /api/sources/config` from our origin.
 Headers for `/pick/drive` only (exact string, tested):
 
 ```
-Content-Security-Policy: default-src 'none'; script-src 'self' https://apis.google.com https://accounts.google.com/gsi/client; style-src 'self' https://accounts.google.com/gsi/style; img-src 'self' data:; font-src 'self'; connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/; frame-src https://docs.google.com https://accounts.google.com/gsi/; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+Content-Security-Policy: default-src 'none'; script-src 'self' https://apis.google.com https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; img-src 'self' data:; font-src 'self'; connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/; frame-src https://docs.google.com https://accounts.google.com/gsi/; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
 Cross-Origin-Opener-Policy: same-origin-allow-popups
 Referrer-Policy: strict-origin-when-cross-origin
 X-Frame-Options: DENY
@@ -484,6 +484,11 @@ on save.
 (Correction, 11 Nov 2026: the picker page's `connect-src` also names
 `https://oauth2.googleapis.com/revoke`, where Google's sign-in library sends `revoke()`, so the
 token is revoked when the owner finishes instead of expiring within the hour.)
+
+(Correction, 13 Nov 2026: the picker page's `style-src` also has `'unsafe-inline'`. The Picker
+adds its dialog's layout as two `<style>` blocks in this page; without them the dialog opens
+squashed with an empty list. Their text is Google's and changes with its releases, so a hash
+cannot pin it, and the Picker takes no nonce. Scripts stay strict, and the page shows no team data.)
 
 ## 6. Matching on members' Macs (never a GitHub or Drive API call)
 

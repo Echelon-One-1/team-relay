@@ -455,8 +455,14 @@ describe('the picker page, /pick/drive (PICKERS-SPEC §3.7, §5.4)', () => {
     expect(index).not.toContain('pick-drive');
   });
 
-  it('the picker CSP allows Google only where §5.4 says, and nothing inline', () => {
-    expect(PICKER_CONTENT_SECURITY_POLICY).not.toMatch(/unsafe|\*|http:/);
+  it('the picker CSP allows Google only where §5.4 says; only styles may be inline', () => {
+    const directives = PICKER_CONTENT_SECURITY_POLICY.split('; ');
+    // The Picker writes its dialog's layout as <style> blocks (§5.4, correction 13 Nov 2026).
+    expect(directives.filter((d) => d.includes('unsafe'))).toEqual([
+      "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style",
+    ]);
+    expect(PICKER_CONTENT_SECURITY_POLICY).not.toMatch(/unsafe-eval|unsafe-hashes|\*|http:/);
+    expect(directives.find((d) => d.startsWith('script-src'))).not.toMatch(/unsafe/);
     expect(PICKER_CONTENT_SECURITY_POLICY.split('; ').map((d) => d.split(' ')[0])).toEqual([
       'default-src',
       'script-src',

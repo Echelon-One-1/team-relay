@@ -352,7 +352,7 @@ describe('hosted console server (M3-SPEC §3)', () => {
     expect(picker.body).toBe('<!doctype html><title>picker</title>');
     expect(pageHeaders(picker)).toEqual({
       'content-security-policy':
-        "default-src 'none'; script-src 'self' https://apis.google.com https://accounts.google.com/gsi/client; style-src 'self' https://accounts.google.com/gsi/style; img-src 'self' data:; font-src 'self'; connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/ https://oauth2.googleapis.com/revoke; frame-src https://docs.google.com https://accounts.google.com/gsi/; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "default-src 'none'; script-src 'self' https://apis.google.com https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; img-src 'self' data:; font-src 'self'; connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/ https://oauth2.googleapis.com/revoke; frame-src https://docs.google.com https://accounts.google.com/gsi/; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       'cross-origin-opener-policy': 'same-origin-allow-popups',
       'referrer-policy': 'strict-origin-when-cross-origin',
       'x-frame-options': 'DENY',

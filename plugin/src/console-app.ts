@@ -155,12 +155,14 @@ const SECURITY_HEADERS: Record<string, string> = {
  * PICKERS-SPEC §5.4: the CSP of the Google Drive picker page (`GET /pick/drive`, hosted only)
  * and of nothing else. Google's scripts (api.js and the Picker code it loads, Google Identity
  * Services), the Picker's iframe and the Drive API's `files.get` are allowed there; the page
- * shows no team data. Every other page keeps CONTENT_SECURITY_POLICY.
+ * shows no team data. Every other page keeps CONTENT_SECURITY_POLICY. Styles allow
+ * 'unsafe-inline' because the Picker writes its dialog's layout as <style> blocks in this page
+ * (their text changes with Google's releases, so no hash; it takes no nonce); scripts stay strict.
  */
 export const PICKER_CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
   "script-src 'self' https://apis.google.com https://accounts.google.com/gsi/client",
-  "style-src 'self' https://accounts.google.com/gsi/style",
+  "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style",
   "img-src 'self' data:",
   "font-src 'self'",
   "connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/ https://oauth2.googleapis.com/revoke",
