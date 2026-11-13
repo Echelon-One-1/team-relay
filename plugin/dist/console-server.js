@@ -24270,7 +24270,7 @@ var SECURITY_HEADERS = {
 var PICKER_CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
   "script-src 'self' https://apis.google.com https://accounts.google.com/gsi/client",
-  "style-src 'self' https://accounts.google.com/gsi/style",
+  "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style",
   "img-src 'self' data:",
   "font-src 'self'",
   "connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/ https://oauth2.googleapis.com/revoke",
