@@ -56,7 +56,8 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -160,6 +161,71 @@ def _int_field(snap: Any, name: str) -> int:
     if not snap.exists:
         return 0
     return int((snap.to_dict() or {}).get(name) or 0)
+
+
+async def _read(
+    ref: Any, *, transaction: AsyncTransaction | None = None, field_paths: list[str] | None = None
+) -> Any:
+    """One document's snapshot (``exists`` False when it is missing), like ``ref.get()``, but
+    the response stream is read to its end, so the call is finished when this returns.
+
+    ``AsyncDocumentReference.get`` returns at the first message and leaves its
+    BatchGetDocuments call waiting for the server's closing status. gRPC delivers that
+    status to the event loop the call was made on; when that loop has closed by then (a test
+    ends, its loop with it) the process-wide gRPC poller hands the event to a closed loop,
+    and "Event loop is closed" surfaces in whatever runs next (13 Nov 2026)."""
+    found = None
+    async for snap in ref._client.get_all([ref], field_paths=field_paths, transaction=transaction):
+        found = snap
+    if found is None:  # BatchGetDocuments answers for every document it is asked for
+        raise RuntimeError(f"no answer for {ref.path}")
+    return found
+
+
+async def _increment(ref: Any, quota: Quota) -> bool:
+    """Count one more under ``quota`` at ``ref`` with a single atomic write, and say whether
+    the count is still within the limit. No read, so no transaction holds a lock on the
+    counter: concurrent callers never wait on each other's locks (read-then-write
+    transactions on one counter deadlock on the lock upgrade under the emulator, which
+    breaks each such deadlock only with a 2-second lock timeout). A refused call is counted
+    too; the answer is the same, since the count only grows within its window."""
+    result = await ref.set(
+        {"count": firestore.Increment(1), "expire_at": quota.expire_at}, merge=True
+    )
+    return int(result.transform_results[0].integer_value) <= quota.limit
+
+
+class _Turns:
+    """Per-key queues inside one store instance: :meth:`hold` waits until no other holder
+    of any of ``keys`` remains, so this instance's own transactions on the same documents
+    run one after another instead of contending in Firestore. Keys are taken in sorted
+    order (no deadlock between holders) and forgotten when the last holder leaves."""
+
+    def __init__(self) -> None:
+        self._locks: dict[str, tuple[asyncio.Lock, int]] = {}
+
+    @asynccontextmanager
+    async def hold(self, keys: Sequence[str]) -> AsyncIterator[None]:
+        ordered = sorted(set(keys))
+        for key in ordered:
+            lock, users = self._locks.get(key) or (asyncio.Lock(), 0)
+            self._locks[key] = (lock, users + 1)
+        taken: list[asyncio.Lock] = []
+        try:
+            for key in ordered:
+                lock = self._locks[key][0]
+                await lock.acquire()
+                taken.append(lock)
+            yield
+        finally:
+            for lock in reversed(taken):
+                lock.release()
+            for key in ordered:
+                lock, users = self._locks[key]
+                if users == 1:
+                    del self._locks[key]
+                else:
+                    self._locks[key] = (lock, users - 1)
 
 
 def _seq_id(seq: int, width: int) -> str:
@@ -754,6 +820,7 @@ class FirestoreStore:
         self._project = project
         self._database = database
         self._client = client
+        self._turns = _Turns()
 
     # The client is created on first use, inside the running event loop (grpc.aio binds
     # to the loop that creates its channel).
@@ -871,7 +938,7 @@ class FirestoreStore:
                 targets[key] = self._stream(*key)
         heads: dict[tuple[str, str, str], tuple[int, bool]] = {}
         for key, ref in targets.items():
-            snap = await ref.get(transaction=txn)
+            snap = await _read(ref, transaction=txn)
             heads[key] = (_int_field(snap, "head"), snap.exists)
         # All reads are done; writes from here on.
         next_seq = {key: head for key, (head, _) in heads.items()}
@@ -898,7 +965,7 @@ class FirestoreStore:
         at its limit."""
         counts = []
         for quota in quotas:
-            snap = await self._counter(team, quota.key).get(transaction=txn)
+            snap = await _read(self._counter(team, quota.key), transaction=txn)
             count = _int_field(snap, "count")
             if count >= quota.limit:
                 raise QuotaExceeded(quota)
@@ -960,7 +1027,7 @@ class FirestoreStore:
         self, team: str, member: str, stream: str, now: datetime, min_interval: timedelta
     ) -> None:
         ref = self._member(team, member)
-        snap = await ref.get(field_paths=[f"presence.{stream}.last_seen", "last_seen"])
+        snap = await _read(ref, field_paths=[f"presence.{stream}.last_seen", "last_seen"])
         doc = (snap.to_dict() or {}) if snap.exists else {}
         entry = (doc.get("presence") or {}).get(stream) or {}
         last = _dt(entry.get("last_seen")) if isinstance(entry, dict) else None
@@ -980,7 +1047,7 @@ class FirestoreStore:
     async def get_idempotency(
         self, team: str, key_id: str, now: datetime
     ) -> IdempotencyRecord | None:
-        snap = await self._idem(team, key_id).get()
+        snap = await _read(self._idem(team, key_id))
         if not snap.exists:
             return None
         record = _idem_from_doc(snap.to_dict() or {})
@@ -999,7 +1066,7 @@ class FirestoreStore:
     ) -> CreateOutcome:
         async def body(txn: AsyncTransaction) -> CreateOutcome:
             idem_ref = self._idem(team, key_id)
-            snap = await idem_ref.get(transaction=txn)
+            snap = await _read(idem_ref, transaction=txn)
             if snap.exists:
                 existing = _idem_from_doc(snap.to_dict() or {})
                 if existing.expire_at > now:
@@ -1017,7 +1084,7 @@ class FirestoreStore:
         return await self._run(body)
 
     async def get_request(self, team: str, request_id: str) -> RequestDoc | None:
-        snap = await self._request(team, request_id).get()
+        snap = await _read(self._request(team, request_id))
         if not snap.exists:
             return None
         return _request_from_doc(snap.to_dict() or {})
@@ -1029,7 +1096,7 @@ class FirestoreStore:
     async def mutate_request[T](self, team: str, request_id: str, fn: MutateFn[T]) -> T:
         async def body(txn: AsyncTransaction) -> T:
             ref = self._request(team, request_id)
-            snap = await ref.get(transaction=txn)
+            snap = await _read(ref, transaction=txn)
             current = _request_from_doc(snap.to_dict() or {}) if snap.exists else None
             previous = current.updated_at if current is not None else None
             mutation = fn(current)
@@ -1145,7 +1212,7 @@ class FirestoreStore:
         advance: bool = True,
     ) -> StreamPage:
         ref = self._stream(team, member, stream)
-        snap = await ref.get()
+        snap = await _read(ref)
         head = _int_field(snap, "head")
         cursor = _int_field(snap, "cursor")
         out: list[Envelope] = []
@@ -1188,7 +1255,7 @@ class FirestoreStore:
         the deliveries it passes (M2-SPEC §3.2)."""
 
         async def body(txn: AsyncTransaction) -> int:
-            snap = await ref.get(transaction=txn)
+            snap = await _read(ref, transaction=txn)
             current = _int_field(snap, "cursor")
             if to > current:
                 await self._advance(txn, team, ref, current, to, now)
@@ -1231,7 +1298,7 @@ class FirestoreStore:
     ) -> int:
         async def body(txn: AsyncTransaction) -> int:
             ref = self._stream(team, member, stream)
-            snap = await ref.get(transaction=txn)
+            snap = await _read(ref, transaction=txn)
             head = _int_field(snap, "head")
             cursor = _int_field(snap, "cursor")
             if acked_seq > head:
@@ -1271,25 +1338,17 @@ class FirestoreStore:
         return [_audit_from_doc(snap.to_dict() or {}) async for snap in query.stream()]
 
     async def count_quota(self, team: str, quota: Quota) -> bool:
-        async def body(txn: AsyncTransaction) -> bool:
-            try:
-                counts = await self._read_quotas(txn, team, [quota])
-            except QuotaExceeded:
-                return False
-            self._write_quotas(txn, team, [quota], counts)
-            return True
-
-        return await self._run(body)
+        return await _increment(self._counter(team, quota.key), quota)
 
     # Roster -------------------------------------------------------------------------------
     async def roster_version(self, team: str) -> int:
-        snap = await self._team(team).get(field_paths=["roster_version"])
+        snap = await _read(self._team(team), field_paths=["roster_version"])
         return _int_field(snap, "roster_version")
 
     async def _read_roster(
         self, txn: AsyncTransaction, team: str
     ) -> tuple[RosterState, TeamRecord | None]:
-        snap = await self._team(team).get(transaction=txn)
+        snap = await _read(self._team(team), transaction=txn)
         entries = {
             doc.id: _roster_from_doc(doc.to_dict() or {})
             async for doc in self._roster_col(team).stream(transaction=txn)
@@ -1414,7 +1473,7 @@ class FirestoreStore:
 
     async def ensure_seed_team(self, team: str, name: str, now: datetime) -> TeamRecord:
         async def body(txn: AsyncTransaction) -> TeamRecord:
-            snap = await self._team(team).get(transaction=txn)
+            snap = await _read(self._team(team), transaction=txn)
             doc = (snap.to_dict() or {}) if snap.exists else {}
             record = _team_from_doc(team, doc)
             # M9-SPEC §7.1: a record the API created is never adopted, active or deleted.
@@ -1443,7 +1502,7 @@ class FirestoreStore:
         return await self._run(body)
 
     async def team_has_documents(self, team: str) -> bool:
-        snap = await self._team(team).get(field_paths=["roster_version"])
+        snap = await _read(self._team(team), field_paths=["roster_version"])
         return snap.exists or bool(await self._descendants(team, 1))
 
     async def create_team[T](
@@ -1455,7 +1514,7 @@ class FirestoreStore:
         sub_key: str | None = None,
     ) -> T:
         async def body(txn: AsyncTransaction) -> T:
-            snap = await self._team(team).get(transaction=txn)
+            snap = await _read(self._team(team), transaction=txn)
             current = _team_from_doc(team, snap.to_dict() or {}) if snap.exists else None
             keys = [email_sha256, *([sub_key] if sub_key else [])]
             creators = await self._read_accounts(txn, keys)
@@ -1471,7 +1530,7 @@ class FirestoreStore:
             others = await self._read_accounts(txn, [k for k in owner_keys if k not in keys])
             counts = []
             for quota in quotas:  # relay-wide counters; raising writes nothing
-                qsnap = await self._login_counter(quota.key).get(transaction=txn)
+                qsnap = await _read(self._login_counter(quota.key), transaction=txn)
                 count = _int_field(qsnap, "count")
                 if count >= quota.limit:
                     raise QuotaExceeded(quota)
@@ -1501,11 +1560,23 @@ class FirestoreStore:
                 txn.set(self._admin_audit_col().document(), _admin_audit_to_doc(entry))
             return creation.result
 
-        return await self._run(body)
+        # Every creation reads, then writes, the creator's account documents and the
+        # relay-wide counters. Concurrent creations by one account on this instance take
+        # their turn here rather than all holding read locks on those documents and waiting
+        # for each other's at commit (the emulator ends each such deadlock only by a
+        # 2-second lock timeout, so twelve at once could exhaust a transaction's attempts).
+        # Other instances' creations still meet in Firestore's own locking.
+        turns = [
+            f"accounts/{email_sha256}",
+            *([f"accounts/{sub_key}"] if sub_key else []),
+            *(f"login_limits/{quota.key}" for quota in quotas),
+        ]
+        async with self._turns.hold(turns):
+            return await self._run(body)
 
     async def delete_team[T](self, team: str, fn: TeamDeleteFn[T]) -> T:
         async def body(txn: AsyncTransaction) -> T:
-            snap = await self._team(team).get(transaction=txn)
+            snap = await _read(self._team(team), transaction=txn)
             current = _team_from_doc(team, snap.to_dict() or {}) if snap.exists else None
             keys = (
                 [k for k in (current.created_by_email_sha256, current.created_by_sub_sha256) if k]
@@ -1532,7 +1603,7 @@ class FirestoreStore:
         return await self._run(body)
 
     async def _still_deleted(self, txn: AsyncTransaction, team: str) -> bool:
-        snap = await self._team(team).get(transaction=txn)
+        snap = await _read(self._team(team), transaction=txn)
         return snap.exists and (snap.to_dict() or {}).get("status") == TEAM_DELETED
 
     async def _purge_roster(self, team: str) -> int | None:
@@ -1618,18 +1689,18 @@ class FirestoreStore:
 
     # Boundaries (M10-SPEC §1) -------------------------------------------------------------
     async def get_boundaries(self, team: str) -> TeamBoundaries | None:
-        snap = await self._boundaries(team).get()
+        snap = await _read(self._boundaries(team))
         return _boundaries_from_doc(snap.to_dict() or {}) if snap.exists else None
 
     async def set_boundaries[T](
         self, team: str, member: str, fn: BoundariesFn[T], quotas: Sequence[Quota] = ()
     ) -> T:
         async def body(txn: AsyncTransaction) -> T:
-            team_snap = await self._team(team).get(transaction=txn)
+            team_snap = await _read(self._team(team), transaction=txn)
             if team_snap.exists and (team_snap.to_dict() or {}).get("status") == TEAM_DELETED:
                 raise TeamGone(team)
-            snap = await self._boundaries(team).get(transaction=txn)
-            entry_snap = await self._roster_col(team).document(member).get(transaction=txn)
+            snap = await _read(self._boundaries(team), transaction=txn)
+            entry_snap = await _read(self._roster_col(team).document(member), transaction=txn)
             current = _boundaries_from_doc(snap.to_dict() or {}) if snap.exists else None
             actor = _roster_from_doc(entry_snap.to_dict() or {}) if entry_snap.exists else None
             change = fn(current, actor)
@@ -1646,7 +1717,7 @@ class FirestoreStore:
 
     # A member's acceptance and status (M11-SPEC §2, §3) -----------------------------------
     async def _read_live_team(self, txn: AsyncTransaction, team: str) -> None:
-        snap = await self._team(team).get(transaction=txn)
+        snap = await _read(self._team(team), transaction=txn)
         if snap.exists and (snap.to_dict() or {}).get("status") == TEAM_DELETED:
             raise TeamGone(team)
 
@@ -1664,9 +1735,9 @@ class FirestoreStore:
     ) -> T:
         async def body(txn: AsyncTransaction) -> T:
             await self._read_live_team(txn, team)
-            snap = await self._boundaries(team).get(transaction=txn)
-            accepted_snap = await self._acceptance(team, member).get(transaction=txn)
-            entry_snap = await self._roster_col(team).document(member).get(transaction=txn)
+            snap = await _read(self._boundaries(team), transaction=txn)
+            accepted_snap = await _read(self._acceptance(team, member), transaction=txn)
+            entry_snap = await _read(self._roster_col(team).document(member), transaction=txn)
             current = _boundaries_from_doc(snap.to_dict() or {}) if snap.exists else None
             accepted = (
                 _acceptance_from_doc(accepted_snap.to_dict() or {})
@@ -1706,9 +1777,9 @@ class FirestoreStore:
     async def set_member_status[T](self, team: str, member: str, fn: StatusFn[T]) -> T:
         async def body(txn: AsyncTransaction) -> T:
             await self._read_live_team(txn, team)
-            snap = await self._status(team, member).get(transaction=txn)
-            entry_snap = await self._roster_col(team).document(member).get(transaction=txn)
-            bounds_snap = await self._boundaries(team).get(transaction=txn)
+            snap = await _read(self._status(team, member), transaction=txn)
+            entry_snap = await _read(self._roster_col(team).document(member), transaction=txn)
+            bounds_snap = await _read(self._boundaries(team), transaction=txn)
             current = _status_from_doc(snap.to_dict() or {}) if snap.exists else None
             entry = _roster_from_doc(entry_snap.to_dict() or {}) if entry_snap.exists else None
             bounds = (
@@ -1725,7 +1796,7 @@ class FirestoreStore:
         return await self._run(body)
 
     async def get_account(self, email_sha256: str) -> AccountRecord | None:
-        snap = await self._account(email_sha256).get()
+        snap = await _read(self._account(email_sha256))
         return _account_from_doc(snap.id, snap.to_dict() or {}) if snap.exists else None
 
     async def append_admin_audit(self, entries: Sequence[AdminAuditEntry]) -> None:
@@ -1758,7 +1829,7 @@ class FirestoreStore:
         hit = next((found[t] for t in teams if t in found), None)
         if hit is not None or pointer is None or pointer in teams:
             return hit
-        snap = await self._credential(pointer, key).get()
+        snap = await _read(self._credential(pointer, key))
         return _credential_from_doc(snap.id, snap.to_dict() or {}) if snap.exists else None
 
     async def touch_credential(
@@ -1766,7 +1837,7 @@ class FirestoreStore:
     ) -> None:
         async def body(txn: AsyncTransaction) -> None:
             ref = self._credential(team, key)
-            snap = await ref.get(transaction=txn)
+            snap = await _read(ref, transaction=txn)
             if not snap.exists or (snap.to_dict() or {}).get("revoked"):
                 return
             txn.update(ref, {"last_used_at": last_used_at, "expire_at": expire_at})
@@ -1789,7 +1860,7 @@ class FirestoreStore:
     ) -> CredentialRecord | None:
         async def body(txn: AsyncTransaction) -> CredentialRecord | None:
             ref = self._credential(team, key)
-            snap = await ref.get(transaction=txn)
+            snap = await _read(ref, transaction=txn)
             if not snap.exists:
                 return None
             record = _credential_from_doc(key, snap.to_dict() or {})
@@ -1809,7 +1880,7 @@ class FirestoreStore:
     async def mutate_login[T](self, key: str, fn: LoginFn[T]) -> T:
         async def body(txn: AsyncTransaction) -> T:
             ref = self._login(key)
-            snap = await ref.get(transaction=txn)
+            snap = await _read(ref, transaction=txn)
             change = fn(_login_from_doc(key, snap.to_dict() or {}) if snap.exists else None)
             if change.login is not None:
                 if change.login.key != key:
@@ -1824,7 +1895,7 @@ class FirestoreStore:
     async def redeem_code[T](self, key: str, fn: RedeemFn[T], now: datetime) -> RedeemOutcome[T]:
         async def body(txn: AsyncTransaction) -> RedeemOutcome[T]:
             ref = self._code(key)
-            snap = await ref.get(transaction=txn)
+            snap = await _read(ref, transaction=txn)
             plan = fn(_code_from_doc(key, snap.to_dict() or {}) if snap.exists else None)
             if plan.credential is not None and await self._still_deleted(txn, plan.credential.team):
                 raise TeamGone(plan.credential.team)  # M9-SPEC §1: before any write
@@ -1845,7 +1916,7 @@ class FirestoreStore:
                 ]
                 over = credentials_over_cap(existing, now, MAX_LIVE_CREDENTIALS - 1)
             if plan.revoke is not None:
-                minted = await self._credential(*plan.revoke).get(transaction=txn)
+                minted = await _read(self._credential(*plan.revoke), transaction=txn)
                 if minted.exists:
                     record = _credential_from_doc(minted.id, minted.to_dict() or {})
                     reused = record if record.live(now) else None
@@ -1875,13 +1946,4 @@ class FirestoreStore:
         return await self._run(body)
 
     async def count_login_quota(self, quota: Quota) -> bool:
-        async def body(txn: AsyncTransaction) -> bool:
-            ref = self._login_counter(quota.key)
-            snap = await ref.get(transaction=txn)
-            count = _int_field(snap, "count")
-            if count >= quota.limit:
-                return False
-            txn.set(ref, {"count": count + 1, "expire_at": quota.expire_at})
-            return True
-
-        return await self._run(body)
+        return await _increment(self._login_counter(quota.key), quota)
