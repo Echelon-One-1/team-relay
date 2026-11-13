@@ -26114,9 +26114,11 @@ function openerFor(platform, env = process.env) {
 }
 function openInBrowser(url, opts) {
   const what = opts.what ?? "the URL above";
+  const told = (opened) => opts.onResult?.(opened);
   const opener = opts.opener ?? openerFor(opts.platform ?? process.platform);
   if (!opener) {
     opts.log(`no browser opener on this platform; open ${what} yourself`);
+    told(false);
     return null;
   }
   let dir;
@@ -26125,6 +26127,7 @@ function openInBrowser(url, opts) {
     chmodSync2(dir, 448);
   } catch {
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   const cleanup = () => rmSync2(dir, { recursive: true, force: true });
@@ -26134,6 +26137,7 @@ function openInBrowser(url, opts) {
   } catch {
     cleanup();
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   process.once("exit", cleanup);
@@ -26143,6 +26147,7 @@ function openInBrowser(url, opts) {
   }, opts.deleteAfterMs ?? REDIRECT_TTL_MS).unref();
   (opts.run ?? defaultRun)(opener, [file], (err) => {
     if (err) opts.log(`could not open a browser (${opener}); open ${what} yourself`);
+    told(!err);
   });
   return file;
 }
@@ -26200,6 +26205,7 @@ function respond(res, status, body) {
   res.end(body);
 }
 var SUPERSEDED = "the sign-in was replaced by a newer one";
+var SIGN_IN_URL_RULE = "sign_in_url is for the user of this session only: show it to them once, exactly as it is, as plain text on a line of its own (not as a markdown link), to open themselves if no browser tab opened. Never repeat it to anyone else, never put it in a message to a teammate or in any tool call, and never open or fetch it yourself: whoever finishes the sign-in at that link decides who this computer is signed in as.";
 var LoginError = class extends Error {
   constructor(message) {
     super(message);
@@ -26417,12 +26423,20 @@ async function startLogin(opts) {
   const url = start.toString();
   timer = setTimeout(() => fail2("the sign-in timed out after 5 minutes; run /team-relay:login again"), opts.timeoutMs ?? LOGIN_TIMEOUT_MS);
   timer.unref?.();
+  let told;
+  const opened = new Promise((resolve) => told = resolve);
   try {
-    (opts.open ?? ((u) => void openInBrowser(u, { log: log2, title: "Team relay sign-in", what: "the sign-in link" })))(url);
+    if (opts.open) {
+      opts.open(url);
+      told(true);
+    } else {
+      openInBrowser(url, { log: log2, title: "Team relay sign-in", what: "the sign-in link", onResult: told });
+    }
   } catch {
     log2("could not open a browser; open the sign-in link yourself");
+    told(false);
   }
-  return { url, port, done, cancel: () => fail2(SUPERSEDED) };
+  return { url, port, done, opened, cancel: () => fail2(SUPERSEDED) };
 }
 
 // src/channel.ts
@@ -38798,12 +38812,12 @@ async function foldersTool(args, deps) {
 
 // src/setup-page.ts
 import { randomBytes as randomBytes14 } from "node:crypto";
-import { fileURLToPath as fileURLToPath5 } from "node:url";
+import { fileURLToPath as fileURLToPath6 } from "node:url";
 
 // src/console-app.ts
 import { createHash as createHash6, randomUUID as randomUUID2, timingSafeEqual as timingSafeEqual5 } from "node:crypto";
 import { isIP } from "node:net";
-import { existsSync as existsSync3, readFileSync as readFileSync10, realpathSync as realpathSync3, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync11, realpathSync as realpathSync3, statSync as statSync6 } from "node:fs";
 import { createServer as createServer5 } from "node:http";
 import { extname as extname4, join as join17, sep as sep5 } from "node:path";
 
@@ -39074,8 +39088,7 @@ async function uninstallAgent(i) {
 
 // src/setup-steps.ts
 import { execFile as execFile10 } from "node:child_process";
-import { accessSync as accessSync3, constants as constants4, existsSync as existsSync2, statSync as statSync5 } from "node:fs";
-import { delimiter, isAbsolute as isAbsolute11, join as join16 } from "node:path";
+import { existsSync as existsSync2 } from "node:fs";
 
 // src/drive-cli.ts
 init_credentials();
@@ -39440,6 +39453,120 @@ if (process.argv[1] && /drive-cli\.[jt]s$/.test(process.argv[1])) {
   );
 }
 
+// src/locate.ts
+import { execFileSync } from "node:child_process";
+import { accessSync as accessSync3, constants as constants4, readFileSync as readFileSync10, readdirSync as readdirSync2, statSync as statSync5 } from "node:fs";
+import { delimiter, isAbsolute as isAbsolute11, join as join16 } from "node:path";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
+function executableFile(path) {
+  try {
+    if (!statSync5(path).isFile()) return false;
+    accessSync3(path, constants4.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+var DESKTOP_CLAUDE_DIR = ["Library", "Application Support", "Claude", "claude-code"];
+var DESKTOP_CLAUDE_EXE = ["claude.app", "Contents", "MacOS", "claude"];
+var DESKTOP_VERIFIED = ".verified";
+function versionOf(name) {
+  const m = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})$/.exec(name);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+function compareVersions(a, b) {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return 0;
+}
+function dirNames(dir) {
+  try {
+    return readdirSync2(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+function desktopClaude(home2) {
+  const root = join16(home2, ...DESKTOP_CLAUDE_DIR);
+  const versions = dirNames(root).map((name) => ({ name, v: versionOf(name) })).filter((x) => x.v !== null).sort((a, b) => compareVersions(b.v, a.v));
+  for (const { name } of versions) {
+    const builds = [];
+    for (const build of dirNames(join16(root, name))) {
+      const dir = join16(root, name, build);
+      let at;
+      try {
+        const st = statSync5(join16(dir, DESKTOP_VERIFIED));
+        if (!st.isFile()) continue;
+        at = st.mtimeMs;
+      } catch {
+        continue;
+      }
+      const exe = join16(dir, ...DESKTOP_CLAUDE_EXE);
+      if (executableFile(exe)) builds.push({ exe, at, build });
+    }
+    builds.sort((a, b) => b.at - a.at || (a.build < b.build ? 1 : a.build > b.build ? -1 : 0));
+    if (builds[0]) return builds[0].exe;
+  }
+  return null;
+}
+function findClaude(env) {
+  for (const dir of (env.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute11(dir)) continue;
+    const c = join16(dir, "claude");
+    if (executableFile(c)) return c;
+  }
+  const home2 = homeDir(env);
+  for (const c of [join16(home2, ".local", "bin", "claude"), join16(home2, ".claude", "local", "claude")]) {
+    if (executableFile(c)) return c;
+  }
+  return desktopClaude(home2);
+}
+var NODE_PINS_FILE = fileURLToPath5(new URL("../bin/node-pins.sh", import.meta.url));
+function pinnedNodeVersion(file = NODE_PINS_FILE) {
+  let text;
+  try {
+    text = readFileSync10(file, "utf8");
+  } catch {
+    return null;
+  }
+  const found = [...text.matchAll(/^NODE_VERSION='(v\d{1,9}\.\d{1,9}\.\d{1,9})'$/gm)];
+  return found.length === 1 ? found[0][1] : null;
+}
+function nodeArch(arch) {
+  return arch === "arm64" ? "arm64" : arch === "x64" ? "x64" : null;
+}
+function pinnedNodePath(home2, version2, arch) {
+  return join16(home2, ".local", "share", "team-relay", `node-${version2}-darwin-${arch}`, "bin", "node");
+}
+var realNodeVersion = (path) => {
+  try {
+    return execFileSync(path, ["--version"], { encoding: "utf8", timeout: 1e4, stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return null;
+  }
+};
+function newEnoughNode(version2) {
+  const m = /^v(\d{1,9})\.(\d{1,9})\.\d{1,9}$/.exec(version2 ?? "");
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 22 || major === 22 && minor >= 12;
+}
+function answererNode(o) {
+  const version2 = o.version ?? realNodeVersion;
+  const pin = pinnedNodeVersion(o.pinsFile);
+  const arch = nodeArch(o.arch ?? process.arch);
+  if (pin && arch) {
+    const pinned = pinnedNodePath(homeDir(o.env), pin, arch);
+    if (executableFile(pinned) && newEnoughNode(version2(pinned))) return pinned;
+  }
+  for (const dir of (o.env.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute11(dir)) continue;
+    const n = join16(dir, "node");
+    if (executableFile(n) && newEnoughNode(version2(n))) return n;
+  }
+  return o.execPath ?? process.execPath;
+}
+
 // src/setup-steps.ts
 var CHOOSE_FOLDER_SCRIPT = [
   "on run argv",
@@ -39510,32 +39637,18 @@ async function installBackground(i) {
 function uninstallBackground(i) {
   return uninstallAgent({ home: homeDir(i.env), configDir: configDir(i.env), uid: i.uid, ...i.exec ? { exec: i.exec } : {} });
 }
+var BACKGROUND_MAC_ONLY = "Background answering works on a Mac only.";
+var BACKGROUND_NO_CLAUDE = "Background answering needs Claude Code, which was not found on this Mac.";
+function backgroundAvailability(platform, env, find = findClaude) {
+  if (platform !== "darwin") return { available: false, reason: BACKGROUND_MAC_ONLY };
+  if (!find(env)) return { available: false, reason: BACKGROUND_NO_CLAUDE };
+  return { available: true };
+}
 function backgroundInstalled(env) {
   return existsSync2(agentPlistPath(homeDir(env)));
 }
 function currentUid() {
   return typeof process.getuid === "function" ? process.getuid() : -1;
-}
-function executable(path) {
-  try {
-    if (!statSync5(path).isFile()) return false;
-    accessSync3(path, constants4.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function findClaude(env) {
-  for (const dir of (env.PATH ?? "").split(delimiter)) {
-    if (!isAbsolute11(dir)) continue;
-    const c = join16(dir, "claude");
-    if (executable(c)) return c;
-  }
-  const home2 = homeDir(env);
-  for (const c of [join16(home2, ".local", "bin", "claude"), join16(home2, ".claude", "local", "claude")]) {
-    if (executable(c)) return c;
-  }
-  return null;
 }
 
 // src/local-setup.ts
@@ -39583,7 +39696,7 @@ function createLocalSetup(d) {
         signed_in: d.signedIn,
         folders: shown(folders),
         chooser: d.chooser !== null,
-        background: { installed: d.background.installed() },
+        background: { installed: d.background.installed(), ...d.background.availability() },
         limits: { max_folders: MAX_FOLDERS }
       }
     };
@@ -39638,6 +39751,10 @@ function createLocalSetup(d) {
     const on = body?.on;
     if (typeof on !== "boolean") return bad("on must be true or false");
     if (d.platform !== "darwin") return { status: 409, body: { error: "mac_only", detail: "Background answering runs on macOS only." } };
+    if (on) {
+      const a = d.background.availability();
+      if (!a.available) return { status: 409, body: { error: "background_unavailable", detail: a.reason } };
+    }
     try {
       if (on) await d.background.install();
       else await d.background.uninstall();
@@ -40693,7 +40810,7 @@ function createConsoleServer(opts) {
     if (rel.includes("\0") || rel.includes("\\") || rel.split("/").some((seg) => seg === ".." || seg === ".")) {
       return send(res, 400, "bad path\n", "text/plain; charset=utf-8");
     }
-    if (rel === "/" || rel === "") return html(readFileSync10(index));
+    if (rel === "/" || rel === "") return html(readFileSync11(index));
     const candidate = join17(staticRoot, rel);
     let real = null;
     try {
@@ -40705,9 +40822,9 @@ function createConsoleServer(opts) {
     if (real && real.startsWith(staticRoot + sep5) && statSync6(real).isFile()) {
       const type = MIME[extname4(real).toLowerCase()] ?? "application/octet-stream";
       const cache = rel.startsWith("/assets/") ? `${hosted ? "private" : "public"}, max-age=31536000, immutable` : "no-cache";
-      return send(res, 200, readFileSync10(real), type, { "Cache-Control": cache }, head);
+      return send(res, 200, readFileSync11(real), type, { "Cache-Control": cache }, head);
     }
-    if (!extname4(rel)) return html(readFileSync10(index));
+    if (!extname4(rel)) return html(readFileSync11(index));
     return send(res, 404, "not found\n", "text/plain; charset=utf-8");
   }
   function pickerPage(req, res, url) {
@@ -40723,7 +40840,7 @@ function createConsoleServer(opts) {
       return notFound();
     }
     if (real !== join17(staticRoot, PICKER_FILE) || !statSync6(real).isFile()) return notFound();
-    const body = readFileSync10(real);
+    const body = readFileSync11(real);
     res.writeHead(200, { ...PICKER_HEADERS, "Content-Type": MIME[".html"], "Content-Length": String(body.length) });
     res.end(head ? void 0 : body);
   }
@@ -40820,6 +40937,8 @@ var SetupPages = class {
   }
   o;
   running = null;
+  /** Pages whose member pressed Done: they close shortly (or at stop()). */
+  finishing = /* @__PURE__ */ new Set();
   starting = null;
   schedule;
   platform;
@@ -40858,17 +40977,18 @@ var SetupPages = class {
       signedIn: { member: live.member, team: live.team, email: live.email },
       chooser: chooserAvailable(platform) ? osascriptChooser() : null,
       background: {
+        availability: () => backgroundAvailability(platform, env),
         installed: () => backgroundInstalled(env),
         install: async () => {
           const claude = findClaude(env);
           if (!claude) throw new AgentError("Claude Code was not found on this Mac, so it cannot answer in the background. Install Claude Code from claude.ai/download, then try again.");
           const { plugin, marketplace } = pluginRef(env);
-          await installBackground({ env, uid: uid3, node: this.o.node ?? process.execPath, claude, pluginKey: `${plugin}@${marketplace}`, ...launchctl, ...this.o.sleep ? { sleep: this.o.sleep } : {} });
+          await installBackground({ env, uid: uid3, node: this.o.node ?? answererNode({ env }), claude, pluginKey: `${plugin}@${marketplace}`, ...launchctl, ...this.o.sleep ? { sleep: this.o.sleep } : {} });
         },
         uninstall: () => uninstallBackground({ env, uid: uid3, ...launchctl })
       },
       onDone: () => {
-        if (running) this.schedule(() => void this.stopRunning(running), SETUP_DONE_STOP_MS);
+        if (running) this.finish(running);
       },
       log: log2
     };
@@ -40876,7 +40996,7 @@ var SetupPages = class {
     const app = createConsoleServer({
       backend: relayBackend(client),
       key,
-      staticDir: this.o.staticDir ?? fileURLToPath5(new URL("./console/", import.meta.url)),
+      staticDir: this.o.staticDir ?? fileURLToPath6(new URL("./console/", import.meta.url)),
       join: joinInfo(client.url, client.team, null),
       approvals: () => ({ pending: readApprovalsState(statePath(env))?.pending ?? 0 }),
       local,
@@ -40885,7 +41005,8 @@ var SetupPages = class {
     const port = await app.listen(0);
     const url = `http://127.0.0.1:${port}/join#k=${key}`;
     running = { app, url, member: live.member, team: live.team, cancelIdle: () => {
-    }, stopping: false };
+    }, cancelDone: () => {
+    }, stopping: false, closed: false };
     this.running = running;
     const r = running;
     app.server.on("request", () => this.touch(r));
@@ -40900,23 +41021,36 @@ var SetupPages = class {
   }
   /** A request: the idle stop is put off again. */
   touch(r) {
+    if (r.stopping) return;
     r.cancelIdle();
     r.cancelIdle = this.schedule(() => {
       this.o.log("setup page: stopped after 30 minutes without use");
       void this.stopRunning(r);
     }, SETUP_IDLE_MS);
   }
-  async stopRunning(r) {
+  /** Done: no longer the page to reopen; it closes after SETUP_DONE_STOP_MS (its last answer first). */
+  finish(r) {
     if (r.stopping) return;
     r.stopping = true;
     r.cancelIdle();
     if (this.running === r) this.running = null;
+    this.finishing.add(r);
+    r.cancelDone = this.schedule(() => void this.stopRunning(r), SETUP_DONE_STOP_MS);
+  }
+  async stopRunning(r) {
+    if (r.closed) return;
+    r.closed = true;
+    r.stopping = true;
+    r.cancelIdle();
+    r.cancelDone();
+    this.finishing.delete(r);
+    if (this.running === r) this.running = null;
     await r.app.close();
   }
-  /** Stops the page, if one runs. */
+  /** Stops the page, if one runs, and any still closing after Done. */
   async stop() {
-    const r = this.running;
-    if (r) await this.stopRunning(r);
+    const all = [...this.finishing, ...this.running ? [this.running] : []];
+    await Promise.all(all.map((r) => this.stopRunning(r)));
   }
 };
 
@@ -40927,14 +41061,28 @@ var SETUP_TOOL = {
   inputSchema: { type: "object", properties: {}, additionalProperties: false }
 };
 var SETUP_OPEN = "The setup page is open in your browser. Come back here when it says Done.";
+var SETUP_OPEN_SIGN_IN = "No browser tab could be opened for the sign-in. Show the user sign_in_url as the rule says; once they have signed in there, run /team-relay:setup again to open the setup page.";
 var SETUP_SIGN_IN_WAIT_MS = 5 * 60 * 1e3;
+var SETUP_CONNECT_WAIT_MS = 5e3;
+var realSleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
 async function setupTool(args, deps, progress = () => {
 }) {
   if (unknownKey(args, [])) return toolError("setup takes no arguments");
   let live = deps.live();
+  if (!live && deps.stored?.() === "present") {
+    const sleep2 = deps.sleep ?? realSleep2;
+    for (let waited = 0; !live && waited < SETUP_CONNECT_WAIT_MS; waited += 100) {
+      await sleep2(100);
+      live = deps.live();
+    }
+    if (!live) return toolError(`${deps.notConnected?.() ?? "Not connected yet."} Run /team-relay:setup again in a moment.`);
+  }
   if (!live) {
     progress("signing in: finish in the browser");
     const why = await deps.signIn(SETUP_SIGN_IN_WAIT_MS, progress);
+    if (why !== null && typeof why === "object") {
+      return toolJson({ status: "waiting_for_browser", sign_in_url: why.signInUrl, sign_in_url_rule: SIGN_IN_URL_RULE, message: SETUP_OPEN_SIGN_IN });
+    }
     if (why !== null) return toolError(`${why} Then run /team-relay:setup again.`);
     live = deps.live();
     if (!live) return toolError("The sign-in finished, but this session is not connected yet. Run /team-relay:setup again in a moment.");
@@ -41287,7 +41435,6 @@ async function streamLoop(server, client, me, stream, stopper, onPushed = () => 
     }
   }
 }
-var SIGN_IN_URL_RULE = "sign_in_url is for the user of this session only: show it to them once, exactly as it is, as plain text on a line of its own (not as a markdown link), to open themselves if no browser tab opened. Never repeat it to anyone else, never put it in a message to a teammate or in any tool call, and never open or fetch it yourself: whoever finishes the sign-in at that link decides who this computer is signed in as.";
 var LOGIN_WAIT_MS = 18e4;
 function loginWaitMs(env) {
   const v = Number(env.TEAM_RELAY_LOGIN_WAIT_SECONDS);
@@ -41331,6 +41478,8 @@ var AskerConnection = class {
   live = null;
   problem = null;
   refusedAt = void 0;
+  /** How the last attempt to connect ended (null: none yet). */
+  lastAttempt = null;
   lastLogged = "";
   stopper = new Stopper();
   wake = null;
@@ -41435,6 +41584,7 @@ var AskerConnection = class {
   /** One attempt; returns how long to wait before the next look. */
   async tryConnect(fp) {
     const attempt = await connectOnce(this.env);
+    this.lastAttempt = attempt.kind;
     switch (attempt.kind) {
       case "not_signed_in":
         this.problem = null;
@@ -41654,14 +41804,32 @@ var AskerConnection = class {
     return { client: this.live.client, member: this.live.me.member, team: this.live.me.team, email: email3 };
   }
   /**
+   * /team-relay:setup: whether this session has a sign-in to wait for. 'none': no stored sign-in
+   * (or none the connection could use); 'refused': the relay refused the stored one; 'present':
+   * one is stored and the connection is (re)trying it.
+   */
+  storedSignIn() {
+    const fp = credentialFingerprint(this.path);
+    if (fp === null) return "none";
+    if (this.refusedAt !== void 0 && this.refusedAt === fp) return "refused";
+    if (this.lastAttempt === "not_signed_in") return "none";
+    return "present";
+  }
+  /**
    * /team-relay:setup: the same sign-in as login, waited for as login_wait waits (at most
-   * `waitMs`), until this session is connected as the new member. Null once connected, else why not.
+   * `waitMs`), until this session is connected as the new member. Null once connected; the
+   * sign-in URL when no browser could be opened on it (the user opens it themselves); else why not.
    */
   async signInAndWait(waitMs, progress) {
     const started = await this.login({});
     if (started.isError) return started.content.map((c) => c.text).join("");
+    const flow = this.pending;
     const deadline = Date.now() + waitMs;
     const tick = setInterval(() => progress("waiting for the sign-in in the browser"), 15e3);
+    const noBrowser = /* @__PURE__ */ Symbol("no browser");
+    const unopened = flow ? flow.opened.then((ok) => ok ? new Promise(() => {
+    }) : noBrowser) : new Promise(() => {
+    });
     try {
       for (; ; ) {
         const current = this.outcome;
@@ -41670,13 +41838,19 @@ var AskerConnection = class {
         const timedOut = /* @__PURE__ */ Symbol("timed out");
         const result = await Promise.race([
           current,
+          unopened,
           new Promise((resolve) => {
             timer = setTimeout(() => resolve(timedOut), Math.max(0, deadline - Date.now()));
           })
         ]).finally(() => clearTimeout(timer));
+        if (result === noBrowser) return { signInUrl: flow.url };
         if (result === timedOut) return `The sign-in did not finish within ${Math.round(waitMs / 6e4)} minutes.`;
         if (!result.ok) {
-          if (result.superseded && this.outcome && this.outcome !== current) continue;
+          if (result.superseded) {
+            const until2 = Math.min(deadline, Date.now() + 5e3);
+            while (Date.now() < until2 && (!this.outcome || this.outcome === current)) await new Promise((r) => setTimeout(r, 50));
+            if (this.outcome && this.outcome !== current) continue;
+          }
           return `The sign-in did not complete: ${result.why}.`;
         }
         const until = Math.min(deadline, Date.now() + 5e3);
@@ -41874,7 +42048,17 @@ async function main() {
             void extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: ++n, message } }).catch(() => {
             });
           };
-          return await setupTool(args, { live: () => connection.setupLive(), signIn: (ms, p) => connection.signInAndWait(ms, p), pages: setupPages }, progress);
+          return await setupTool(
+            args,
+            {
+              live: () => connection.setupLive(),
+              stored: () => connection.storedSignIn(),
+              notConnected: () => connection.notConnected(),
+              signIn: (ms, p) => connection.signInAndWait(ms, p),
+              pages: setupPages
+            },
+            progress
+          );
         }
         if (name === "folders") {
           return await foldersTool(args, {

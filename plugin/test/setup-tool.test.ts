@@ -4,13 +4,18 @@
 // the same page; the page stops after Done or 30 minutes without a request, and with the server.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RelayClient, staticTokenProvider } from '../src/relay-client.js';
 import { SETUP_IDLE_MS, SetupPages, type Schedule, type SetupLive } from '../src/setup-page.js';
-import { SETUP_OPEN, SETUP_SIGN_IN_WAIT_MS, setupTool } from '../src/setup-tool.js';
+import { SETUP_CONNECT_WAIT_MS, SETUP_OPEN, SETUP_OPEN_SIGN_IN, SETUP_SIGN_IN_WAIT_MS, setupTool } from '../src/setup-tool.js';
+import { SIGN_IN_URL_RULE } from '../src/login.js';
+import { redirectHtml } from '../src/console-open.js';
+import { writeCredential } from '../src/credentials.js';
 import { FakeRelay, TOKEN_OF } from './helpers/fake-relay.js';
 import { FIXTURES, PLUGIN_ROOT, spawnServer, textOf, waitFor, type Spawned } from './helpers/mcp.js';
 
@@ -84,6 +89,80 @@ describe('setupTool', () => {
     const r = await setupTool({}, { live: () => null, signIn: async () => 'The sign-in did not finish within 5 minutes.', pages: { open: async (l) => (opened.push(l), { url: 'u', reused: false }) } });
     expect(r.isError).toBe(true);
     expect(textOf(r)).toBe('The sign-in did not finish within 5 minutes. Then run /team-relay:setup again.');
+    expect(opened).toEqual([]);
+  });
+
+  it('signed in but not connected yet: waits up to 5 s for the connection, never a new Google sign-in', async () => {
+    let now: SetupLive | null = null;
+    let signIns = 0;
+    const slept: number[] = [];
+    const opened: SetupLive[] = [];
+    const r = await setupTool({}, {
+      live: () => now,
+      stored: () => 'present',
+      notConnected: () => 'Not connected: x',
+      signIn: async () => (signIns++, null),
+      pages: { open: async (l) => (opened.push(l), { url: 'u', reused: false }) },
+      sleep: async (ms) => {
+        slept.push(ms);
+        if (slept.length === 3) now = live;
+      },
+    });
+    expect(JSON.parse(textOf(r))).toEqual({ message: SETUP_OPEN });
+    expect(slept).toEqual([100, 100, 100]);
+    expect(opened).toEqual([live]);
+    expect(signIns).toBe(0);
+  });
+
+  it('signed in but still not connected after 5 s: says why (as whoami does) and signs nobody in', async () => {
+    let signIns = 0;
+    let waited = 0;
+    const r = await setupTool({}, {
+      live: () => null,
+      stored: () => 'present',
+      notConnected: () => 'Not connected: the relay did not answer (offline)',
+      signIn: async () => (signIns++, null),
+      pages: { open: async () => ({ url: 'u', reused: false }) },
+      sleep: async (ms) => void (waited += ms),
+    });
+    expect(SETUP_CONNECT_WAIT_MS).toBe(5000);
+    expect(waited).toBe(5000);
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toBe('Not connected: the relay did not answer (offline) Run /team-relay:setup again in a moment.');
+    expect(signIns).toBe(0);
+  });
+
+  it('a stored sign-in the relay refused, or none: signs in again at once', async () => {
+    for (const stored of ['refused', 'none'] as const) {
+      let now: SetupLive | null = null;
+      let slept = 0;
+      const r = await setupTool({}, {
+        live: () => now,
+        stored: () => stored,
+        notConnected: () => 'x',
+        signIn: async () => ((now = live), null),
+        pages: { open: async () => ({ url: 'u', reused: false }) },
+        sleep: async () => void slept++,
+      });
+      expect(JSON.parse(textOf(r))).toEqual({ message: SETUP_OPEN });
+      expect(slept).toBe(0);
+    }
+  });
+
+  it('no browser could be opened on the sign-in: returns the sign-in URL under the login tool\'s rule', async () => {
+    const opened: SetupLive[] = [];
+    const r = await setupTool({}, {
+      live: () => null,
+      signIn: async () => ({ signInUrl: 'https://relay.example.com/v1/login/start?port=1' }),
+      pages: { open: async (l) => (opened.push(l), { url: 'u', reused: false }) },
+    });
+    expect(r.isError).toBeFalsy();
+    expect(JSON.parse(textOf(r))).toEqual({
+      status: 'waiting_for_browser',
+      sign_in_url: 'https://relay.example.com/v1/login/start?port=1',
+      sign_in_url_rule: SIGN_IN_URL_RULE,
+      message: SETUP_OPEN_SIGN_IN,
+    });
     expect(opened).toEqual([]);
   });
 
@@ -239,5 +318,72 @@ describe('the setup tool in the relay server', () => {
       if (!stopped) await new Promise((r) => setTimeout(r, 20));
     }
     expect(stopped).toBe(true);
+  });
+
+  const entries = () => (existsSync(browserLog) ? readFileSync(browserLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { url: string }) : []);
+  const server = async (extra: Record<string, string> = {}) => {
+    const s = await spawnServer('channel.js', {
+      RELAY_ROLE: 'asker',
+      RELAY_AUTH: '',
+      RELAY_URL: relay.url,
+      XDG_CONFIG_HOME: xdg,
+      TEAM_RELAY_OPEN_COMMAND: join(FIXTURES, 'fake-browser.mjs'),
+      FAKE_BROWSER_LOG: browserLog,
+      ...extra,
+    });
+    open.push(s);
+    return s;
+  };
+
+  it('no browser opens on the sign-in: the result carries sign_in_url under the login rule, at once', async () => {
+    const s = await server({ TEAM_RELAY_OPEN_COMMAND: '/usr/bin/false' });
+    const started = Date.now();
+    const r = await s.client.callTool({ name: 'setup', arguments: {} });
+    expect(r.isError, textOf(r)).toBeFalsy();
+    const out = JSON.parse(textOf(r));
+    expect(out).toMatchObject({ status: 'waiting_for_browser', sign_in_url_rule: SIGN_IN_URL_RULE, message: SETUP_OPEN_SIGN_IN });
+    expect(out.sign_in_url.startsWith(`${relay.url}/v1/login/start?port=`)).toBe(true);
+    // Not the 5 minutes of the sign-in wait.
+    expect(Date.now() - started).toBeLessThan(60_000);
+    // The sign-in keeps waiting: finishing it at that URL signs this session in.
+    const dir = mkdtempSync(join(xdg, 'open-'));
+    writeFileSync(join(dir, 'console.html'), redirectHtml(out.sign_in_url));
+    await new Promise<void>((resolve, reject) =>
+      execFile(process.execPath, [join(FIXTURES, 'fake-browser.mjs'), join(dir, 'console.html')], { env: { ...process.env, FAKE_BROWSER_LOG: browserLog } }, (err) => (err ? reject(err) : resolve())),
+    );
+    await waitFor(async () => JSON.parse(textOf(await s.client.callTool({ name: 'whoami', arguments: {} }))).connected === true || null, 10_000, 'connected');
+  });
+
+  it('a sign-in stored but the relay not answering yet: says so, and starts no new Google sign-in', async () => {
+    const closed = await new Promise<number>((resolve) => {
+      const srv = createServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const port = (srv.address() as { port: number }).port;
+        srv.close(() => resolve(port));
+      });
+    });
+    const down = `http://127.0.0.1:${closed}`;
+    writeCredential(join(xdg, 'team-relay', 'credentials.json'), { relay_url: down, team: 'demo', member: 'bob', credential: relay.mintCredential('bob'), expires_at: null });
+    const s = await server({ RELAY_URL: down });
+    await waitFor(async () => (/did not answer/.test(textOf(await s.client.callTool({ name: 'whoami', arguments: {} }))) ? true : null), 20_000, 'a first attempt');
+    const r = await s.client.callTool({ name: 'setup', arguments: {} });
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toMatch(/^Not connected: the relay did not answer \(.*\) Run \/team-relay:setup again in a moment\.$/);
+    expect(entries()).toEqual([]);
+  });
+
+  it('a sign-in replaced by a newer one while setup waits: setup waits for the newer one', async () => {
+    const s = await server({ FAKE_BROWSER_MODE: 'ignore' });
+    const setup = s.client.callTool({ name: 'setup', arguments: {} });
+    await waitFor(() => (entries().length === 1 ? true : null), 10_000, 'the first sign-in to open');
+    const login = JSON.parse(textOf(await s.client.callTool({ name: 'login', arguments: {} })));
+    const dir = mkdtempSync(join(xdg, 'open-'));
+    writeFileSync(join(dir, 'console.html'), redirectHtml(login.sign_in_url));
+    await new Promise<void>((resolve, reject) =>
+      execFile(process.execPath, [join(FIXTURES, 'fake-browser.mjs'), join(dir, 'console.html')], { env: { ...process.env, FAKE_BROWSER_LOG: browserLog } }, (err) => (err ? reject(err) : resolve())),
+    );
+    const r = await setup;
+    expect(r.isError, textOf(r)).toBeFalsy();
+    expect(JSON.parse(textOf(r))).toEqual({ message: SETUP_OPEN });
   });
 });

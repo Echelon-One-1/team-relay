@@ -4,8 +4,13 @@
 // redirect file (console-open.ts: the key is in no process's arguments).
 //
 // At most one runs: a second /team-relay:setup while it runs opens the same page again. It stops
-// 3 s after the member presses Done, after 30 minutes without a request, or when the MCP server
-// exits (stop()).
+// 3 s after the member presses Done (from that moment it is no longer the page a new
+// /team-relay:setup opens: that one gets a fresh server), after 30 minutes without a request, or
+// when the MCP server exits (stop()).
+//
+// The background answerer it installs runs the pinned private node when it is there, else a node
+// on PATH by its PATH name (locate.ts answererNode), never this process's resolved node, which a
+// Homebrew or version-manager upgrade removes.
 
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +20,8 @@ import { openInBrowser, type OpenOptions } from './console-open.js';
 import { pluginRef } from './channel-mode.js';
 import { createLocalSetup, type LocalSetupDeps } from './local-setup.js';
 import type { RelayClient } from './relay-client.js';
-import { backgroundInstalled, chooserAvailable, currentUid, findClaude, installBackground, osascriptChooser, uninstallBackground } from './setup-steps.js';
+import { answererNode } from './locate.js';
+import { backgroundAvailability, backgroundInstalled, chooserAvailable, currentUid, findClaude, installBackground, osascriptChooser, uninstallBackground } from './setup-steps.js';
 import { AgentError, type Exec } from './daemon-launch.js';
 
 /** The page stops after this long without a request. */
@@ -55,10 +61,23 @@ export type SetupPagesOptions = {
   localDeps?: (live: SetupLive) => Partial<LocalSetupDeps>;
 };
 
-type Running = { app: ConsoleServer; url: string; member: string; team: string; cancelIdle: () => void; stopping: boolean };
+type Running = {
+  app: ConsoleServer;
+  url: string;
+  member: string;
+  team: string;
+  cancelIdle: () => void;
+  /** Cancels the stop scheduled at Done. */
+  cancelDone: () => void;
+  /** Done was pressed or a stop began: never reused. */
+  stopping: boolean;
+  closed: boolean;
+};
 
 export class SetupPages {
   private running: Running | null = null;
+  /** Pages whose member pressed Done: they close shortly (or at stop()). */
+  private readonly finishing = new Set<Running>();
   private starting: Promise<{ url: string; reused: boolean }> | null = null;
   private readonly schedule: Schedule;
   private readonly platform: NodeJS.Platform;
@@ -105,17 +124,18 @@ export class SetupPages {
       signedIn: { member: live.member, team: live.team, email: live.email },
       chooser: chooserAvailable(platform) ? osascriptChooser() : null,
       background: {
+        availability: () => backgroundAvailability(platform, env),
         installed: () => backgroundInstalled(env),
         install: async () => {
           const claude = findClaude(env);
           if (!claude) throw new AgentError('Claude Code was not found on this Mac, so it cannot answer in the background. Install Claude Code from claude.ai/download, then try again.');
           const { plugin, marketplace } = pluginRef(env);
-          await installBackground({ env, uid, node: this.o.node ?? process.execPath, claude, pluginKey: `${plugin}@${marketplace}`, ...launchctl, ...(this.o.sleep ? { sleep: this.o.sleep } : {}) });
+          await installBackground({ env, uid, node: this.o.node ?? answererNode({ env }), claude, pluginKey: `${plugin}@${marketplace}`, ...launchctl, ...(this.o.sleep ? { sleep: this.o.sleep } : {}) });
         },
         uninstall: () => uninstallBackground({ env, uid, ...launchctl }),
       },
       onDone: () => {
-        if (running) this.schedule(() => void this.stopRunning(running!), SETUP_DONE_STOP_MS);
+        if (running) this.finish(running);
       },
       log,
     };
@@ -131,7 +151,7 @@ export class SetupPages {
     });
     const port = await app.listen(0);
     const url = `http://127.0.0.1:${port}/join#k=${key}`;
-    running = { app, url, member: live.member, team: live.team, cancelIdle: () => {}, stopping: false };
+    running = { app, url, member: live.member, team: live.team, cancelIdle: () => {}, cancelDone: () => {}, stopping: false, closed: false };
     this.running = running;
     const r = running;
     app.server.on('request', () => this.touch(r));
@@ -148,6 +168,7 @@ export class SetupPages {
 
   /** A request: the idle stop is put off again. */
   private touch(r: Running): void {
+    if (r.stopping) return;
     r.cancelIdle();
     r.cancelIdle = this.schedule(() => {
       this.o.log('setup page: stopped after 30 minutes without use');
@@ -155,17 +176,30 @@ export class SetupPages {
     }, SETUP_IDLE_MS);
   }
 
-  private async stopRunning(r: Running): Promise<void> {
+  /** Done: no longer the page to reopen; it closes after SETUP_DONE_STOP_MS (its last answer first). */
+  private finish(r: Running): void {
     if (r.stopping) return;
     r.stopping = true;
     r.cancelIdle();
     if (this.running === r) this.running = null;
+    this.finishing.add(r);
+    r.cancelDone = this.schedule(() => void this.stopRunning(r), SETUP_DONE_STOP_MS);
+  }
+
+  private async stopRunning(r: Running): Promise<void> {
+    if (r.closed) return;
+    r.closed = true;
+    r.stopping = true;
+    r.cancelIdle();
+    r.cancelDone();
+    this.finishing.delete(r);
+    if (this.running === r) this.running = null;
     await r.app.close();
   }
 
-  /** Stops the page, if one runs. */
+  /** Stops the page, if one runs, and any still closing after Done. */
   async stop(): Promise<void> {
-    const r = this.running;
-    if (r) await this.stopRunning(r);
+    const all = [...this.finishing, ...(this.running ? [this.running] : [])];
+    await Promise.all(all.map((r) => this.stopRunning(r)));
   }
 }

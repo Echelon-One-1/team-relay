@@ -15666,9 +15666,11 @@ function openerFor(platform, env = process.env) {
 }
 function openInBrowser(url, opts) {
   const what = opts.what ?? "the URL above";
+  const told = (opened) => opts.onResult?.(opened);
   const opener = opts.opener ?? openerFor(opts.platform ?? process.platform);
   if (!opener) {
     opts.log(`no browser opener on this platform; open ${what} yourself`);
+    told(false);
     return null;
   }
   let dir;
@@ -15677,6 +15679,7 @@ function openInBrowser(url, opts) {
     chmodSync2(dir, 448);
   } catch {
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   const cleanup = () => rmSync2(dir, { recursive: true, force: true });
@@ -15686,6 +15689,7 @@ function openInBrowser(url, opts) {
   } catch {
     cleanup();
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   process.once("exit", cleanup);
@@ -15695,6 +15699,7 @@ function openInBrowser(url, opts) {
   }, opts.deleteAfterMs ?? REDIRECT_TTL_MS).unref();
   (opts.run ?? defaultRun)(opener, [file], (err) => {
     if (err) opts.log(`could not open a browser (${opener}); open ${what} yourself`);
+    told(!err);
   });
   return file;
 }

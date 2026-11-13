@@ -20,7 +20,9 @@ import { FullPage } from './states'
 // server (plugin/src/setup-page.ts) with its own routes (/api/local/*). Each step shows whether it
 // is done, still to do, or not needed: signed in, accept what the team shares, the folders the
 // member's Claude answers from (added only with the Mac's folder chooser), background answering
-// (on unless they turn it off), then Done. The hosted console never calls /api/local, and a local
+// (on unless they turn it off; off and disabled, with the reason, where it cannot run), then Done.
+// Done never fails because of background answering: when turning it on fails at Done, the error
+// shows and "Finish without it" finishes anyway. The hosted console never calls /api/local, and a local
 // console without those routes (404) shows the usual Setup page.
 
 export const localSetupKey = ['local-setup'] as const
@@ -29,6 +31,7 @@ export const FOLDERS_HINT =
   'Add every folder you use for your team: your copies of its GitHub projects, your Google Drive for desktop folders and shared documents.'
 export const BACKGROUND_TEXT = "Answers teammates' questions from your folders even when Claude is closed."
 export const FINISHED_TEXT = 'All set. Go back to Claude.'
+export const BACKGROUND_FAILED_TEXT = 'Background answering could not be turned on. Press Done to try again, or finish without it.'
 export const NO_CHOOSER_TEXT = 'This computer has no folder chooser. In Claude Code, type /team-relay:folders to add your folders.'
 
 // -- Done: the page's last word, once its server has stopped ------------------------------------------
@@ -152,13 +155,16 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
   const [removing, setRemoving] = useState<string | null>(null)
   const [choice, setChoice] = useState<LocalChoice | null>(null)
   const [folderError, setFolderError] = useState<string | null>(null)
-  // On by default: applied at Done, and at once whenever the member flips it.
-  const [background, setBackground] = useState(true)
+  // On by default where it can run: applied at Done, and at once whenever the member flips it.
+  const available = setup.background.available
+  const [background, setBackground] = useState(available)
   const [installed, setInstalled] = useState(setup.background.installed)
   const [applying, setApplying] = useState(false)
   const [backgroundError, setBackgroundError] = useState<string | null>(null)
   const [finishing, setFinishing] = useState(false)
   const [doneError, setDoneError] = useState<string | null>(null)
+  // Turning background answering on failed at Done: offer to finish without it.
+  const [offerSkip, setOfferSkip] = useState(false)
   const switchId = useId()
   const hintId = useId()
 
@@ -220,11 +226,15 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
     void apply(on)
   }
 
-  const done = async () => {
+  const done = async (skipBackground = false) => {
     setDoneError(null)
     setFinishing(true)
     try {
-      if (background !== installed && !(await apply(background))) return
+      if (!skipBackground && available && background !== installed && !(await apply(background))) {
+        setOfferSkip(true)
+        setDoneError(BACKGROUND_FAILED_TEXT)
+        return
+      }
       await api.localDone()
       markSetupFinished()
     } catch (err) {
@@ -308,9 +318,15 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
             {folderError ? <Note tone="bad">{folderError}</Note> : null}
           </Step>
 
-          <Step n={4} title="Answer in the background" state={installed ? 'done' : background ? 'todo' : 'not_needed'}>
+          <Step n={4} title="Answer in the background" state={installed ? 'done' : background && available ? 'todo' : 'not_needed'}>
             <div className="flex items-center gap-3">
-              <Switch id={switchId} checked={background} onCheckedChange={toggle} disabled={applying || finishing} aria-describedby={hintId} />
+              <Switch
+                id={switchId}
+                checked={available && background}
+                onCheckedChange={toggle}
+                disabled={!available || applying || finishing}
+                aria-describedby={hintId}
+              />
               <label htmlFor={switchId} className="text-[12.5px] font-medium">
                 Background answering
               </label>
@@ -319,6 +335,7 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
             <p id={hintId} className="text-[12.5px] leading-relaxed text-subtle">
               {BACKGROUND_TEXT}
             </p>
+            {!available && setup.background.reason ? <Note>{setup.background.reason}</Note> : null}
             {backgroundError ? <Note tone="bad">{backgroundError}</Note> : null}
           </Step>
         </ol>
@@ -327,6 +344,11 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
             {finishing ? <LoaderCircle aria-hidden className="animate-spin motion-reduce:animate-none" /> : null}
             Done
           </Button>
+          {offerSkip ? (
+            <Button size="sm" variant="link" onClick={() => void done(true)} disabled={finishing || choosing || applying}>
+              Finish without it
+            </Button>
+          ) : null}
           {doneError ? <Note tone="bad">{doneError}</Note> : null}
         </div>
       </Panel>

@@ -499,7 +499,11 @@ export interface LocalSetup {
   folders: string[]
   /** Whether this computer has the Mac's folder chooser. */
   chooser: boolean
-  background: { installed: boolean }
+  /**
+   * The background answerer: whether it is installed, and whether it can be turned on here (a Mac
+   * with Claude Code); `reason` says why not, in one plain sentence.
+   */
+  background: { installed: boolean; available: boolean; reason?: string }
   limits: { max_folders: number }
 }
 

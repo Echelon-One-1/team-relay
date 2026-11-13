@@ -33,6 +33,8 @@ export type OpenOptions = {
   deleteAfterMs?: number;
   /** Runs the opener (default: execFile, argv only, never a shell). */
   run?: Run;
+  /** Told once whether the opener ran (false: nothing was opened, the URL is the caller's to show). */
+  onResult?: (opened: boolean) => void;
 };
 
 const defaultRun: Run = (command, args, done) => {
@@ -73,9 +75,11 @@ export function openerFor(platform: NodeJS.Platform, env: NodeJS.ProcessEnv = pr
  */
 export function openInBrowser(url: string, opts: OpenOptions): string | null {
   const what = opts.what ?? 'the URL above';
+  const told = (opened: boolean) => opts.onResult?.(opened);
   const opener = opts.opener ?? openerFor(opts.platform ?? process.platform);
   if (!opener) {
     opts.log(`no browser opener on this platform; open ${what} yourself`);
+    told(false);
     return null;
   }
   let dir: string;
@@ -84,6 +88,7 @@ export function openInBrowser(url: string, opts: OpenOptions): string | null {
     chmodSync(dir, 0o700);
   } catch {
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   const cleanup = () => rmSync(dir, { recursive: true, force: true });
@@ -93,6 +98,7 @@ export function openInBrowser(url: string, opts: OpenOptions): string | null {
   } catch {
     cleanup();
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   process.once('exit', cleanup);
@@ -102,6 +108,7 @@ export function openInBrowser(url: string, opts: OpenOptions): string | null {
   }, opts.deleteAfterMs ?? REDIRECT_TTL_MS).unref();
   (opts.run ?? defaultRun)(opener, [file], (err) => {
     if (err) opts.log(`could not open a browser (${opener}); open ${what} yourself`);
+    told(!err);
   });
   return file;
 }

@@ -283,6 +283,19 @@ function plainDetail(v: unknown): string | null {
   return t
 }
 
+/** Errors of the local setup routes (plugin/src/local-setup.ts), whose detail is written for the member. */
+const LOCAL_ERRORS = new Set([
+  'not_saved',
+  'folders_unreadable',
+  'no_chooser',
+  'chooser_open',
+  'chooser_unavailable',
+  'not_found',
+  'mac_only',
+  'background_unavailable',
+  'background_failed',
+])
+
 async function changeError(res: Response): Promise<ChangeError> {
   let body: Record<string, unknown> = {}
   if (isJson(res)) {
@@ -302,6 +315,10 @@ async function changeError(res: Response): Promise<ChangeError> {
       status: res.status,
       signedOut: true,
     })
+  }
+  // The Mac's own setup routes (/api/local/*) explain their refusals; show them as they are.
+  if (!isHosted() && typeof body.error === 'string' && LOCAL_ERRORS.has(body.error) && plainDetail(body.detail)) {
+    return new ChangeError(plainDetail(body.detail)!, { status: res.status })
   }
   if (res.status === 400 || res.status === 403 || res.status === 413 || res.status === 415) {
     return new ChangeError(plainDetail(body.detail) ?? 'The console refused that change.', { status: res.status })

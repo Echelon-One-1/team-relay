@@ -7960,11 +7960,11 @@ var require_codegen = __commonJS({
         const rhs = this.rhs === void 0 ? "" : ` = ${this.rhs}`;
         return `${varKind} ${this.name}${rhs};` + _n;
       }
-      optimizeNames(names, constants3) {
+      optimizeNames(names, constants2) {
         if (!names[this.name.str])
           return;
         if (this.rhs)
-          this.rhs = optimizeExpr(this.rhs, names, constants3);
+          this.rhs = optimizeExpr(this.rhs, names, constants2);
         return this;
       }
       get names() {
@@ -7981,10 +7981,10 @@ var require_codegen = __commonJS({
       render({ _n }) {
         return `${this.lhs} = ${this.rhs};` + _n;
       }
-      optimizeNames(names, constants3) {
+      optimizeNames(names, constants2) {
         if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
           return;
-        this.rhs = optimizeExpr(this.rhs, names, constants3);
+        this.rhs = optimizeExpr(this.rhs, names, constants2);
         return this;
       }
       get names() {
@@ -8045,8 +8045,8 @@ var require_codegen = __commonJS({
       optimizeNodes() {
         return `${this.code}` ? this : void 0;
       }
-      optimizeNames(names, constants3) {
-        this.code = optimizeExpr(this.code, names, constants3);
+      optimizeNames(names, constants2) {
+        this.code = optimizeExpr(this.code, names, constants2);
         return this;
       }
       get names() {
@@ -8075,12 +8075,12 @@ var require_codegen = __commonJS({
         }
         return nodes.length > 0 ? this : void 0;
       }
-      optimizeNames(names, constants3) {
+      optimizeNames(names, constants2) {
         const { nodes } = this;
         let i = nodes.length;
         while (i--) {
           const n = nodes[i];
-          if (n.optimizeNames(names, constants3))
+          if (n.optimizeNames(names, constants2))
             continue;
           subtractNames(names, n.names);
           nodes.splice(i, 1);
@@ -8133,12 +8133,12 @@ var require_codegen = __commonJS({
           return void 0;
         return this;
       }
-      optimizeNames(names, constants3) {
+      optimizeNames(names, constants2) {
         var _a;
-        this.else = (_a = this.else) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants3);
-        if (!(super.optimizeNames(names, constants3) || this.else))
+        this.else = (_a = this.else) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants2);
+        if (!(super.optimizeNames(names, constants2) || this.else))
           return;
-        this.condition = optimizeExpr(this.condition, names, constants3);
+        this.condition = optimizeExpr(this.condition, names, constants2);
         return this;
       }
       get names() {
@@ -8161,10 +8161,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.iteration})` + super.render(opts);
       }
-      optimizeNames(names, constants3) {
-        if (!super.optimizeNames(names, constants3))
+      optimizeNames(names, constants2) {
+        if (!super.optimizeNames(names, constants2))
           return;
-        this.iteration = optimizeExpr(this.iteration, names, constants3);
+        this.iteration = optimizeExpr(this.iteration, names, constants2);
         return this;
       }
       get names() {
@@ -8200,10 +8200,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
       }
-      optimizeNames(names, constants3) {
-        if (!super.optimizeNames(names, constants3))
+      optimizeNames(names, constants2) {
+        if (!super.optimizeNames(names, constants2))
           return;
-        this.iterable = optimizeExpr(this.iterable, names, constants3);
+        this.iterable = optimizeExpr(this.iterable, names, constants2);
         return this;
       }
       get names() {
@@ -8245,11 +8245,11 @@ var require_codegen = __commonJS({
         (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNodes();
         return this;
       }
-      optimizeNames(names, constants3) {
+      optimizeNames(names, constants2) {
         var _a, _b;
-        super.optimizeNames(names, constants3);
-        (_a = this.catch) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants3);
-        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants3);
+        super.optimizeNames(names, constants2);
+        (_a = this.catch) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants2);
+        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants2);
         return this;
       }
       get names() {
@@ -8550,7 +8550,7 @@ var require_codegen = __commonJS({
     function addExprNames(names, from) {
       return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
     }
-    function optimizeExpr(expr, names, constants3) {
+    function optimizeExpr(expr, names, constants2) {
       if (expr instanceof code_1.Name)
         return replaceName(expr);
       if (!canOptimize(expr))
@@ -8565,14 +8565,14 @@ var require_codegen = __commonJS({
         return items;
       }, []));
       function replaceName(n) {
-        const c = constants3[n.str];
+        const c = constants2[n.str];
         if (c === void 0 || names[n.str] !== 1)
           return n;
         delete names[n.str];
         return c;
       }
       function canOptimize(e) {
-        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants3[c.str] !== void 0);
+        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants2[c.str] !== void 0);
       }
     }
     function subtractNames(names, from) {
@@ -16683,9 +16683,11 @@ function openerFor(platform, env = process.env) {
 }
 function openInBrowser(url, opts) {
   const what = opts.what ?? "the URL above";
+  const told = (opened) => opts.onResult?.(opened);
   const opener = opts.opener ?? openerFor(opts.platform ?? process.platform);
   if (!opener) {
     opts.log(`no browser opener on this platform; open ${what} yourself`);
+    told(false);
     return null;
   }
   let dir;
@@ -16694,6 +16696,7 @@ function openInBrowser(url, opts) {
     chmodSync4(dir, 448);
   } catch {
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   const cleanup = () => rmSync4(dir, { recursive: true, force: true });
@@ -16703,6 +16706,7 @@ function openInBrowser(url, opts) {
   } catch {
     cleanup();
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   process.once("exit", cleanup);
@@ -16712,6 +16716,7 @@ function openInBrowser(url, opts) {
   }, opts.deleteAfterMs ?? REDIRECT_TTL_MS).unref();
   (opts.run ?? defaultRun)(opener, [file], (err) => {
     if (err) opts.log(`could not open a browser (${opener}); open ${what} yourself`);
+    told(!err);
   });
   return file;
 }
@@ -17178,12 +17183,20 @@ async function startLogin(opts) {
   const url = start.toString();
   timer = setTimeout(() => fail("the sign-in timed out after 5 minutes; run /team-relay:login again"), opts.timeoutMs ?? LOGIN_TIMEOUT_MS);
   timer.unref?.();
+  let told;
+  const opened = new Promise((resolve) => told = resolve);
   try {
-    (opts.open ?? ((u) => void openInBrowser(u, { log, title: "Team relay sign-in", what: "the sign-in link" })))(url);
+    if (opts.open) {
+      opts.open(url);
+      told(true);
+    } else {
+      openInBrowser(url, { log, title: "Team relay sign-in", what: "the sign-in link", onResult: told });
+    }
   } catch {
     log("could not open a browser; open the sign-in link yourself");
+    told(false);
   }
-  return { url, port, done, cancel: () => fail(SUPERSEDED) };
+  return { url, port, done, opened, cancel: () => fail(SUPERSEDED) };
 }
 
 // src/drive-login.ts
@@ -17515,7 +17528,7 @@ async function connectOnce(env, opts = {}) {
 
 // src/setup-steps.ts
 import { execFile as execFile6 } from "node:child_process";
-import { accessSync as accessSync2, constants as constants2, existsSync as existsSync2, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync2 } from "node:fs";
 
 // src/drive-cli.ts
 init_credentials();
@@ -17590,6 +17603,10 @@ if (process.argv[1] && /drive-cli\.[jt]s$/.test(process.argv[1])) {
     }
   );
 }
+
+// src/locate.ts
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+var NODE_PINS_FILE = fileURLToPath2(new URL("../bin/node-pins.sh", import.meta.url));
 
 // src/setup-steps.ts
 var CHOOSE_FOLDER_SCRIPT = [

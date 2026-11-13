@@ -33,6 +33,10 @@ REAL_SHASUM="$(command -v shasum)"
 REAL_TAR="$(command -v tar)"
 REAL_SLEEP="$(command -v sleep)"
 REAL_GREP="$(command -v grep)"
+REAL_WC="$(command -v wc)"
+REAL_HEAD="$(command -v head)"
+REAL_TAIL="$(command -v tail)"
+REAL_MV="$(command -v mv)"
 
 WORK="$(mktemp -d)"
 WORK="$(cd "$WORK" && pwd -P)"
@@ -95,6 +99,7 @@ EOF
 new_case() {
   C="$WORK/$1"
   P="$C/home/.local/share/team-relay"
+  PARTIAL_ARM="$P/.node-${NODE_V}-darwin-arm64.tar.gz.partial"
   mkdir -p "$C/bin" "$C/home" "$C/state" "$C/served" "$C/plugin/bin"
   : >"$C/log"
   local t arch
@@ -109,15 +114,18 @@ esac
 echo "\$v"
 EOF
   # curl: logs its arguments and what it read on stdin, then copies the served file named by the
-  # URL to -o. state/curl-fails makes it fail; state/curl-gate makes it wait for state/go first.
+  # URL to -o; with -C - and -o already there, only the bytes past its size (a resumed download).
+  # state/curl-fails makes it fail; state/curl-half delivers the first half only and fails as a
+  # cut-off transfer does (18); state/curl-gate makes it wait for state/go first.
   cat >"$C/bin/curl" <<EOF
 #!/bin/sh
 IFS= read -r input || input=""
 printf 'curl %s <%s>\n' "\$*" "\$input" >>"$C/log"
-out=""; url=""
+out=""; url=""; resume=""
 while [ \$# -gt 0 ]; do
   case "\$1" in
     -o) out=\$2; shift ;;
+    -C) resume=\$2; shift ;;
     https://*) url=\$1 ;;
   esac
   shift
@@ -129,6 +137,18 @@ fi
 [ -f "$C/state/curl-fails" ] && exit 22
 f="$C/served/\${url##*/}"
 [ -f "\$f" ] || exit 22
+size=\$("$REAL_WC" -c <"\$f")
+size=\$((size + 0))
+if [ -f "$C/state/curl-half" ]; then
+  "$REAL_HEAD" -c \$((size / 2)) "\$f" >"\$out"
+  exit 18
+fi
+if [ "\$resume" = - ] && [ -f "\$out" ]; then
+  have=\$("$REAL_WC" -c <"\$out")
+  have=\$((have + 0))
+  if [ "\$have" -lt "\$size" ]; then "$REAL_TAIL" -c +\$((have + 1)) "\$f" >>"\$out"; fi
+  exit 0
+fi
 /bin/cp "\$f" "\$out"
 EOF
   cat >"$C/bin/shasum" <<EOF
@@ -176,10 +196,11 @@ pin_hashes() {
       -e "s#^NODE_SHA256_X64='[0-9a-f]*'\$#NODE_SHA256_X64='$2'#" "$PINS" >"$C/plugin/bin/node-pins.sh"
 }
 # run_case [STDIN]: runs the copy as Claude Code does (/bin/sh run-node <bundle> <args>), with
-# only the stubs on PATH and STDIN (default STDIN-MARK) on stdin.
+# only the stubs on PATH (RUN_PATH when set) and STDIN (default STDIN-MARK) on stdin; RUN_VAR, when
+# set (NAME=value), is one more variable in its environment.
 run_case() {
   set +e
-  OUT="$(printf '%s\n' "${1:-STDIN-MARK}" | env -i HOME="$C/home" PATH="$C/bin" /bin/sh "$C/plugin/bin/run-node" "${ARGS[@]}" 2>"$C/stderr")"
+  OUT="$(printf '%s\n' "${1:-STDIN-MARK}" | env -i ${RUN_VAR:+"$RUN_VAR"} HOME="$C/home" PATH="${RUN_PATH:-$C/bin}" /bin/sh "$C/plugin/bin/run-node" "${ARGS[@]}" 2>"$C/stderr")"
   STATUS=$?
   set -e
   ERR="$(cat "$C/stderr")"
@@ -245,9 +266,9 @@ run_case
 downloaded_arm64() {
   [[ "$STATUS" -eq 0 && "$OUT" == "private(arm64) ${ARGS[*]} <STDIN-MARK>" && -z "$ERR" \
     && "$(curl_calls)" == 1 \
-    && "$LOG" == *"curl -fsSL --proto =https --tlsv1.2 -o $P/.download."*"/node.tar.gz https://nodejs.org/dist/${NODE_V}/node-${NODE_V}-darwin-arm64.tar.gz <>"* \
-    && "$LOG" == *"shasum -a 256 $P/.download."*"/node.tar.gz <>"* \
-    && "$LOG" == *"tar -xzf $P/.download."*"/node.tar.gz -C $P/.download."*" <>"* ]] \
+    && "$LOG" == *"curl -fsSL --proto =https --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -C - -o $PARTIAL_ARM https://nodejs.org/dist/${NODE_V}/node-${NODE_V}-darwin-arm64.tar.gz <>"* \
+    && "$LOG" == *"shasum -a 256 $PARTIAL_ARM <>"* \
+    && "$LOG" == *"tar -xzf $PARTIAL_ARM -C $P/.download."*" <>"* ]] \
     && only_pinned_left arm64 && private_dir_mode_700
 }
 check "no node: downloads the pinned arm64 build over https only, checks its SHA-256, unpacks it into the setup's folder and runs it (stdin untouched)" downloaded_arm64
@@ -391,6 +412,91 @@ two_starts_one_download() {
     && "$(curl_calls)" == 1 ]] && only_pinned_left arm64
 }
 check "two starts at once: one downloads, the other waits for it and uses the same copy" two_starts_one_download
+
+# ---------------------------------------------------------------- 7. slow links: resume, leftovers
+new_case resume
+: >"$C/state/curl-half"
+run_case
+cut_short() {
+  failed_with "the download did not work" && [[ -f "$PARTIAL_ARM" && ! -e "$P/.node-download.lock" ]] \
+    && [[ "$(ls -A "$P")" == ".node-${NODE_V}-darwin-arm64.tar.gz.partial" ]]
+}
+check "a download cut short: one plain line, its partial file kept for the next start, no lock left" cut_short
+rm "$C/state/curl-half"
+: >"$C/log"
+run_case
+resumed() {
+  [[ "$STATUS" -eq 0 && "$OUT" == "private(arm64) ${ARGS[*]} <STDIN-MARK>" && -z "$ERR" && "$(curl_calls)" == 1 \
+    && "$LOG" == *" -C - -o $PARTIAL_ARM "* ]] && only_pinned_left arm64
+}
+check "the next start resumes it (-C -), checks the whole file's SHA-256, unpacks it and removes the partial file" resumed
+
+new_case partial-complete
+mkdir -p "$P"
+cp "$C/served/node-${NODE_V}-darwin-arm64.tar.gz" "$PARTIAL_ARM"
+run_case
+check "a partial file that is already whole (the pinned SHA-256): used without downloading" \
+  eval '[[ "$STATUS" -eq 0 && "$OUT" == "private(arm64) ${ARGS[*]} <STDIN-MARK>" && "$(curl_calls)" == 0 ]] && only_pinned_left arm64'
+
+new_case partial-corrupt
+mkdir -p "$P"
+head -c 4096 /dev/zero >"$PARTIAL_ARM"
+run_case
+check "a partial file that resumes into the wrong file: refused, and the partial file deleted" \
+  eval 'failed_with "the download was not the file it should be" && [[ "$(curl_calls)" == 1 && ! -e "$PARTIAL_ARM" ]] && nothing_left'
+run_case
+check "so the next start downloads afresh" \
+  eval '[[ "$STATUS" -eq 0 && "$OUT" == "private(arm64) ${ARGS[*]} <STDIN-MARK>" && "$(curl_calls)" == 2 ]] && only_pinned_left arm64'
+
+new_case leftovers
+mkdir -p "$P/.download.AbC123/node-v22.1.0-darwin-arm64" "$P/.node-download.stale.4242"
+printf 'old\n' >"$P/.node-v22.1.0-darwin-arm64.tar.gz.partial"
+printf 'old\n' >"$P/.node-${NODE_V}-darwin-x64.tar.gz.partial"
+run_case
+check "the start that downloads removes what earlier starts left: download folders, other versions' partial files" \
+  eval '[[ "$STATUS" -eq 0 && "$(curl_calls)" == 1 ]] && only_pinned_left arm64'
+
+new_case partial-symlink
+mkdir -p "$P"
+printf 'keep\n' >"$C/elsewhere"
+ln -s "$C/elsewhere" "$PARTIAL_ARM"
+run_case
+check "a partial file that is a symlink is removed, never written through" \
+  eval '[[ "$STATUS" -eq 0 && "$(curl_calls)" == 1 && "$(cat "$C/elsewhere")" == keep ]] && only_pinned_left arm64'
+
+# ---------------------------------------------------------------- 8. PATH and the environment
+new_case path-var-last
+mkdir -p "$C/empty"
+node_stub "$C/bin/node" path-node v22.12.0
+RUN_VAR=last=1 RUN_PATH="$C/empty:$C/bin" run_case
+check "a variable named last in the environment does not cut the PATH search short" \
+  eval '[[ "$STATUS" -eq 0 && "$OUT" == "path-node ${ARGS[*]} <STDIN-MARK>" && "$(curl_calls)" == 0 ]]'
+
+# ---------------------------------------------------------------- 9. two starts and one dead lock
+# Both find the lock of a start that is gone. The other one takes it over first and a new start
+# takes the lock again (its pid file now names a running start): this one, renaming the pid file
+# away, finds that owner, puts the file back and waits instead of removing a live lock.
+new_case lock-race
+mkdir -p "$P/.node-download.lock"
+echo "$DEAD_PID" >"$P/.node-download.lock/pid"
+rm "$C/bin/mv"
+cat >"$C/bin/mv" <<EOF
+#!/bin/sh
+if [ -f "$C/state/mv-race" ] && [ "\$1" = "$P/.node-download.lock/pid" ]; then
+  /bin/rm -f "$C/state/mv-race"
+  echo "$$" >"\$1"
+fi
+exec "$REAL_MV" "\$@"
+EOF
+chmod +x "$C/bin/mv"
+: >"$C/state/mv-race"
+: >"$C/state/sleep-installs-on-1"
+run_case
+lock_race() {
+  [[ "$STATUS" -eq 0 && "$OUT" == "private(arm64) ${ARGS[*]} <STDIN-MARK>" && -z "$ERR" && "$(curl_calls)" == 0 \
+    && "$(cat "$P/.node-download.lock/pid")" == "$$" && "$(ls -A "$P/.node-download.lock")" == pid ]]
+}
+check "two starts and one dead lock: a lock taken again meanwhile is never removed" lock_race
 
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
 [[ "$failed" -eq 0 ]]

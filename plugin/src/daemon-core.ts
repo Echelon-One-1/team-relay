@@ -8,7 +8,9 @@
 // - Answering: an AnswerHost with `background` (answer-host.ts): the answering lock as `daemon`
 //   (retried every 30 s while a channel session or a manual answerer holds it), boundary mode only,
 //   no capability and no approval ever. `claude` is TEAM_RELAY_CLAUDE_BIN, an absolute path to an
-//   executable file; without one nothing is answered and the status says claude.found=false.
+//   executable file, looked up again (locate.ts) when that path no longer runs (an update of the
+//   Claude desktop app moves its claude); without one nothing is answered and the status says
+//   claude.found=false.
 // - Status: every 60 s, PUT me/status with counts and booleans only (no path, folder name,
 //   question or answer) and, while the team has boundaries, which of its items this Mac cannot
 //   find (PICKERS-SPEC §3.3, §8: keys of the team's own items only, sources-report.ts); a 429 is
@@ -27,10 +29,10 @@
 // - The log (DaemonLog) holds ids, counts and reasons, never a question, answer or file content.
 
 import { execFile } from 'node:child_process';
-import { accessSync, appendFileSync, chmodSync, constants, lstatSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
+import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { AnswerHost, type HostOptions } from './answer-host.js';
 import { NOWHERE_RELAY, disposeDryRun, executeDryRun, prepareDryRun } from './answer-dry-run.js';
 import { itemKeys } from './boundaries-rule.js';
@@ -40,6 +42,7 @@ import { countClones } from './clones.js';
 import { DriveLocator, mountsSignature } from './drive-locate.js';
 import { credentialFingerprint, credentialsPath } from './credentials.js';
 import { defaultKeychain } from './google-drive.js';
+import { resolveClaudeBin } from './locate.js';
 import { expandPath, memberFoldersPath, readTeamSettings } from './member-folders.js';
 import { backoffDelay, RelayError, type RelayClient } from './relay-client.js';
 import { connectOnce, hostConnection, type ConnectAttempt } from './relay-connect.js';
@@ -131,17 +134,15 @@ export class DaemonLog {
 
 // -- Claude Code and the self-test ----------------------------------------------------------------
 
-/** TEAM_RELAY_CLAUDE_BIN when it is an absolute path to an executable file, else null. */
+/**
+ * The claude to run: TEAM_RELAY_CLAUDE_BIN while it is an absolute path to an executable file;
+ * when it was set but no longer runs (the Claude desktop app keeps its claude in a folder named
+ * after its version, which an update replaces), claude is looked up again as setup found it
+ * (locate.ts). Null when it is not set or nothing is found. Asked afresh at each use, so an
+ * update while the answerer runs needs no new install.
+ */
 export function claudeBinFrom(env: NodeJS.ProcessEnv): string | null {
-  const b = env.TEAM_RELAY_CLAUDE_BIN?.trim() ?? '';
-  if (!b || !isAbsolute(b)) return null;
-  try {
-    if (!statSync(b).isFile()) return null;
-    accessSync(b, constants.X_OK);
-    return b;
-  } catch {
-    return null;
-  }
+  return resolveClaudeBin(env);
 }
 
 export type RunResult = { code: number | null };

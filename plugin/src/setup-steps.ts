@@ -5,13 +5,13 @@
 // of setting up do exactly the same thing.
 
 import { execFile } from 'node:child_process';
-import { accessSync, constants, existsSync, statSync } from 'node:fs';
-import { delimiter, isAbsolute, join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { configDir } from './answering-lock.js';
 import type { TeamBoundaries } from './boundaries-types.js';
 import { homeDir, validBoundaries } from './boundary-set.js';
 import { agentPlistPath, installAgent, uninstallAgent, type Exec } from './daemon-launch.js';
 import { runDriveCli, type DriveCliOutcome } from './drive-cli.js';
+import { findClaude } from './locate.js';
 import type { Keychain } from './google-drive.js';
 import {
   MAX_FOLDERS,
@@ -201,6 +201,22 @@ export function uninstallBackground(i: { env: NodeJS.ProcessEnv; uid: number; ex
   return uninstallAgent({ home: homeDir(i.env), configDir: configDir(i.env), uid: i.uid, ...(i.exec ? { exec: i.exec } : {}) });
 }
 
+/** Why background answering cannot be turned on here: not a Mac. */
+export const BACKGROUND_MAC_ONLY = 'Background answering works on a Mac only.';
+/** Why background answering cannot be turned on here: no Claude Code found. */
+export const BACKGROUND_NO_CLAUDE = 'Background answering needs Claude Code, which was not found on this Mac.';
+
+/** Whether background answering can be turned on here, and why not when it cannot. */
+export function backgroundAvailability(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  find: (env: NodeJS.ProcessEnv) => string | null = findClaude,
+): { available: true } | { available: false; reason: string } {
+  if (platform !== 'darwin') return { available: false, reason: BACKGROUND_MAC_ONLY };
+  if (!find(env)) return { available: false, reason: BACKGROUND_NO_CLAUDE };
+  return { available: true };
+}
+
 /** Whether the background answerer's LaunchAgent is installed for this member. */
 export function backgroundInstalled(env: NodeJS.ProcessEnv): boolean {
   return existsSync(agentPlistPath(homeDir(env)));
@@ -211,29 +227,6 @@ export function currentUid(): number {
   return typeof process.getuid === 'function' ? process.getuid() : -1;
 }
 
-function executable(path: string): boolean {
-  try {
-    if (!statSync(path).isFile()) return false;
-    accessSync(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
-/**
- * Where claude is, as the setup line finds it: the first `claude` on PATH (absolute entries
- * only), else ~/.local/bin/claude, else ~/.claude/local/claude. Null when there is none.
- */
-export function findClaude(env: NodeJS.ProcessEnv): string | null {
-  for (const dir of (env.PATH ?? '').split(delimiter)) {
-    if (!isAbsolute(dir)) continue;
-    const c = join(dir, 'claude');
-    if (executable(c)) return c;
-  }
-  const home = homeDir(env);
-  for (const c of [join(home, '.local', 'bin', 'claude'), join(home, '.claude', 'local', 'claude')]) {
-    if (executable(c)) return c;
-  }
-  return null;
-}
+/** Where claude is (locate.ts): PATH, ~/.local/bin, ~/.claude/local, then the Claude desktop app's own. */
+export { findClaude };

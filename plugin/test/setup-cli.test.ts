@@ -141,6 +141,7 @@ describe('login (M11-SPEC §5)', () => {
           url: 'http://127.0.0.1:5555/start',
           port: 5555,
           cancel: () => {},
+          opened: Promise.resolve(true),
           done: Promise.resolve({ stored: { relay_url: relay.url, team: 'demo', member: 'bob', credential: 'trc_x', expires_at: null }, replaced: null }),
         };
       },
@@ -157,7 +158,7 @@ describe('login (M11-SPEC §5)', () => {
     const code = await runSetup(['login', '--relay', relay.url], {
       env,
       io: t.io,
-      startLogin: async () => ({ url: 'http://127.0.0.1:1/x', port: 1, cancel: () => {}, done: Promise.reject(new Error('the sign-in timed out')) }),
+      startLogin: async () => ({ url: 'http://127.0.0.1:1/x', port: 1, cancel: () => {}, opened: Promise.resolve(true), done: Promise.reject(new Error('the sign-in timed out')) }),
     });
     expect(code).toBe(1);
     expect(t.out.at(-1)).toBe('The sign-in did not finish (the sign-in timed out).');

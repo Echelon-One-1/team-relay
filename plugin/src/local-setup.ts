@@ -5,7 +5,8 @@
 //
 //   GET  /api/local/setup            what the page shows: who is signed in, the folders the
 //                                    member's Claude answers from, whether the Mac's folder chooser
-//                                    is here, the background answerer
+//                                    is here, the background answerer (installed, and whether it
+//                                    can be turned on here: a Mac with Claude Code; else why not)
 //   POST /api/local/folders/choose   opens the Mac's folder chooser and adds what was chosen
 //                                    (checked by the folder rules); the only way to add a folder
 //   POST /api/local/folders/remove   {"path"}: removes exactly that stored entry
@@ -55,7 +56,13 @@ export type LocalSetupDeps = {
   signedIn: { member: string; team: string; email: string | null };
   /** The Mac's folder chooser (null: none on this computer). */
   chooser: FolderChooser | null;
-  background: { installed: () => boolean; install: () => Promise<void>; uninstall: () => Promise<boolean> };
+  background: {
+    /** Whether it can be turned on here (a Mac with Claude Code), and why not. */
+    availability: () => { available: true } | { available: false; reason: string };
+    installed: () => boolean;
+    install: () => Promise<void>;
+    uninstall: () => Promise<boolean>;
+  };
   /** The member pressed Done. */
   onDone: () => void;
   log?: (line: string) => void;
@@ -103,7 +110,7 @@ export function createLocalSetup(d: LocalSetupDeps): LocalSetup {
         signed_in: d.signedIn,
         folders: shown(folders),
         chooser: d.chooser !== null,
-        background: { installed: d.background.installed() },
+        background: { installed: d.background.installed(), ...d.background.availability() },
         limits: { max_folders: MAX_FOLDERS },
       },
     };
@@ -163,6 +170,10 @@ export function createLocalSetup(d: LocalSetupDeps): LocalSetup {
     const on = body?.on;
     if (typeof on !== 'boolean') return bad('on must be true or false');
     if (d.platform !== 'darwin') return { status: 409, body: { error: 'mac_only', detail: 'Background answering runs on macOS only.' } };
+    if (on) {
+      const a = d.background.availability();
+      if (!a.available) return { status: 409, body: { error: 'background_unavailable', detail: a.reason } };
+    }
     try {
       if (on) await d.background.install();
       else await d.background.uninstall();

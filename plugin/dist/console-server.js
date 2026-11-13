@@ -15626,7 +15626,7 @@ var init_relay_client = __esm({
 
 // src/console-server.ts
 import { randomBytes as randomBytes3 } from "node:crypto";
-import { fileURLToPath as fileURLToPath3 } from "node:url";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // src/console-app.ts
 import { createHash as createHash4, randomUUID, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
@@ -24505,9 +24505,11 @@ function openerFor(platform, env = process.env) {
 }
 function openInBrowser(url, opts) {
   const what = opts.what ?? "the URL above";
+  const told = (opened) => opts.onResult?.(opened);
   const opener = opts.opener ?? openerFor(opts.platform ?? process.platform);
   if (!opener) {
     opts.log(`no browser opener on this platform; open ${what} yourself`);
+    told(false);
     return null;
   }
   let dir;
@@ -24516,6 +24518,7 @@ function openInBrowser(url, opts) {
     chmodSync2(dir, 448);
   } catch {
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   const cleanup = () => rmSync2(dir, { recursive: true, force: true });
@@ -24525,6 +24528,7 @@ function openInBrowser(url, opts) {
   } catch {
     cleanup();
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   process.once("exit", cleanup);
@@ -24534,6 +24538,7 @@ function openInBrowser(url, opts) {
   }, opts.deleteAfterMs ?? REDIRECT_TTL_MS).unref();
   (opts.run ?? defaultRun)(opener, [file], (err) => {
     if (err) opts.log(`could not open a browser (${opener}); open ${what} yourself`);
+    told(!err);
   });
   return file;
 }
@@ -25095,6 +25100,10 @@ if (process.argv[1] && /drive-cli\.[jt]s$/.test(process.argv[1])) {
     }
   );
 }
+
+// src/locate.ts
+import { fileURLToPath as fileURLToPath3 } from "node:url";
+var NODE_PINS_FILE = fileURLToPath3(new URL("../bin/node-pins.sh", import.meta.url));
 
 // src/setup-steps.ts
 var CHOOSER_TIMEOUT_MS = 10 * 60 * 1e3;
@@ -26438,7 +26447,7 @@ async function hosted() {
   }
   const keys = new IapKeySet({ log });
   const verify = iapVerifier({ audience, keys, log });
-  const staticDir = fileURLToPath3(new URL("./console/", import.meta.url));
+  const staticDir = fileURLToPath4(new URL("./console/", import.meta.url));
   const app = createConsoleServer({ backend, hosted: { publicHost, verify, ipHashSalt, proxyHops }, staticDir, join: join6, log });
   let bound;
   try {
@@ -26490,7 +26499,7 @@ async function main() {
     join6 = joinInfo(client.url, client.team, repoUrl, marketplace);
   }
   const key = randomBytes3(32).toString("base64url");
-  const staticDir = fileURLToPath3(new URL("./console/", import.meta.url));
+  const staticDir = fileURLToPath4(new URL("./console/", import.meta.url));
   const approvals = flags.demo ? void 0 : () => ({ pending: readApprovalsState(statePath(process.env))?.pending ?? 0 });
   const app = createConsoleServer({ backend, key, staticDir, join: join6, log, ...approvals ? { approvals } : {} });
   let bound;

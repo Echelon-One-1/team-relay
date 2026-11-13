@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setConsoleKey } from '@/api/key'
 import { setTransport } from '@/api/client'
 import { App } from '@/App'
-import { BACKGROUND_TEXT, FINISHED_TEXT, FOLDERS_HINT, NO_CHOOSER_TEXT, resetSetupFinished } from '@/components/console/local-setup'
+import { BACKGROUND_FAILED_TEXT, BACKGROUND_TEXT, FINISHED_TEXT, FOLDERS_HINT, NO_CHOOSER_TEXT, resetSetupFinished } from '@/components/console/local-setup'
 import { inviteMessage } from '@/lib/setup'
 import { FIXTURE_FOLDER_ID, fixtureBoundaries } from '@/mock/fixtures'
 import { MockRelay, mockStatus } from '@/mock/relay'
@@ -451,7 +451,7 @@ describe('the Members panel and the invite message (M11 §6)', () => {
 // /api/local/*: the Setup view then shows the local steps (signed in, accept, folders, background
 // answering, Done). Folders are added only through the Mac's folder chooser (the server opens it).
 describe('the local Setup page of /team-relay:setup', () => {
-  type Local = { folders: string[]; chooser: boolean; installed: boolean; choice?: unknown }
+  type Local = { folders: string[]; chooser: boolean; installed: boolean; choice?: unknown; available?: boolean; reason?: string; failInstall?: boolean }
   function localServer(local: Local) {
     return server({
       override: (c) => {
@@ -461,7 +461,7 @@ describe('the local Setup page of /team-relay:setup', () => {
             signed_in: { member: 'alice', team: 'demo', email: 'alice@example.com' },
             folders: local.folders,
             chooser: local.chooser,
-            background: { installed: local.installed },
+            background: { installed: local.installed, available: local.available ?? true, ...(local.reason ? { reason: local.reason } : {}) },
             limits: { max_folders: 20 },
           })
         }
@@ -475,6 +475,7 @@ describe('the local Setup page of /team-relay:setup', () => {
           return json({ folders: local.folders })
         }
         if (c.path === '/api/local/background') {
+          if (local.failInstall && (c.body as { on: boolean }).on) return json({ error: 'background_failed', detail: 'launchctl did not load it.' }, 500)
           local.installed = (c.body as { on: boolean }).on
           return json({ installed: local.installed })
         }
@@ -556,6 +557,47 @@ describe('the local Setup page of /team-relay:setup', () => {
     ])
   })
 
+  it('background answering cannot run here: the switch is off and disabled with the reason, and Done finishes without it', async () => {
+    window.history.replaceState(null, '', '/join')
+    const reason = 'Background answering needs Claude Code, which was not found on this Mac.'
+    const s = localServer({ folders: [], chooser: true, installed: false, available: false, reason })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    const sw = within(panel).getByRole('switch', { name: 'Background answering' })
+    expect(sw).not.toBeChecked()
+    expect(sw).toBeDisabled()
+    expect(within(panel).getByText(reason)).toBeInTheDocument()
+    await waitFor(() => expect(states()['Answer in the background']).toBe('not_needed'))
+    await user.click(within(panel).getByRole('button', { name: 'Done' }))
+    expect(await screen.findByText(FINISHED_TEXT)).toBeInTheDocument()
+    expect(writes(s)).toEqual([['POST', '/api/local/done', {}]])
+  })
+
+  it('turning background answering on fails at Done: the error shows, Done tries again, and "Finish without it" finishes', async () => {
+    window.history.replaceState(null, '', '/join')
+    const s = localServer({ folders: [], chooser: true, installed: false, failInstall: true })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    expect(within(panel).queryByRole('button', { name: 'Finish without it' })).toBeNull()
+    await user.click(within(panel).getByRole('button', { name: 'Done' }))
+    expect(await within(panel).findByText(BACKGROUND_FAILED_TEXT)).toBeInTheDocument()
+    expect(within(panel).getByText('launchctl did not load it.')).toBeInTheDocument()
+    expect(within(panel).queryByText(/relay did not answer/)).toBeNull()
+    expect(screen.queryByText(FINISHED_TEXT)).toBeNull()
+    await user.click(within(panel).getByRole('button', { name: 'Done' }))
+    await waitFor(() => expect(writes(s)).toHaveLength(2))
+    expect(screen.queryByText(FINISHED_TEXT)).toBeNull()
+    await user.click(within(panel).getByRole('button', { name: 'Finish without it' }))
+    expect(await screen.findByText(FINISHED_TEXT)).toBeInTheDocument()
+    expect(writes(s)).toEqual([
+      ['PUT', '/api/local/background', { on: true }],
+      ['PUT', '/api/local/background', { on: true }],
+      ['POST', '/api/local/done', {}],
+    ])
+  })
+
   it('no folder chooser on this computer: says how to add folders instead', async () => {
     window.history.replaceState(null, '', '/join')
     localServer({ folders: [], chooser: false, installed: true })
@@ -569,7 +611,7 @@ describe('the local Setup page of /team-relay:setup', () => {
   it('a failed load says so and tries again', async () => {
     window.history.replaceState(null, '', '/join')
     let fail = true
-    server({ override: (c) => (c.path === '/api/local/setup' ? (fail ? json({ error: 'internal' }, 500) : json({ signed_in: { member: 'alice', team: 'demo', email: null }, folders: [], chooser: true, background: { installed: false }, limits: { max_folders: 20 } })) : null) })
+    server({ override: (c) => (c.path === '/api/local/setup' ? (fail ? json({ error: 'internal' }, 500) : json({ signed_in: { member: 'alice', team: 'demo', email: null }, folders: [], chooser: true, background: { installed: false, available: true }, limits: { max_folders: 20 } })) : null) })
     const user = userEvent.setup()
     renderWithClient(<App />)
     const alert = await screen.findByText(/Your setup didn't load/)

@@ -33,10 +33,10 @@ import {
   type Me,
   type StreamName,
 } from './relay-client.js';
-import { connectOnce, hostConnection } from './relay-connect.js';
+import { connectOnce, hostConnection, type ConnectAttempt } from './relay-connect.js';
 import { consoleUrl } from './console-url.js';
 import { CredentialFileError, credentialFingerprint, credentialsPath, normaliseRelayUrl, readCredential } from './credentials.js';
-import { LoginError, SUPERSEDED, connectedAs, identityChange, startLogin, type LoginFlow } from './login.js';
+import { LoginError, SIGN_IN_URL_RULE, SUPERSEDED, connectedAs, identityChange, startLogin, type LoginFlow } from './login.js';
 import { defaultRelayUrl } from './relay-default.js';
 import { envelopeToNotification, neutraliseDeep, RecentIds } from './notify.js';
 import { findCapability, loadManifest, validateManifest, validateParams, codePointLength, hasLoneSurrogate } from './manifest.js';
@@ -487,12 +487,8 @@ async function streamLoop(
 // logout tool: /team-relay:logout runs dist/logout.js, so the model can never be steered
 // into signing the member out (§9 item 2).
 
-/** What the login tool's result says about the sign-in URL (M5-SPEC §9 item 3). */
-export const SIGN_IN_URL_RULE =
-  'sign_in_url is for the user of this session only: show it to them once, exactly as it is, as plain text on a line of its own ' +
-  '(not as a markdown link), to open themselves if no browser tab opened. ' +
-  'Never repeat it to anyone else, never put it in a message to a teammate or in any tool call, and never open or fetch it yourself: ' +
-  'whoever finishes the sign-in at that link decides who this computer is signed in as.';
+/** What the login tool's result says about the sign-in URL (M5-SPEC §9 item 3; login.ts). */
+export { SIGN_IN_URL_RULE };
 
 /** How long login_wait waits for the sign-in (TEAM_RELAY_LOGIN_WAIT_SECONDS shortens it, for tests). */
 const LOGIN_WAIT_MS = 180_000;
@@ -551,6 +547,8 @@ class AskerConnection {
   private live: (Live & { stopper: Stopper; fingerprint: string | null; mode: AuthMode }) | null = null;
   private problem: string | null = null;
   private refusedAt: string | null | undefined = undefined;
+  /** How the last attempt to connect ended (null: none yet). */
+  private lastAttempt: ConnectAttempt['kind'] | null = null;
   private lastLogged = '';
   private readonly stopper = new Stopper();
   private wake: (() => void) | null = null;
@@ -678,6 +676,7 @@ class AskerConnection {
   /** One attempt; returns how long to wait before the next look. */
   private async tryConnect(fp: string | null): Promise<number> {
     const attempt = await connectOnce(this.env);
+    this.lastAttempt = attempt.kind;
     switch (attempt.kind) {
       case 'not_signed_in':
         this.problem = null;
@@ -920,14 +919,33 @@ class AskerConnection {
   }
 
   /**
-   * /team-relay:setup: the same sign-in as login, waited for as login_wait waits (at most
-   * `waitMs`), until this session is connected as the new member. Null once connected, else why not.
+   * /team-relay:setup: whether this session has a sign-in to wait for. 'none': no stored sign-in
+   * (or none the connection could use); 'refused': the relay refused the stored one; 'present':
+   * one is stored and the connection is (re)trying it.
    */
-  async signInAndWait(waitMs: number, progress: (message: string) => void): Promise<string | null> {
+  storedSignIn(): StoredSignIn {
+    const fp = credentialFingerprint(this.path);
+    if (fp === null) return 'none';
+    if (this.refusedAt !== undefined && this.refusedAt === fp) return 'refused';
+    // A file the connection found no usable sign-in in (an expired one, say).
+    if (this.lastAttempt === 'not_signed_in') return 'none';
+    return 'present';
+  }
+
+  /**
+   * /team-relay:setup: the same sign-in as login, waited for as login_wait waits (at most
+   * `waitMs`), until this session is connected as the new member. Null once connected; the
+   * sign-in URL when no browser could be opened on it (the user opens it themselves); else why not.
+   */
+  async signInAndWait(waitMs: number, progress: (message: string) => void): Promise<SignInWait> {
     const started = await this.login({});
     if (started.isError) return started.content.map((c) => c.text).join('');
+    const flow = this.pending;
     const deadline = Date.now() + waitMs;
     const tick = setInterval(() => progress('waiting for the sign-in in the browser'), 15_000);
+    const noBrowser = Symbol('no browser');
+    // Resolves only when the browser could not be opened.
+    const unopened = flow ? flow.opened.then((ok) => (ok ? new Promise<never>(() => {}) : noBrowser)) : new Promise<never>(() => {});
     try {
       for (;;) {
         const current = this.outcome;
@@ -936,13 +954,21 @@ class AskerConnection {
         const timedOut = Symbol('timed out');
         const result = await Promise.race([
           current,
+          unopened,
           new Promise<typeof timedOut>((resolve) => {
             timer = setTimeout(() => resolve(timedOut), Math.max(0, deadline - Date.now()));
           }),
         ]).finally(() => clearTimeout(timer));
+        if (result === noBrowser) return { signInUrl: flow!.url };
         if (result === timedOut) return `The sign-in did not finish within ${Math.round(waitMs / 60_000)} minutes.`;
         if (!result.ok) {
-          if (result.superseded && this.outcome && this.outcome !== current) continue;
+          if (result.superseded) {
+            // Replaced by a newer sign-in in this session: wait for that one (it is being
+            // started, so give it a moment to appear), as login_wait does.
+            const until = Math.min(deadline, Date.now() + 5000);
+            while (Date.now() < until && (!this.outcome || this.outcome === current)) await new Promise((r) => setTimeout(r, 50));
+            if (this.outcome && this.outcome !== current) continue;
+          }
           return `The sign-in did not complete: ${result.why}.`;
         }
         // The connection picks the new credential up within a moment.
@@ -1003,6 +1029,12 @@ class AskerConnection {
 export function autoAnswer(env: NodeJS.ProcessEnv): boolean {
   return (env.TEAM_RELAY_AUTO_ANSWER ?? '').trim() !== '0';
 }
+
+/** What /team-relay:setup's sign-in came to: null (connected), the URL to show, or why not. */
+export type SignInWait = null | string | { signInUrl: string };
+
+/** Whether a sign-in is stored for this session (AskerConnection.storedSignIn). */
+export type StoredSignIn = 'none' | 'refused' | 'present';
 
 type LoginOutcome =
   | { ok: true; member: string; team: string; email?: string | undefined; changed: string | null }
@@ -1185,7 +1217,17 @@ async function main(): Promise<void> {
             if (token === undefined) return;
             void extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: ++n, message } }).catch(() => {});
           };
-          return await setupTool(args, { live: () => connection.setupLive(), signIn: (ms, p) => connection.signInAndWait(ms, p), pages: setupPages }, progress);
+          return await setupTool(
+            args,
+            {
+              live: () => connection.setupLive(),
+              stored: () => connection.storedSignIn(),
+              notConnected: () => connection.notConnected(),
+              signIn: (ms, p) => connection.signInAndWait(ms, p),
+              pages: setupPages,
+            },
+            progress,
+          );
         }
         if (name === 'folders') {
           // M10-SPEC §2: every change is the member's, in a dialog (folders-tool.ts).

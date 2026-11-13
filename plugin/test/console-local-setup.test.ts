@@ -13,11 +13,12 @@ import { join } from 'node:path';
 import { createConsoleServer, relayBackend } from '../src/console-app.js';
 import type { Exec } from '../src/daemon-launch.js';
 import { CHOOSER_PROMPT, createLocalSetup } from '../src/local-setup.js';
+import { pinnedNodePath, pinnedNodeVersion } from '../src/locate.js';
 import { MAX_FOLDERS, memberFoldersPath, readTeamSettings, withTeam, writeMemberSettings } from '../src/member-folders.js';
 import { RelayClient, staticTokenProvider } from '../src/relay-client.js';
 import { runSetup } from '../src/setup-cli.js';
 import { SetupPages, type Schedule } from '../src/setup-page.js';
-import type { ChooseResult } from '../src/setup-steps.js';
+import { BACKGROUND_MAC_ONLY, BACKGROUND_NO_CLAUDE, backgroundAvailability, type ChooseResult } from '../src/setup-steps.js';
 import { FakeRelay, TOKEN_OF } from './helpers/fake-relay.js';
 
 const NO_UI = join(tmpdir(), 'team-relay-no-such-console');
@@ -191,7 +192,7 @@ describe('ACC-2: the gate on every /api/local route', () => {
       platform: 'darwin',
       signedIn: { member: 'bob', team: 'demo', email: null },
       chooser: async () => ((prompts.push('hosted'), { kind: 'cancelled' })),
-      background: { installed: () => false, install: async () => void prompts.push('install'), uninstall: async () => false },
+      background: { availability: () => ({ available: true }), installed: () => false, install: async () => void prompts.push('install'), uninstall: async () => false },
       onDone: () => prompts.push('done'),
     });
     const bare = createConsoleServer({ backend: relayBackend(client), key, staticDir: NO_UI });
@@ -227,9 +228,20 @@ describe('GET /api/local/setup', () => {
       signed_in: { member: 'bob', team: 'demo', email: 'bob@example.com' },
       folders: ['~/code/example-org'],
       chooser: true,
-      background: { installed: false },
+      background: { installed: false, available: false, reason: BACKGROUND_NO_CLAUDE },
       limits: { max_folders: 20 },
     });
+  });
+
+  it('background answering is available on a Mac where Claude Code is found (the desktop app\'s own counts); else why not', async () => {
+    const exe = join(home, 'Library', 'Application Support', 'Claude', 'claude-code', '2.1.9', 'abc', 'claude.app', 'Contents', 'MacOS', 'claude');
+    mkdirSync(join(exe, '..'), { recursive: true });
+    writeFileSync(exe, '#!/bin/sh\n');
+    chmodSync(exe, 0o755);
+    writeFileSync(join(home, 'Library', 'Application Support', 'Claude', 'claude-code', '2.1.9', 'abc', '.verified'), 'x');
+    expect((await req(port, '/api/local/setup', { key })).json().background).toEqual({ installed: false, available: true });
+    expect(backgroundAvailability('linux', env)).toEqual({ available: false, reason: BACKGROUND_MAC_ONLY });
+    expect(backgroundAvailability('darwin', env)).toEqual({ available: true });
   });
 });
 
@@ -362,13 +374,13 @@ describe('ACC-5: background answering', () => {
       ['bootstrap', 'gui/501', plist],
     ]);
     const fromPage = { plist: readFileSync(plist, 'utf8'), launcher: readFileSync(launcher, 'utf8') };
-    expect((await req(port, '/api/local/setup', { key })).json().background).toEqual({ installed: true });
+    expect((await req(port, '/api/local/setup', { key })).json().background).toEqual({ installed: true, available: true });
 
     const off = await req(port, '/api/local/background', write('PUT', { on: false }));
     expect(off.json()).toEqual({ installed: false });
     expect(existsSync(plist)).toBe(false);
     expect(existsSync(launcher)).toBe(false);
-    expect((await req(port, '/api/local/setup', { key })).json().background).toEqual({ installed: false });
+    expect((await req(port, '/api/local/setup', { key })).json().background).toEqual({ installed: false, available: true });
 
     // The setup line's own install, for the same claude and plugin key, writes the same files.
     const code = await runSetup(['daemon', 'install', '--claude', join(claudeDir, 'claude'), '--plugin', KEY], {
@@ -384,11 +396,41 @@ describe('ACC-5: background answering', () => {
     expect({ plist: readFileSync(plist, 'utf8'), launcher: readFileSync(launcher, 'utf8') }).toEqual(fromPage);
   });
 
+  it("the background answerer runs the pinned private node when it is there, else a PATH node by its PATH name, never this process's own", async () => {
+    const plist = join(home, 'Library', 'LaunchAgents', 'com.team-relay.answerer.plist');
+    const pin = pinnedNodeVersion()!;
+    const nodeStub = (path: string, version: string) => {
+      mkdirSync(join(path, '..'), { recursive: true });
+      writeFileSync(path, `#!/bin/sh\necho ${version}\n`);
+      chmodSync(path, 0o755);
+      return path;
+    };
+    const onPath = nodeStub(join(claudeDir, 'node'), 'v24.0.0');
+    const arch = process.arch === 'x64' ? 'x64' : 'arm64';
+    const ownPages = new SetupPages({ env, log: () => {}, platform: 'darwin', staticDir: NO_UI, open: () => {}, schedule, exec, sleep: async () => {}, uid: 501 });
+    const client = new RelayClient({ url: relay.url, team: 'demo', token: staticTokenProvider(TOKEN_OF.bob!), attempts: 1 });
+    try {
+      const { url } = await ownPages.open({ client, member: 'bob', team: 'demo', email: null });
+      const m = /^http:\/\/127\.0\.0\.1:(\d+)\/join#k=([A-Za-z0-9_-]{43})$/.exec(url)!;
+      const put = () => req(Number(m[1]), '/api/local/background', { ...write('PUT', { on: true }), key: m[2]! });
+      const programs = () => [...readFileSync(plist, 'utf8').matchAll(/<string>([^<]*)<\/string>/g)].map((x) => x[1]);
+      expect((await put()).status).toBe(200);
+      expect(programs()).toContain(onPath);
+      expect(programs()).not.toContain(process.execPath);
+      const pinned = nodeStub(pinnedNodePath(home, pin, arch), pin);
+      expect((await put()).status).toBe(200);
+      expect(programs()).toContain(pinned);
+      expect(programs()).not.toContain(onPath);
+    } finally {
+      await ownPages.stop();
+    }
+  });
+
   it('says plainly when Claude Code cannot be found, and installs nothing', async () => {
     env.PATH = '/usr/bin:/bin';
     const r = await req(port, '/api/local/background', write('PUT', { on: true }));
-    expect(r.status).toBe(500);
-    expect(r.json()).toMatchObject({ error: 'background_failed', detail: expect.stringMatching(/^Claude Code was not found on this Mac/) });
+    expect(r.status).toBe(409);
+    expect(r.json()).toEqual({ error: 'background_unavailable', detail: BACKGROUND_NO_CLAUDE });
     expect(launchctl).toEqual([]);
     expect(existsSync(join(home, 'Library', 'LaunchAgents', 'com.team-relay.answerer.plist'))).toBe(false);
   });
@@ -400,10 +442,28 @@ describe('Done', () => {
     expect(r.json()).toEqual({ ok: true });
     const stop = scheduled.filter((s) => s.ms === 3000 && !s.cancelled);
     expect(stop).toHaveLength(1);
-    expect(pages.active).toBe(true);
+    // No longer the page to reopen, but still answering until the stop.
+    expect(pages.active).toBe(false);
+    expect((await req(port, '/api/local/setup', { key })).status).toBe(200);
     stop[0]!.fn();
-    await waitUntil(() => !pages.active);
     await expect(req(port, '/api/local/setup', { key })).rejects.toThrow();
+  });
+
+  it('a /team-relay:setup right after Done gets a fresh server; the old one still stops, also with the MCP server', async () => {
+    await req(port, '/api/local/done', write('POST', {}));
+    const stop = scheduled.filter((s) => s.ms === 3000 && !s.cancelled);
+    const client = new RelayClient({ url: relay.url, team: 'demo', token: staticTokenProvider(TOKEN_OF.bob!), attempts: 1 });
+    const again = await pages.open({ client, member: 'bob', team: 'demo', email: 'bob@example.com' });
+    expect(again.reused).toBe(false);
+    const m = /^http:\/\/127\.0\.0\.1:(\d+)\/join#k=([A-Za-z0-9_-]{43})$/.exec(again.url)!;
+    expect(m[2]).not.toBe(key);
+    expect(pages.active).toBe(true);
+    expect((await req(Number(m[1]), '/api/local/setup', { key: m[2]! })).status).toBe(200);
+    // The MCP server exits before the 3 s: both stop, and the Done timer is cancelled.
+    await pages.stop();
+    expect(stop[0]!.cancelled).toBe(true);
+    await expect(req(port, '/api/local/setup', { key })).rejects.toThrow();
+    await expect(req(Number(m[1]), '/api/local/setup', { key: m[2]! })).rejects.toThrow();
   });
 });
 

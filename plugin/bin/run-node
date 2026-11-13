@@ -13,7 +13,12 @@
 #      setup.sh installs), downloaded from nodejs.org over https, checked against its pinned SHA-256,
 #      unpacked and renamed into that same private folder, so either installer's copy serves both.
 #      One start downloads at a time (a lock folder there); the others wait for it, up to 120 s.
-#      Any failure removes what it downloaded and says in one plain line why, then exits 1.
+#      The download goes to one fixed file there (.node-<version>-darwin-<arch>.tar.gz.partial):
+#      a download cut short (a slow or dropped connection: curl gives up after 20 s without a
+#      connection or 60 s below 1 KiB/s) is resumed by the next start; the SHA-256 is checked on
+#      the whole file, and a file that does not match is deleted. The lock holder also removes what
+#      earlier starts left behind (download folders, other versions' partial files).
+#      Any failure says in one plain line why, then exits 1.
 # Elsewhere, with none found, it says in one plain line what to do and exits 1.
 #
 # POSIX sh. Its stdin and stdout belong to the bundle (the MCP servers speak on them), so every
@@ -49,6 +54,7 @@ new_enough() {
 # "::") would run a node from whatever folder Claude Code started in, so it is skipped.
 first_path_node() {
   rest=${PATH:-}
+  last=
   while :; do
     case "$rest" in
       *:*) entry=${rest%%:*}; rest=${rest#*:} ;;
@@ -95,6 +101,7 @@ HAVE_LOCK=""
 PRIVATE_DIR=""
 PINNED_DIR=""
 PINNED_NODE=""
+PARTIAL=""
 
 cleanup() {
   if [ -n "$WORK_DIR" ]; then rm -rf "$WORK_DIR" >/dev/null 2>&1; WORK_DIR=""; fi
@@ -113,9 +120,20 @@ pinned_ok() {
   [ -x "$PINNED_NODE" ] && node_version "$PINNED_NODE" && new_enough
 }
 
+# Removes the lock folder of a start that is gone: renamed to a name only this start uses first
+# (so the lock's name is free at once and no other start's lock is ever removed), then deleted.
+drop_dead_lock() {
+  gone="$PRIVATE_DIR/.node-download.stale.$$"
+  rm -rf "$gone" >/dev/null 2>&1
+  if mv "$LOCK" "$gone" >/dev/null 2>&1; then rm -rf "$gone" >/dev/null 2>&1; fi
+}
+
 # Takes the lock folder, or waits (sleep 1, at most 120 times) for the start holding it. Returns 0
 # with the lock held, 2 when the pinned copy appeared meanwhile. A lock whose owner is no longer
-# running is taken over at once; one that never says its owner, after the whole wait.
+# running is taken over at once; one that never says its owner, after the whole wait. When two
+# starts find the same dead owner, only the one that renames its pid file away takes the lock
+# over; a pid file that turns out to name another owner (the lock was taken over and taken again
+# meanwhile) is put back and waited for.
 take_lock() {
   waited=0
   while :; do
@@ -131,13 +149,22 @@ take_lock() {
       '' | *[!0-9]* | ??????????*) owner="" ;;
     esac
     if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
-      rm -rf "$LOCK" >/dev/null 2>&1 || cannot_get "its folder could not be written"
-      continue
+      taken="$LOCK/pid.taken.$$"
+      if mv "$LOCK/pid" "$taken" >/dev/null 2>&1; then
+        again=""
+        IFS= read -r again <"$taken" || :
+        if [ "$again" = "$owner" ]; then
+          drop_dead_lock
+        else
+          mv "$taken" "$LOCK/pid" >/dev/null 2>&1 || :
+        fi
+        continue
+      fi
     fi
     if [ "$waited" -ge 120 ]; then
       if [ -z "$owner" ] && [ -z "${took_over:-}" ]; then
         took_over=1
-        rm -rf "$LOCK" >/dev/null 2>&1 || cannot_get "its folder could not be written"
+        drop_dead_lock
         continue
       fi
       cannot_get "another start of the team relay is still getting it"
@@ -147,22 +174,52 @@ take_lock() {
   done
 }
 
+# Whether the downloaded file is complete: its SHA-256 is the pinned one.
+partial_ok() {
+  [ -f "$PARTIAL" ] && [ ! -L "$PARTIAL" ] || return 1
+  got=$(shasum -a 256 "$PARTIAL" 2>/dev/null </dev/null) || got=""
+  got=${got%% *}
+  [ -n "$got" ] && [ "$got" = "$NODE_SHA256" ]
+}
+
+# What earlier starts left behind; only the lock holder runs this, so none of it is in use.
+remove_leftovers() {
+  for old in "$PRIVATE_DIR"/.download.* "$PRIVATE_DIR"/.node-download.stale.* "$PRIVATE_DIR"/.node-*.tar.gz.partial; do
+    [ "$old" = "$PARTIAL" ] && continue
+    if [ -e "$old" ] || [ -L "$old" ]; then rm -rf "$old" >/dev/null 2>&1 || :; fi
+  done
+  # The partial file is a plain file or nothing.
+  if [ -L "$PARTIAL" ] || { [ -e "$PARTIAL" ] && [ ! -f "$PARTIAL" ]; }; then
+    rm -rf "$PARTIAL" >/dev/null 2>&1 || cannot_get "its folder could not be written"
+  fi
+}
+
 download_node() {
   name="node-$NODE_VERSION-darwin-$NODE_ARCH"
+  remove_leftovers
+  if ! partial_ok; then
+    rc=0
+    curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 \
+      -C - -o "$PARTIAL" "https://nodejs.org/dist/$NODE_VERSION/$name.tar.gz" >/dev/null 2>&1 </dev/null || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      # The server cannot resume this file (33, 36): the next start begins again.
+      case "$rc" in 33 | 36) rm -f "$PARTIAL" >/dev/null 2>&1 ;; esac
+      cannot_get "the download did not work"
+    fi
+    if ! partial_ok; then
+      rm -f "$PARTIAL" >/dev/null 2>&1
+      cannot_get "the download was not the file it should be"
+    fi
+  fi
   WORK_DIR=$(mktemp -d "$PRIVATE_DIR/.download.XXXXXX" 2>/dev/null </dev/null) || WORK_DIR=""
   case "$WORK_DIR" in "$PRIVATE_DIR"/.download.*) ;; *) WORK_DIR=""; cannot_get "its folder could not be made" ;; esac
-  curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK_DIR/node.tar.gz" \
-    "https://nodejs.org/dist/$NODE_VERSION/$name.tar.gz" >/dev/null 2>&1 </dev/null \
-    || cannot_get "the download did not work"
-  got=$(shasum -a 256 "$WORK_DIR/node.tar.gz" 2>/dev/null </dev/null) || got=""
-  got=${got%% *}
-  if [ -z "$got" ] || [ "$got" != "$NODE_SHA256" ]; then
-    cannot_get "the download was not the file it should be"
-  fi
-  if ! tar -xzf "$WORK_DIR/node.tar.gz" -C "$WORK_DIR" >/dev/null 2>&1 </dev/null \
+  if ! tar -xzf "$PARTIAL" -C "$WORK_DIR" >/dev/null 2>&1 </dev/null \
     || [ ! -f "$WORK_DIR/$name/bin/node" ] || [ ! -x "$WORK_DIR/$name/bin/node" ]; then
+    rm -f "$PARTIAL" >/dev/null 2>&1
     cannot_get "the download could not be unpacked"
   fi
+  # Unpacked: the file has served its purpose.
+  rm -f "$PARTIAL" >/dev/null 2>&1
   # Another start may have put a working copy in place meanwhile: that one is used, this download
   # dropped. A copy there that does not run is set aside (and removed with the download folder),
   # then the unpacked one is renamed into place, so a half-unpacked copy is never used.
@@ -204,6 +261,7 @@ if [ -z "$found" ] && [ -n "${HOME:-}" ]; then
     PINNED_DIR=$PRIVATE_DIR/node-$NODE_VERSION-darwin-$NODE_ARCH
     PINNED_NODE=$PINNED_DIR/bin/node
     LOCK=$PRIVATE_DIR/.node-download.lock
+    PARTIAL=$PRIVATE_DIR/.node-$NODE_VERSION-darwin-$NODE_ARCH.tar.gz.partial
     trap cleanup EXIT
     trap 'exit 1' HUP INT TERM
     if ! mkdir -p "$PRIVATE_DIR" >/dev/null 2>&1 || ! chmod 700 "$PRIVATE_DIR" >/dev/null 2>&1; then
