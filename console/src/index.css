@@ -99,9 +99,9 @@
   --muted-foreground: #595d6c;
   --border: #e0e2e8;
   --hairline: #eaebed;
-  --input: #cfd1da;
+  --input: #868a99;
   --field: #ffffff;
-  --switch-off: #cfd1da;
+  --switch-off: #868a99;
   --thumb: #ffffff;
 
   --primary: #6d45ff;
@@ -139,9 +139,9 @@
   --muted-foreground: #b2b5c1;
   --border: #2b2e39;
   --hairline: #2b2e39;
-  --input: #474a59;
+  --input: #71768a;
   --field: #2b2e39;
-  --switch-off: #474a59;
+  --switch-off: #71768a;
   --thumb: #363946;
 
   --primary: #8f79ff;
@@ -167,7 +167,7 @@
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border outline-ring;
   }
   html {
     -webkit-text-size-adjust: 100%;

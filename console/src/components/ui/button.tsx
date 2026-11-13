@@ -6,7 +6,7 @@ import { Slot } from "radix-ui"
 // Pills: primary is the one violet action; outline and secondary are a quiet tint with no border,
 // so they read on the grey canvas and on white cards alike; ghost is bare until hovered.
 const buttonVariants = cva(
-  "group/button inline-flex shrink-0 items-center justify-center rounded-full border border-transparent bg-clip-padding text-[13px] font-medium whitespace-nowrap transition-colors outline-none select-none focus-visible:ring-3 focus-visible:ring-ring/50 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  "group/button inline-flex shrink-0 items-center justify-center rounded-full border border-transparent bg-clip-padding text-[13px] font-medium whitespace-nowrap transition-colors outline-none select-none focus-visible:ring-2 focus-visible:ring-ring active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {
@@ -14,7 +14,7 @@ const buttonVariants = cva(
         outline: "bg-muted text-foreground hover:bg-foreground/10 aria-expanded:bg-foreground/10",
         secondary: "bg-secondary text-secondary-foreground hover:bg-foreground/10 aria-expanded:bg-foreground/10",
         ghost: "text-foreground hover:bg-muted aria-expanded:bg-muted",
-        destructive: "bg-bad-soft text-destructive hover:bg-destructive/20 focus-visible:ring-destructive/30",
+        destructive: "bg-bad-soft text-destructive hover:bg-destructive/20 focus-visible:ring-destructive",
         link: "rounded-sm text-signal underline-offset-4 hover:underline",
       },
       size: {

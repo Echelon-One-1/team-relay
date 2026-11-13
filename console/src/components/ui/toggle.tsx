@@ -3,10 +3,11 @@ import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "@/lib/utils"
 import { Toggle as TogglePrimitive } from "radix-ui"
 
-// Pills. Pressed or on, a toggle is the raised thumb (the thumb colour with a soft shadow), as the
+// Pills. Pressed or on, a toggle is the raised thumb (the thumb colour with a soft shadow) with a
+// 1px accent edge and accent text (at least 3:1 against the track; plain text in dark), as the
 // selected tab in a segmented track; ToggleGroup draws the track.
 const toggleVariants = cva(
-  "group/toggle inline-flex items-center justify-center gap-1 rounded-full text-[13px] font-medium whitespace-nowrap text-subtle transition-colors outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:ring-destructive/20 aria-pressed:bg-thumb aria-pressed:text-foreground aria-pressed:shadow-thumb data-[state=on]:bg-thumb data-[state=on]:text-foreground data-[state=on]:shadow-thumb [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+  "group/toggle inline-flex items-center justify-center gap-1 rounded-full border border-transparent text-[13px] font-medium whitespace-nowrap text-subtle transition-colors outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 aria-invalid:ring-destructive/20 aria-pressed:border-signal aria-pressed:bg-thumb aria-pressed:text-signal aria-pressed:shadow-thumb dark:aria-pressed:text-foreground data-[state=on]:border-signal data-[state=on]:bg-thumb data-[state=on]:text-signal data-[state=on]:shadow-thumb dark:data-[state=on]:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {

@@ -22,6 +22,7 @@ import {
   boundariesSet,
   CHECKING,
   currentVersion,
+  hasJoined,
   isAccepted,
   publicOrigin,
   SETUP_STEPS,
@@ -69,6 +70,11 @@ export function useViewerSetup(intervalMs?: number) {
     /** Everything the steps are worked out from has loaded at least once. */
     known: !!me.data && !!statuses.data && !!bounds.data,
   }
+}
+
+/** Whether the join card shows: progress has loaded and the viewer has not joined yet. */
+export function joinCardShows(v: ReturnType<typeof useViewerSetup>): boolean {
+  return v.known && !v.missing && !hasJoined(v.entry, v.bounds.data, v.accepted)
 }
 
 /** Step 2: the team's topic, and Accept. An acceptance of any version up to the current one holds. */
@@ -142,7 +148,7 @@ function StepItem({ n, step, children }: { n: number; step: SetupStep; children?
       id={`setup-step-${step.id}`}
       // The join card's "Go to Accept" brings this step into view and focuses it when its button cannot be.
       tabIndex={-1}
-      className="flex gap-3 rounded-sm py-3.5 outline-none focus-visible:ring-3 focus-visible:ring-ring/40"
+      className="-mx-2 flex gap-3 rounded-sm px-2 py-3.5 outline-none focus-visible:ring-2 focus-visible:ring-ring data-[focus-ring=true]:ring-2 data-[focus-ring=true]:ring-ring"
       data-setup-step={step.id}
       data-done={step.done ? 'true' : 'false'}
     >
@@ -185,6 +191,8 @@ export function SetupPage({ join: joinCard }: { join?: ReactNode } = {}) {
   const origin = publicOrigin(window.location, join.data)
   const command = origin ? setupCommand(origin) : null
   const allDone = !loading && done === SETUP_STEPS
+  // The join card above already has the Terminal steps and the setup line: say them once.
+  const cardShown = joinCard !== undefined && joinCardShows(v)
 
   const macBody = (step: SetupStep) => (
     <>
@@ -192,6 +200,15 @@ export function SetupPage({ join: joinCard }: { join?: ReactNode } = {}) {
         <p className="text-[12.5px] leading-relaxed text-subtle">
           Your Mac answers teammates in the background. To change your folders, run the setup line again.
         </p>
+      ) : cardShown ? (
+        <>
+          <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-see-card>
+            Follow &quot;Join in 2 minutes&quot; above.
+          </p>
+          <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-command>
+            Or, in Claude Code, type <span className="font-mono text-[12px] text-foreground">/team-relay:setup</span>
+          </p>
+        </>
       ) : (
         <>
           <p className="text-[12.5px] leading-relaxed text-subtle">
@@ -202,7 +219,7 @@ export function SetupPage({ join: joinCard }: { join?: ReactNode } = {}) {
           </p>
         </>
       )}
-      {command ? (
+      {cardShown ? null : command ? (
         step.done ? (
           <CopyCommand text={command} label="setup line" />
         ) : (

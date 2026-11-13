@@ -59,7 +59,7 @@ export function CopyFallback({ text, label }: { text: string; label: string }) {
         value={text}
         rows={lines}
         onFocus={(e) => e.currentTarget.select()}
-        className="w-full resize-none rounded-sm border border-input bg-field px-2.5 py-1.5 font-mono text-[12px] leading-[1.6] text-foreground outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40"
+        className="w-full resize-none rounded-sm border border-input bg-field px-2.5 py-1.5 font-mono text-[12px] leading-[1.6] text-foreground outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
       />
     </div>
   )

@@ -3,9 +3,9 @@ import type { ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useJoin } from '@/hooks/queries'
-import { COME_BACK, OPEN_TERMINAL, PASTE_LINE, hasJoined, publicOrigin, setupCommand } from '@/lib/setup'
+import { COME_BACK, OPEN_TERMINAL, PASTE_LINE, publicOrigin, setupCommand } from '@/lib/setup'
 import { BigCopyCommand } from './copy'
-import { useViewerSetup } from './setup'
+import { joinCardShows, useViewerSetup } from './setup'
 
 // M11-SPEC "Simpler joining": on the Setup page, above the steps, for a viewer who has not joined
 // yet (their Mac has never reported in, or they have never accepted the team's topic), one small
@@ -28,8 +28,7 @@ function Item({ n, children }: { n: number; children: ReactNode }) {
 
 /** Whether the join card shows: progress has loaded and the viewer has not joined yet. */
 export function useShowJoinCard(): boolean {
-  const v = useViewerSetup()
-  return v.known && !v.missing && !hasJoined(v.entry, v.bounds.data, v.accepted)
+  return joinCardShows(useViewerSetup())
 }
 
 /**
@@ -42,7 +41,14 @@ export function goToAccept(): void {
   const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
   if (typeof step.scrollIntoView === 'function') step.scrollIntoView({ block: 'center', behavior: reduce ? 'auto' : 'smooth' })
   const button = step.querySelector<HTMLButtonElement>('button[data-accept-version]:not(:disabled)')
-  ;(button ?? step).focus({ preventScroll: true })
+  if (button) {
+    button.focus({ preventScroll: true })
+    return
+  }
+  // Focus set by script draws no :focus-visible ring on the step everywhere: mark it until focus leaves.
+  step.setAttribute('data-focus-ring', 'true')
+  step.addEventListener('blur', () => step.removeAttribute('data-focus-ring'), { once: true })
+  step.focus({ preventScroll: true })
 }
 
 export function JoinCard() {

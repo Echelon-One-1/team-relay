@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronsUpDown, Plus, ShieldCheck, ShieldUser, UserX } from 'lucide-react'
 import { useId, useState, type FormEvent, type ReactNode } from 'react'
 
@@ -6,7 +7,7 @@ import type { InvitationEntry, TeamEntry, Teams } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { useTeamChange } from '@/hooks/queries'
+import { teamsKey, useTeamChange } from '@/hooks/queries'
 import { useNav } from '@/hooks/team'
 import { suggestMemberId } from '@/lib/roster'
 import {
@@ -29,7 +30,7 @@ import { Panel, RelayMark } from './primitives'
 // for a viewer who is on no team.
 
 const inputClass =
-  'h-9 w-full min-w-0 rounded-sm border border-input bg-field px-2.5 text-[12.5px] text-foreground shadow-none outline-none transition-colors placeholder:text-faint focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 aria-invalid:border-bad'
+  'h-9 w-full min-w-0 rounded-sm border border-input bg-field px-2.5 text-[12.5px] text-foreground shadow-none outline-none transition-colors placeholder:text-faint focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring aria-invalid:border-bad'
 
 function InlineError({ id, children }: { id?: string; children: string | null }) {
   if (!children) return null
@@ -132,7 +133,7 @@ function TeamOption({ t, current, onPick }: { t: TeamEntry; current: boolean; on
         aria-current={current ? 'true' : undefined}
         data-team-option={t.team}
         className={cn(
-          'flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/40',
+          'flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring',
           current && 'bg-signal-soft hover:bg-signal-soft',
         )}
       >
@@ -172,7 +173,7 @@ export function TeamSwitcher() {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="relative inline-flex h-8 min-w-0 max-w-[14rem] sm:max-w-[22rem] items-center gap-1.5 rounded-md px-2 text-[12.5px] outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/40 aria-expanded:bg-muted"
+          className="relative inline-flex h-8 min-w-0 max-w-[14rem] sm:max-w-[22rem] items-center gap-1.5 rounded-md px-2 text-[12.5px] outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring aria-expanded:bg-muted"
           aria-label={`Team ${current?.name ?? nav.team ?? ''}. Switch team${invitations ? `, ${invitations} ${invitations === 1 ? 'invitation' : 'invitations'}` : ''}`}
           data-team-switcher
         >
@@ -219,7 +220,7 @@ export function TeamSwitcher() {
                   setOpen(false)
                   nav.openCreate()
                 }}
-                className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[12.5px] outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50"
+                className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[12.5px] outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
                 data-create-team
               >
                 <Plus aria-hidden className="size-4 text-subtle" />
@@ -235,7 +236,7 @@ export function TeamSwitcher() {
                   nav.setView('admin')
                 }}
                 aria-current={nav.view === 'admin' ? 'page' : undefined}
-                className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[12.5px] outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/40"
+                className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[12.5px] outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
                 data-admin-link
               >
                 <ShieldUser aria-hidden className="size-4 text-subtle" />
@@ -265,6 +266,7 @@ function Slots({ used, max }: { used: number; max: number }) {
 
 export function CreateTeamDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const nav = useNav()
+  const qc = useQueryClient()
   const teams = nav.teams
   const change = useTeamChange()
   const [name, setName] = useState('')
@@ -308,10 +310,13 @@ export function CreateTeamDialog({ open, onOpenChange }: { open: boolean; onOpen
     change.mutate(
       { kind: 'create', name: name.trim(), id: sentId, owner_member_id: effectiveMember },
       {
-        onSuccess: (out) => {
+        onSuccess: async (out) => {
           const created = (out as { team?: unknown } | null)?.team
           onOpenChange(false)
-          // M10 §1: straight on to the new team's boundaries, on its settings page.
+          // M10 §1: straight on to the new team's boundaries, on its settings page; only once the
+          // teams read again name it, so no other team's settings are drawn in between. A failed
+          // read still goes on: the console then shows what it has, as after any change.
+          await qc.refetchQueries({ queryKey: teamsKey }).catch(() => undefined)
           nav.selectTeam(typeof created === 'string' ? created : sentId, 'boundaries', 'settings')
         },
         onError: (err: ChangeError) => setError(createRefusal(err, max)),

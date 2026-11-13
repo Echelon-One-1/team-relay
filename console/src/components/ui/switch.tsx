@@ -12,7 +12,7 @@ function Switch({
       data-slot="switch"
       className={cn(
         // 28 x 16 with a 12px knob inset 2px: off on the grey track, on in the accent.
-        "peer inline-flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-switch-off",
+        "peer inline-flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-primary data-[state=unchecked]:bg-switch-off",
         className
       )}
       {...props}

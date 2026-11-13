@@ -76,7 +76,7 @@ function ConfirmDelete({ t, onDone }: { t: AdminTeam; onDone: () => void }) {
               setTyped(e.target.value.trim())
               setError(null)
             }}
-            className="h-8 w-full min-w-0 rounded-sm border border-input bg-field px-2.5 font-mono text-[12px] outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40"
+            className="h-8 w-full min-w-0 rounded-sm border border-input bg-field px-2.5 font-mono text-[12px] outline-none focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring"
           />
         </label>
         <Button type="submit" size="sm" variant="destructive" disabled={typed !== t.id || del.isPending}>

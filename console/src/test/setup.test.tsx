@@ -90,8 +90,9 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
       'Set up your Mac',
       "Accept the team's topic",
     ])
-    expect(within(step('mac')).getByText('Open Terminal (press Cmd+Space, type Terminal, press Enter). Paste this line, press Enter and answer its questions.')).toBeInTheDocument()
-    expect(within(step('mac')).getByRole('button', { name: 'Copy setup line' })).toBeInTheDocument()
+    // Not joined yet: the join card above has the Terminal steps and the line; the step points to it.
+    expect(within(step('mac')).getByText('Follow "Join in 2 minutes" above.')).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: 'Join in 2 minutes' })).getByRole('button', { name: 'Copy setup line' })).toBeInTheDocument()
     // Nothing reported yet: no list of technical checks.
     expect(openChecks()).toEqual([])
     expect(within(step('accept')).getByText(/Operations at Example Co/)).toBeInTheDocument()
@@ -99,15 +100,15 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect(within(askCta()).getByRole('button', { name: 'Ask the team' })).toBeInTheDocument()
   })
 
-  it('shows the setup line with a big Copy button, only what is not done on the Mac, and the progress', async () => {
+  it('shows the setup line with a big Copy button (in the join card above), only what is not done on the Mac, and the progress', async () => {
     window.history.replaceState(null, '', '/join')
     server()
     const user = userEvent.setup()
     renderWithClient(<App />)
     const panel = await setupPanel()
-    const line = await within(panel).findByText(LINE)
+    const line = await screen.findByText(LINE)
     expect(line.closest('[data-command]')).not.toBeNull()
-    await user.click(within(panel).getByRole('button', { name: 'Copy setup line' }))
+    await user.click(screen.getByRole('button', { name: 'Copy setup line' }))
     expect(await navigator.clipboard.readText()).toBe(LINE)
     // alice's Mac: everything but a folder (it reported none chosen); she has not accepted yet.
     await waitFor(() => expect(within(panel).getByText('0 of 2 done')).toBeInTheDocument())
@@ -140,10 +141,10 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     const user = userEvent.setup()
     vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValue(new DOMException('no', 'NotAllowedError'))
     renderWithClient(<App />)
-    const panel = await setupPanel()
-    await within(panel).findByText(LINE)
-    await user.click(within(panel).getByRole('button', { name: 'Copy setup line' }))
-    const box = await within(panel).findByRole('textbox', { name: 'setup line' })
+    await setupPanel()
+    await screen.findByText(LINE)
+    await user.click(screen.getByRole('button', { name: 'Copy setup line' }))
+    const box = await screen.findByRole('textbox', { name: 'setup line' })
     expect(box).toHaveValue(LINE)
     expect(box).toHaveAttribute('readonly')
     expect(document.activeElement).toBe(box)
@@ -249,6 +250,22 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.getAttribute('data-view-tab'))).toEqual(['ask', 'team', 'join', 'settings'])
     expect(tab('team')).toHaveAttribute('aria-current', 'page')
     expect(window.location.pathname).toBe('/')
+  })
+
+  it('a console server that serves one team (no /api/teams): no Team settings tab, and /settings becomes /team', async () => {
+    window.history.replaceState(null, '', '/settings?x=1')
+    const replace = vi.spyOn(window.history, 'replaceState')
+    server({ override: (c) => (c.path === '/api/teams' ? json({ error: 'not_found' }, 404) : null) })
+    renderWithClient(<App />)
+    await screen.findByRole('region', { name: 'Members' })
+    const nav = screen.getByRole('navigation', { name: 'Pages' })
+    expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.getAttribute('data-view-tab'))).toEqual(['ask', 'team', 'join'])
+    await waitFor(() => expect(window.location.pathname).toBe('/team'))
+    expect(window.location.search).toBe('?x=1')
+    // In place: Back does not lead to an address that shows something else.
+    expect(replace.mock.calls.map((c) => c[2])).toContain('/team?x=1')
+    expect(tab('team')).toHaveAttribute('aria-current', 'page')
+    expect(screen.queryByRole('region', { name: 'Team settings' })).toBeNull()
   })
 
   it('a relay without guided setup (404): says so, ticks nothing, shows no banner', async () => {

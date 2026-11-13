@@ -29,7 +29,7 @@ import { cn } from '@/lib/utils'
 
 /** The topic's text box, as the console's other fields. */
 const fieldClass =
-  'h-9 w-full min-w-0 rounded-sm border border-input bg-field px-2.5 text-[12.5px] text-foreground shadow-none outline-none transition-colors placeholder:text-faint focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 aria-invalid:border-bad'
+  'h-9 w-full min-w-0 rounded-sm border border-input bg-field px-2.5 text-[12.5px] text-foreground shadow-none outline-none transition-colors placeholder:text-faint focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring aria-invalid:border-bad'
 
 export const UNSET_LINE = "Until boundaries are set, answers need each member's approval, as before."
 

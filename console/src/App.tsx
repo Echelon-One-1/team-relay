@@ -65,6 +65,13 @@ export function Console() {
   useEffect(() => {
     if (stranger && nav.teams) void qc.invalidateQueries({ queryKey: teamsKey })
   }, [stranger, nav.teams, qc])
+  // A console server that serves one team names no team, so it has no settings page: /settings
+  // shows the team, and the address says so (in place, so Back does not return to it).
+  const noSettings = nav.view === 'settings' && entry === null
+  const { replaceView } = nav
+  useEffect(() => {
+    if (noSettings) replaceView('team')
+  }, [noSettings, replaceView])
   if (stranger) return nav.teams ? <NoTeamPage teams={nav.teams} lost={nav.team} /> : <NotOnTeam email={stranger.email} />
   if (conn.state === 'session_expired' || me.error?.kind === 'session_expired') return <SessionExpired />
   if (conn.state === 'unauthorized' || me.error?.kind === 'unauthorized') return <Expired />
@@ -115,7 +122,7 @@ export function Console() {
   // Team settings (its own page, /settings): everyone reads them, owners change them.
   function settingsView(team: NonNullable<typeof entry>) {
     return (
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4" data-settings-team={team.team}>
         <TeamSettings
           entry={team}
           owner={team.role === 'owner' && owner}
@@ -237,8 +244,8 @@ function Teams() {
   // Only once that team is the one shown (a new team appears after the teams are read again).
   const focus = focusOn !== null && focusOn.team === team ? focusOn.part : null
   const nav = useMemo<Nav>(
-    () => ({ teams: data ?? null, team, selectTeam, view, setView, openCreate: () => setCreating(true), focus, clearFocus }),
-    [data, team, selectTeam, view, setView, focus, clearFocus],
+    () => ({ teams: data ?? null, team, selectTeam, view, setView, replaceView, openCreate: () => setCreating(true), focus, clearFocus }),
+    [data, team, selectTeam, view, setView, replaceView, focus, clearFocus],
   )
 
   if (teams.isPending) return <Loading />

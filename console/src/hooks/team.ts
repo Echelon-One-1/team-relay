@@ -29,6 +29,8 @@ export interface Nav {
   selectTeam: (team: string, focus?: ConsoleFocus, view?: ConsoleView) => void
   view: ConsoleView
   setView: (view: ConsoleView) => void
+  /** The same, in place of the current history entry (an address that shows another page). */
+  replaceView: (view: ConsoleView) => void
   openCreate: () => void
   /** What to bring into view, until the page has done so (clearFocus). */
   focus: ConsoleFocus | null
@@ -41,6 +43,7 @@ export const NavContext = createContext<Nav>({
   selectTeam: () => {},
   view: 'team',
   setView: () => {},
+  replaceView: () => {},
   openCreate: () => {},
   focus: null,
   clearFocus: () => {},

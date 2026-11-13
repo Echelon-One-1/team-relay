@@ -158,7 +158,7 @@ export function Panel({
               aria-expanded={open}
               aria-controls={bodyId}
               onClick={collapse.onToggle}
-              className="-my-1 flex items-center gap-1.5 rounded-md px-2 py-1 text-left transition-colors hover:bg-muted/50 focus-visible:ring-3 focus-visible:ring-ring/40 focus-visible:outline-none"
+              className="-my-1 flex items-center gap-1.5 rounded-md px-2 py-1 text-left transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
             >
               <ChevronRight
                 aria-hidden

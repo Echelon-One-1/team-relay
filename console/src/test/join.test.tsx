@@ -71,6 +71,26 @@ describe('the join card', () => {
     // The card sits above the viewer's own progress, on the same page.
     const setup = await screen.findByRole('region', { name: 'Your setup' })
     expect(c.compareDocumentPosition(setup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // One setup line and one big Copy button on the page: the Mac step points up to the card.
+    const mac = setup.querySelector('[data-setup-step="mac"]') as HTMLElement
+    expect(within(mac).getByText('Follow "Join in 2 minutes" above.')).toBeInTheDocument()
+    expect(within(mac).queryByText(LINE)).toBeNull()
+    expect(within(mac).queryByText(/Open Terminal/)).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'Copy setup line' })).toHaveLength(1)
+    expect(screen.getAllByText(LINE)).toHaveLength(1)
+  })
+
+  it('without the card (joined), the Mac step shows the line again', async () => {
+    const relay = server()
+    relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, 0)
+    await relay.handle('api/acceptance', { method: 'PUT', headers: { 'X-Relay-Team': 'demo' }, body: JSON.stringify({ version: 2 }) })
+    renderWithClient(<App />)
+    const setup = await screen.findByRole('region', { name: 'Your setup' })
+    // Her acceptance has loaded, and she has joined.
+    await waitFor(() => expect(setup.querySelector('[data-setup-step="accept"]')).toHaveAttribute('data-done', 'true'))
+    expect(screen.queryByRole('region', { name: 'Join in 2 minutes' })).toBeNull()
+    expect(await within(setup).findByText(LINE)).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Copy setup line' })).toHaveLength(1)
   })
 
   it('"Go to Accept" brings the Accept step on the same page into view and focuses Accept', async () => {
@@ -96,12 +116,29 @@ describe('the join card', () => {
     }
   })
 
+  it('"Go to Accept" with Accept already pressed focuses the step, with a visible ring until focus leaves', async () => {
+    const relay = server()
+    // Accepted, but the Mac has not reported in: still not joined, and the Accept button is disabled.
+    await relay.handle('api/acceptance', { method: 'PUT', headers: { 'X-Relay-Team': 'demo' }, body: JSON.stringify({ version: 2 }) })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const c = await card()
+    expect(await screen.findByRole('button', { name: 'Accepted' })).toBeDisabled()
+    await user.click(within(c).getByRole('button', { name: 'Go to Accept' }))
+    const step = document.querySelector('[data-setup-step="accept"]') as HTMLElement
+    expect(document.activeElement).toBe(step)
+    expect(step).toHaveAttribute('data-focus-ring', 'true')
+    await user.click(within(c).getByRole('button', { name: 'Copy setup line' }))
+    expect(step).not.toHaveAttribute('data-focus-ring')
+  })
+
   it('the team page does not show it', async () => {
     window.history.replaceState(null, '', '/team')
     server()
     renderWithClient(<App />)
     await screen.findByRole('region', { name: 'Members' })
-    await act(async () => {})
+    // Progress has loaded (the Setup tab counts 0 of 2) and she has not joined: still no card here.
+    await waitFor(() => expect(document.querySelector('[data-setup-tab-count]')).toHaveTextContent('0/2'))
     expect(screen.queryByRole('region', { name: 'Join in 2 minutes' })).toBeNull()
     expect(document.querySelector('[data-join-card]')).toBeNull()
   })
@@ -125,6 +162,8 @@ describe('the join card', () => {
       relay.setBoundariesAs('demo', 'bob', { topic: 'Example Co: payments only.' })
       await flush(60_000)
       await flush(50)
+      // Her acceptance has loaded: the Accept step is done.
+      expect(document.querySelector('[data-setup-step="accept"]')).toHaveAttribute('data-done', 'true')
       expect(screen.queryByRole('region', { name: 'Join in 2 minutes' })).toBeNull()
     } finally {
       vi.useRealTimers()
@@ -134,8 +173,8 @@ describe('the join card', () => {
   it('no card while progress is unknown: a relay that does not report it (404)', async () => {
     server((p) => (p === '/api/members-status' || p === '/api/acceptance' ? json({ error: 'not_found' }, 404) : null))
     renderWithClient(<App />)
-    await screen.findByRole('region', { name: 'Your setup' })
-    await act(async () => {})
+    // The 404 has been read: the page says progress cannot be shown.
+    expect(await screen.findByText(/This team can't show your progress here yet/)).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Join in 2 minutes' })).toBeNull()
   })
 
