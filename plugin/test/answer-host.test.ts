@@ -6,7 +6,7 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { execFile, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +15,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { AnswerHost, BUSY_REPLY, NOT_SET_UP_REPLY, OUTSIDE_SET } from '../src/answer-host.js';
 import { boundaryRubric, childArgs, rubric } from '../src/headless.js';
+import { resolveClaudeBin } from '../src/locate.js';
 import { RelayClient } from '../src/relay-client.js';
 import { scopeFolder } from '../src/scope.js';
 import { ACCEPTED, BOUNDARIES, ORG, REPO_ROOT, TOPIC, makeFixture, writeFolders, type Fixture } from './helpers/boundary-fixture.js';
@@ -972,6 +973,53 @@ describe('boundary mode (M10-SPEC §2, §3)', () => {
       expect(replyTo(b)!.body.text).toBe(BUSY_REPLY);
       expect(host.queue.size).toBe(0);
       expect(pushes.some((p) => p.includes('waiting for your approval'))).toBe(false);
+    } finally {
+      await host.stop();
+      if (saved === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = saved;
+    }
+  });
+  it("a claude the desktop app replaced while the host runs: the next answer starts the new build", async () => {
+    relay.setBoundaries(BOUNDARIES);
+    relay.acceptances.set('bob', 1);
+    const desk = join(tmp, 'desk-home');
+    const marks = join(tmp, 'builds.log');
+    const build = (version: string) => {
+      const dir = join(desk, 'Library', 'Application Support', 'Claude', 'claude-code', version, 'h1');
+      const exe = join(dir, 'claude.app', 'Contents', 'MacOS', 'claude');
+      mkdirSync(join(exe, '..'), { recursive: true });
+      writeFileSync(exe, `#!/bin/sh\necho ${version} >>"${marks}"\nexec "${process.execPath}" "${STUB}" "$@"\n`);
+      chmodSync(exe, 0o755);
+      writeFileSync(join(dir, '.verified'), 'x');
+      return exe;
+    };
+    const old = build('2.1.9');
+    const lookup = { HOME: desk, PATH: '', TEAM_RELAY_CLAUDE_BIN: old };
+    const saved = process.env.TMPDIR;
+    process.env.TMPDIR = tmp;
+    const host = new AnswerHost({
+      client: new RelayClient({ url: relay.url, team: 'demo', token: () => TOKEN_OF.bob!, attempts: 1 }),
+      me: { team: 'demo', member: 'bob', teammates: ['alice', 'carol'] },
+      env: { PATH: process.env.PATH ?? '', HOME: f.home, TMPDIR: tmp, XDG_CONFIG_HOME: f.xdg },
+      connection: { mode: 'token', url: relay.url, team: 'demo', token: TOKEN_OF.bob! },
+      push: () => {},
+      log: () => {},
+      cwd: proj,
+      distDir: DIST,
+      claudeBin: () => resolveClaudeBin(lookup),
+      notify: () => {},
+    });
+    void host.start();
+    try {
+      const a = ask(script([{ reply: { text: 'first' } }]));
+      await waitFor(() => replyTo(a), 15_000, 'the first answer');
+      // The app updates: the old build is gone, a new one is there.
+      rmSync(join(desk, 'Library', 'Application Support', 'Claude', 'claude-code', '2.1.9'), { recursive: true });
+      build('2.1.10');
+      const b = ask(script([{ reply: { text: 'second' } }]));
+      await waitFor(() => replyTo(b), 15_000, 'the second answer');
+      expect(replyTo(b)!.body.text).toBe('second');
+      expect(readFileSync(marks, 'utf8')).toBe('2.1.9\n2.1.10\n');
     } finally {
       await host.stop();
       if (saved === undefined) delete process.env.TMPDIR;

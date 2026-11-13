@@ -29,7 +29,9 @@ MIN_NODE_MINOR=12
 # The Node.js build the setup runs with (and the plugin falls back to): the official macOS tarball,
 # pinned by version and by SHA-256 (from https://nodejs.org/dist/v22.23.4/SHASUMS256.txt). A
 # download with any other hash is refused. Nothing but an edit of this file changes these (the
-# tests edit a copy, never the environment).
+# tests edit a copy, never the environment). plugin/bin/node-pins.sh holds the same three values for
+# the plugin's launcher, which downloads this build when the setup has not;
+# scripts/tests/run-node.test.sh fails when the two differ.
 NODE_VERSION='v22.23.4'
 NODE_SHA256_ARM64='c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428'
 NODE_SHA256_X64='efcc2b0db6f94bf53eddb038fe2b370277a042bd29e4f19b8f8e23598795b819'

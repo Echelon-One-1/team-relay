@@ -284,7 +284,7 @@ describe('channel server: asker tools', () => {
     const s = await channel('alice', 'asker');
     const { tools } = await s.client.listTools();
     // M5-SPEC §6: login, login_wait and whoami join the asker's tools; §9 item 2: logout is not a tool.
-    // M10-SPEC §2: folders (every change is decided in a dialog).
+    // M10-SPEC §2: folders (every change is decided in a dialog). /team-relay:setup: setup.
     expect(tools.map((t) => t.name).sort()).toEqual([
       'ask_question',
       'folders',
@@ -294,6 +294,7 @@ describe('channel server: asker tools', () => {
       'login_wait',
       'request_status',
       'review_approvals',
+      'setup',
       'whoami',
     ]);
   });

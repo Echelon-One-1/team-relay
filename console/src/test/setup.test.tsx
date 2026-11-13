@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setConsoleKey } from '@/api/key'
 import { setTransport } from '@/api/client'
 import { App } from '@/App'
+import { BACKGROUND_FAILED_TEXT, BACKGROUND_TEXT, FINISHED_TEXT, FOLDERS_HINT, NO_CHOOSER_TEXT, resetSetupFinished } from '@/components/console/local-setup'
 import { inviteMessage } from '@/lib/setup'
 import { FIXTURE_FOLDER_ID, fixtureBoundaries } from '@/mock/fixtures'
 import { MockRelay, mockStatus } from '@/mock/relay'
@@ -443,5 +444,213 @@ describe('the Members panel and the invite message (M11 §6)', () => {
     await user.click(tab('join'))
     expect(await setupPanel()).toBeInTheDocument()
     expect(window.location.pathname).toBe('/join')
+  })
+})
+
+// /team-relay:setup: on the member's own Mac, the console server started by the setup tool answers
+// /api/local/*: the Setup view then shows the local steps (signed in, accept, folders, background
+// answering, Done). Folders are added only through the Mac's folder chooser (the server opens it).
+describe('the local Setup page of /team-relay:setup', () => {
+  type Local = { folders: string[]; chooser: boolean; installed: boolean; choice?: unknown; available?: boolean; reason?: string; failInstall?: boolean }
+  function localServer(local: Local) {
+    return server({
+      override: (c) => {
+        if (!c.path.startsWith('/api/local/')) return null
+        if (c.path === '/api/local/setup') {
+          return json({
+            signed_in: { member: 'alice', team: 'demo', email: 'alice@example.com' },
+            folders: local.folders,
+            chooser: local.chooser,
+            background: { installed: local.installed, available: local.available ?? true, ...(local.reason ? { reason: local.reason } : {}) },
+            limits: { max_folders: 20 },
+          })
+        }
+        if (c.path === '/api/local/folders/choose') {
+          const out = local.choice as { folders: string[] }
+          local.folders = out.folders
+          return json(out)
+        }
+        if (c.path === '/api/local/folders/remove') {
+          local.folders = local.folders.filter((f) => f !== (c.body as { path: string }).path)
+          return json({ folders: local.folders })
+        }
+        if (c.path === '/api/local/background') {
+          if (local.failInstall && (c.body as { on: boolean }).on) return json({ error: 'background_failed', detail: 'launchctl did not load it.' }, 500)
+          local.installed = (c.body as { on: boolean }).on
+          return json({ installed: local.installed })
+        }
+        if (c.path === '/api/local/done') return json({ ok: true })
+        return json({ error: 'not_found' }, 404)
+      },
+    })
+  }
+  const localPanel = () => screen.findByRole('region', { name: 'Set up this Mac' })
+  const states = () => Object.fromEntries([...document.querySelectorAll('[data-local-step]')].map((e) => [e.querySelector('h3')!.firstChild!.textContent, e.getAttribute('data-state')]))
+  const writes = (s: ReturnType<typeof server>) => s.calls.filter((c) => c.method !== 'GET' && c.path.startsWith('/api/local/')).map((c) => [c.method, c.path, c.body])
+
+  afterEach(() => resetSetupFinished())
+
+  it('shows each step with its state; Add folder and Remove call the routes; background on by default; Done', async () => {
+    window.history.replaceState(null, '', '/join')
+    const local: Local = {
+      folders: ['~/code/example-org'],
+      chooser: true,
+      installed: false,
+      choice: { added: ['~/work/notes'], refused: [{ path: '~', reason: 'it is your home directory' }], cancelled: false, folders: ['~/code/example-org', '~/work/notes'] },
+    }
+    const s = localServer(local)
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    expect(within(panel).getByText('alice@example.com')).toBeInTheDocument()
+    await waitFor(() => expect(states()).toEqual({
+      'Signed in': 'done',
+      'Accept what the team shares': 'todo',
+      'Folders your Claude answers from': 'done',
+      'Answer in the background': 'todo',
+    }))
+    // Not the Terminal page.
+    expect(screen.queryByRole('region', { name: 'Your setup' })).toBeNull()
+    expect(within(panel).getByText(FOLDERS_HINT)).toBeInTheDocument()
+    expect(within(panel).getByText(BACKGROUND_TEXT)).toBeInTheDocument()
+
+    await user.click(within(panel).getByRole('button', { name: 'Add folder' }))
+    await within(panel).findByText('~/work/notes')
+    expect(within(panel).getByText(/Not added:/).closest('li')).toHaveTextContent('Not added: ~ (it is your home directory).')
+    await user.click(within(panel).getByRole('button', { name: 'Remove ~/code/example-org' }))
+    await waitFor(() => expect(within(panel).queryByText('~/code/example-org')).toBeNull())
+
+    const sw = within(panel).getByRole('switch', { name: 'Background answering' })
+    expect(sw).toBeChecked()
+    // Nothing installed before Done.
+    expect(writes(s)).toEqual([
+      ['POST', '/api/local/folders/choose', {}],
+      ['POST', '/api/local/folders/remove', { path: '~/code/example-org' }],
+    ])
+    await user.click(within(panel).getByRole('button', { name: 'Done' }))
+    expect(await screen.findByText(FINISHED_TEXT)).toBeInTheDocument()
+    expect(FINISHED_TEXT).toBe('All set. Go back to Claude.')
+    expect(writes(s).slice(2)).toEqual([
+      ['PUT', '/api/local/background', { on: true }],
+      ['POST', '/api/local/done', {}],
+    ])
+    // No route is ever given a folder to add.
+    expect(s.calls.filter((c) => c.path === '/api/local/folders/choose').every((c) => JSON.stringify(c.body) === '{}')).toBe(true)
+  })
+
+  it('turning background answering off applies at once, and Done then changes nothing more', async () => {
+    window.history.replaceState(null, '', '/join')
+    const s = localServer({ folders: [], chooser: true, installed: false })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    await waitFor(() => expect(states()['Folders your Claude answers from']).toBe('todo'))
+    expect(within(panel).getByText('No folders yet.')).toBeInTheDocument()
+    await user.click(within(panel).getByRole('switch', { name: 'Background answering' }))
+    await waitFor(() => expect(writes(s)).toEqual([['PUT', '/api/local/background', { on: false }]]))
+    expect(states()['Answer in the background']).toBe('not_needed')
+    await user.click(within(panel).getByRole('button', { name: 'Done' }))
+    await screen.findByText(FINISHED_TEXT)
+    expect(writes(s)).toEqual([
+      ['PUT', '/api/local/background', { on: false }],
+      ['POST', '/api/local/done', {}],
+    ])
+  })
+
+  it('background answering cannot run here: the switch is off and disabled with the reason, and Done finishes without it', async () => {
+    window.history.replaceState(null, '', '/join')
+    const reason = 'Background answering needs Claude Code, which was not found on this Mac.'
+    const s = localServer({ folders: [], chooser: true, installed: false, available: false, reason })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    const sw = within(panel).getByRole('switch', { name: 'Background answering' })
+    expect(sw).not.toBeChecked()
+    expect(sw).toBeDisabled()
+    expect(within(panel).getByText(reason)).toBeInTheDocument()
+    await waitFor(() => expect(states()['Answer in the background']).toBe('not_needed'))
+    await user.click(within(panel).getByRole('button', { name: 'Done' }))
+    expect(await screen.findByText(FINISHED_TEXT)).toBeInTheDocument()
+    expect(writes(s)).toEqual([['POST', '/api/local/done', {}]])
+  })
+
+  it('installed but no longer able to run here: the switch shows on and can still be turned off', async () => {
+    window.history.replaceState(null, '', '/join')
+    const reason = 'Background answering needs Claude Code, which was not found on this Mac.'
+    const s = localServer({ folders: [], chooser: true, installed: true, available: false, reason })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    const sw = within(panel).getByRole('switch', { name: 'Background answering' })
+    expect(sw).toBeChecked()
+    expect(sw).toBeEnabled()
+    expect(within(panel).getByText(reason)).toBeInTheDocument()
+    await user.click(sw)
+    await waitFor(() => expect(writes(s)).toEqual([['PUT', '/api/local/background', { on: false }]]))
+    await waitFor(() => expect(sw).not.toBeChecked())
+    // Off now, and it cannot be turned on again here.
+    expect(sw).toBeDisabled()
+    await user.click(within(panel).getByRole('button', { name: 'Done' }))
+    await screen.findByText(FINISHED_TEXT)
+    expect(writes(s)).toEqual([
+      ['PUT', '/api/local/background', { on: false }],
+      ['POST', '/api/local/done', {}],
+    ])
+  })
+
+  it('turning background answering on fails at Done: the error shows, Done tries again, and "Finish without it" finishes', async () => {
+    window.history.replaceState(null, '', '/join')
+    const s = localServer({ folders: [], chooser: true, installed: false, failInstall: true })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    expect(within(panel).queryByRole('button', { name: 'Finish without it' })).toBeNull()
+    await user.click(within(panel).getByRole('button', { name: 'Done' }))
+    expect(await within(panel).findByText(BACKGROUND_FAILED_TEXT)).toBeInTheDocument()
+    expect(within(panel).getByText('launchctl did not load it.')).toBeInTheDocument()
+    expect(within(panel).queryByText(/relay did not answer/)).toBeNull()
+    expect(screen.queryByText(FINISHED_TEXT)).toBeNull()
+    await user.click(within(panel).getByRole('button', { name: 'Done' }))
+    await waitFor(() => expect(writes(s)).toHaveLength(2))
+    expect(screen.queryByText(FINISHED_TEXT)).toBeNull()
+    await user.click(within(panel).getByRole('button', { name: 'Finish without it' }))
+    expect(await screen.findByText(FINISHED_TEXT)).toBeInTheDocument()
+    expect(writes(s)).toEqual([
+      ['PUT', '/api/local/background', { on: true }],
+      ['PUT', '/api/local/background', { on: true }],
+      ['POST', '/api/local/done', {}],
+    ])
+  })
+
+  it('no folder chooser on this computer: says how to add folders instead', async () => {
+    window.history.replaceState(null, '', '/join')
+    localServer({ folders: [], chooser: false, installed: true })
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    expect(within(panel).getByText(NO_CHOOSER_TEXT)).toBeInTheDocument()
+    expect(within(panel).queryByRole('button', { name: 'Add folder' })).toBeNull()
+    await waitFor(() => expect(states()['Answer in the background']).toBe('done'))
+  })
+
+  it('a failed load says so and tries again', async () => {
+    window.history.replaceState(null, '', '/join')
+    let fail = true
+    server({ override: (c) => (c.path === '/api/local/setup' ? (fail ? json({ error: 'internal' }, 500) : json({ signed_in: { member: 'alice', team: 'demo', email: null }, folders: [], chooser: true, background: { installed: false, available: true }, limits: { max_folders: 20 } })) : null) })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const alert = await screen.findByText(/Your setup didn't load/)
+    fail = false
+    await user.click(within(alert.closest('[data-local-setup-error]') as HTMLElement).getByRole('button', { name: 'Try again' }))
+    expect(await localPanel()).toBeInTheDocument()
+  })
+
+  it('a console without the setup routes (404) shows the usual Setup page, which mentions /team-relay:setup', async () => {
+    window.history.replaceState(null, '', '/join')
+    server()
+    renderWithClient(<App />)
+    const panel = await setupPanel()
+    expect(within(step('mac')).getByText('/team-relay:setup')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Set up this Mac' })).toBeNull()
+    expect(panel).toBeInTheDocument()
   })
 })

@@ -89,7 +89,19 @@ flowchart LR
 
 ## Joining a team
 
-On a Mac, the simple way: open your team's page (the link in your invitation), click "Sign in
+On a Mac, the simple way needs no Terminal: in the Claude app (Claude Code), add the team
+tools, then type `/team-relay:setup`. First your browser opens on the relay's sign-in page:
+sign in with Google and choose your team (accept the invitation there). If you are signed in
+already, this step is skipped; if no browser tab opens, Claude shows you the sign-in link to
+open yourself, and you type `/team-relay:setup` again once you have signed in. Then the setup
+page opens, on your own Mac: accept what the team shares, add the folders your Claude answers
+from with the Mac's own folder chooser (every folder you use for the team: your copies of its
+GitHub projects, your Google Drive for desktop folders, shared documents), leave "Background
+answering" on (it answers teammates' questions from your folders even when Claude is closed;
+where it cannot run, the page says why and leaves it off), and click Done. The page says "All
+set. Go back to Claude." The plugin gets the Node.js it needs by itself.
+
+If you prefer Terminal: open your team's page (the link in your invitation), click "Sign in
 with Google", accept the invitation, and follow the card "Join in 2 minutes": open Terminal, paste the one setup line
 it shows, answer its questions (it gets what it needs, Node.js included, and opens the Mac's
 own folder chooser), then click Accept on the page. The Setup page shows what is left in plain

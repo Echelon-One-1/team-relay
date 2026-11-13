@@ -3,7 +3,7 @@ name: CI
 # The repository's checks (docs/M11-SPEC.md §7). Both jobs are required on main: `checks` and
 # `gitleaks`.
 #
-# checks: the setup script's tests and shellcheck; the plugin's type check and tests, and that the
+# checks: the setup script's and the Node.js launcher's tests and shellcheck; the plugin's type check and tests, and that the
 # committed plugin/dist/ is exactly what src/ and console/ build to; the console's type check, tests
 # and build; the relay's lint and its whole test suite against a throwaway Firestore emulator
 # (scripts/test-relay.sh: Docker, image pinned by digest, bound to 127.0.0.1).
@@ -58,10 +58,12 @@ jobs:
 
       - name: Setup script tests
         run: bash scripts/tests/setup-script.test.sh
+      - name: Node.js launcher tests
+        run: bash scripts/tests/run-node.test.sh
       - name: Shellcheck (warnings and errors)
         run: |
           shellcheck --version
-          shellcheck --severity=warning scripts/*.sh scripts/tests/*.sh relay/relay/static/setup.sh
+          shellcheck --severity=warning scripts/*.sh scripts/tests/*.sh relay/relay/static/setup.sh plugin/bin/run-node plugin/bin/node-pins.sh
       - name: Locate the pnpm store
         id: pnpm-store
         working-directory: plugin

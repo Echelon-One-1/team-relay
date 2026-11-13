@@ -10,6 +10,8 @@ import type {
   GithubListing,
   InboxSummary,
   Join,
+  LocalChoice,
+  LocalSetup,
   Me,
   MembersStatus,
   MyRequests,
@@ -281,6 +283,19 @@ function plainDetail(v: unknown): string | null {
   return t
 }
 
+/** Errors of the local setup routes (plugin/src/local-setup.ts), whose detail is written for the member. */
+const LOCAL_ERRORS = new Set([
+  'not_saved',
+  'folders_unreadable',
+  'no_chooser',
+  'chooser_open',
+  'chooser_unavailable',
+  'not_found',
+  'mac_only',
+  'background_unavailable',
+  'background_failed',
+])
+
 async function changeError(res: Response): Promise<ChangeError> {
   let body: Record<string, unknown> = {}
   if (isJson(res)) {
@@ -300,6 +315,10 @@ async function changeError(res: Response): Promise<ChangeError> {
       status: res.status,
       signedOut: true,
     })
+  }
+  // The Mac's own setup routes (/api/local/*) explain their refusals; show them as they are.
+  if (!isHosted() && typeof body.error === 'string' && LOCAL_ERRORS.has(body.error) && plainDetail(body.detail)) {
+    return new ChangeError(plainDetail(body.detail)!, { status: res.status })
   }
   if (res.status === 400 || res.status === 403 || res.status === 413 || res.status === 415) {
     return new ChangeError(plainDetail(body.detail) ?? 'The console refused that change.', { status: res.status })
@@ -327,7 +346,13 @@ async function changeError(res: Response): Promise<ChangeError> {
 }
 
 /** A change: JSON, same origin, no redirects followed. Resolves with the relay's answer. */
-export async function sendChange<T>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown, team?: string | null): Promise<T> {
+export async function sendChange<T>(
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  path: string,
+  body?: unknown,
+  team?: string | null,
+  timeoutMs: number = TIMEOUT_MS,
+): Promise<T> {
   const key = consoleKey()
   if (key === null && !isHosted()) throw new ChangeError('No console key.', { signedOut: true })
   const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' }
@@ -343,7 +368,7 @@ export async function sendChange<T>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
       cache: 'no-store',
       referrerPolicy: 'no-referrer',
       redirect: 'manual',
-      signal: typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(TIMEOUT_MS) : null,
+      signal: typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : null,
     })
   } catch {
     throw new ChangeError('The console server did not answer.')
@@ -360,6 +385,11 @@ export async function sendChange<T>(method: 'POST' | 'PUT' | 'PATCH' | 'DELETE',
 }
 
 const seg = (v: string) => encodeURIComponent(v)
+
+/** The Mac's folder chooser closes itself after 10 minutes; the page waits a little longer. */
+const CHOOSER_WAIT_MS = 11 * 60_000
+/** Installing background answering waits for launchd (up to about half a minute). */
+const BACKGROUND_WAIT_MS = 60_000
 
 export const api = {
   /** M9 §2: the viewer's teams (not about one team). */
@@ -403,6 +433,16 @@ export const api = {
   /** M11 §4: the viewer's last 20 requests, and a new question. */
   myRequests: (team?: string | null) => getJson<MyRequests>('api/my-requests', team),
   ask: (to: '*' | string[], question: string, team?: string | null) => sendChange<AskResult>('POST', 'api/ask', { to, question }, team),
+  /**
+   * /team-relay:setup's page, on the member's own Mac only (never called hosted): what it shows,
+   * the Mac's folder chooser (open for up to 10 minutes), removing a folder, background answering
+   * and Done. No call names a folder to add.
+   */
+  localSetup: () => getJson<LocalSetup>('api/local/setup'),
+  localChoose: () => sendChange<LocalChoice>('POST', 'api/local/folders/choose', {}, null, CHOOSER_WAIT_MS),
+  localRemove: (path: string) => sendChange<{ folders: string[] }>('POST', 'api/local/folders/remove', { path }),
+  localBackground: (on: boolean) => sendChange<{ installed: boolean }>('PUT', 'api/local/background', { on }, null, BACKGROUND_WAIT_MS),
+  localDone: () => sendChange<{ ok: boolean }>('POST', 'api/local/done', {}),
   activity: (since: string | null, limit = 200, team?: string | null) => {
     const q = new URLSearchParams({ limit: String(limit) })
     if (since !== null) q.set('since', since)

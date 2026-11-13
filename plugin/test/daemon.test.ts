@@ -68,11 +68,34 @@ describe('the daemon log (M11-SPEC §1)', () => {
 describe('Claude Code and the self-test (M11-SPEC §1, §3)', () => {
   it('TEAM_RELAY_CLAUDE_BIN must be an absolute path to an executable file', () => {
     const ok = script('claude', 'process.exit(0)');
-    expect(claudeBinFrom({ TEAM_RELAY_CLAUDE_BIN: ok })).toBe(ok);
-    expect(claudeBinFrom({ TEAM_RELAY_CLAUDE_BIN: 'claude' })).toBeNull();
-    expect(claudeBinFrom({ TEAM_RELAY_CLAUDE_BIN: join(tmp, 'missing') })).toBeNull();
-    expect(claudeBinFrom({ TEAM_RELAY_CLAUDE_BIN: tmp })).toBeNull();
-    expect(claudeBinFrom({})).toBeNull();
+    // A home and a PATH where no claude can be looked up.
+    const none = { HOME: join(tmp, 'home'), PATH: join(tmp, 'no-bin') };
+    expect(claudeBinFrom({ ...none, TEAM_RELAY_CLAUDE_BIN: ok })).toBe(ok);
+    expect(claudeBinFrom({ ...none, TEAM_RELAY_CLAUDE_BIN: 'claude' })).toBeNull();
+    expect(claudeBinFrom({ ...none, TEAM_RELAY_CLAUDE_BIN: join(tmp, 'missing') })).toBeNull();
+    expect(claudeBinFrom({ ...none, TEAM_RELAY_CLAUDE_BIN: tmp })).toBeNull();
+    expect(claudeBinFrom(none)).toBeNull();
+  });
+
+  it('a stored path that no longer runs (the desktop app updated) is looked up again: the newest verified build', () => {
+    const home = join(tmp, 'home');
+    const build = (version: string, hash: string, verified: boolean) => {
+      const dir = join(home, 'Library', 'Application Support', 'Claude', 'claude-code', version, hash);
+      mkdirSync(join(dir, 'claude.app', 'Contents', 'MacOS'), { recursive: true });
+      const exe = join(dir, 'claude.app', 'Contents', 'MacOS', 'claude');
+      writeFileSync(exe, '#!/bin/sh\nexit 0\n');
+      chmodSync(exe, 0o755);
+      if (verified) writeFileSync(join(dir, '.verified'), 'x');
+      return exe;
+    };
+    const old = build('2.1.9', 'aaaa', true);
+    const env = { HOME: home, PATH: join(tmp, 'no-bin'), TEAM_RELAY_CLAUDE_BIN: old };
+    expect(claudeBinFrom(env)).toBe(old);
+    // The app updated: the old build is gone, a newer one is there.
+    rmSync(join(home, 'Library', 'Application Support', 'Claude', 'claude-code', '2.1.9'), { recursive: true });
+    const fresh = build('2.1.10', 'bbbb', true);
+    build('2.1.11', 'cccc', false);
+    expect(claudeBinFrom(env)).toBe(fresh);
   });
 
   const env = (bin: string): NodeJS.ProcessEnv => ({ PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: tmp, TMPDIR: tmp, TEAM_RELAY_CLAUDE_BIN: bin });
@@ -111,7 +134,7 @@ process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_err
   });
 
   it('fails, saying why: not found, not signed in, or the answerer did not start', async () => {
-    expect(await selfTest({ env: env(join(tmp, 'missing')), dist: DIST, now })).toMatchObject({ ok: false, reason: expect.stringContaining('Claude Code was not found') });
+    expect(await selfTest({ env: { ...env(join(tmp, 'missing')), PATH: join(tmp, 'no-bin') }, dist: DIST, now })).toMatchObject({ ok: false, reason: expect.stringContaining('Claude Code was not found') });
     const out = script('claude-out', `process.exit(process.argv[2] === 'auth' ? 1 : 0)`);
     expect(await selfTest({ env: env(out), dist: DIST, now })).toMatchObject({ ok: false, reason: 'Claude Code is not signed in (claude auth status failed)' });
     const broken = script('claude-broken', `if (process.argv[2] === 'auth') process.exit(0);
@@ -217,7 +240,7 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the first status');
     const o = hosts[0]!.opts;
     expect(o.background).toBe(true);
-    expect(o.claudeBin).toBe(claude);
+    expect(typeof o.claudeBin === 'function' ? o.claudeBin() : o.claudeBin).toBe(claude);
     expect(o.me.member).toBe('bob');
     expect(o.lockRetryMs).toBe(50);
     const st = relay.memberStatus.get('bob')!;
@@ -235,6 +258,45 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     expect(await done).toBe('stopped');
     expect(hosts[0]!.stoppedCalls).toBe(1);
     expect(logs).toContain('connected as bob in team demo');
+  });
+
+  it('installed with a claude the desktop app has since replaced: it starts answering with the new one', async () => {
+    const dir = join(tmp, 'Library', 'Application Support', 'Claude', 'claude-code', '2.1.10', 'bbbb');
+    mkdirSync(join(dir, 'claude.app', 'Contents', 'MacOS'), { recursive: true });
+    const fresh = join(dir, 'claude.app', 'Contents', 'MacOS', 'claude');
+    writeFileSync(fresh, '#!/bin/sh\nexit 0\n');
+    chmodSync(fresh, 0o755);
+    writeFileSync(join(dir, '.verified'), 'x');
+    const gone = join(tmp, 'Library', 'Application Support', 'Claude', 'claude-code', '2.1.9', 'aaaa', 'claude.app', 'Contents', 'MacOS', 'claude');
+    const { hosts, make } = fakeHosts();
+    const ac = new AbortController();
+    const done = runDaemon({
+      env: env({ TEAM_RELAY_CLAUDE_BIN: gone, PATH: join(tmp, 'no-bin') }),
+      log: (l) => logs.push(l),
+      dist: DIST,
+      version: '1',
+      signal: ac.signal,
+      makeHost: make,
+      selfTest: async () => PASSED,
+      facts,
+      intervals,
+    });
+    await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the status');
+    const bin = hosts[0]!.opts.claudeBin;
+    expect(typeof bin).toBe('function');
+    expect((bin as () => string | null)()).toBe(fresh);
+    // Updated again while the host runs: the host's next answer starts the newest build.
+    rmSync(join(tmp, 'Library', 'Application Support', 'Claude', 'claude-code', '2.1.10'), { recursive: true });
+    const newer = join(tmp, 'Library', 'Application Support', 'Claude', 'claude-code', '2.1.11', 'cccc');
+    mkdirSync(join(newer, 'claude.app', 'Contents', 'MacOS'), { recursive: true });
+    writeFileSync(join(newer, 'claude.app', 'Contents', 'MacOS', 'claude'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(newer, 'claude.app', 'Contents', 'MacOS', 'claude'), 0o755);
+    writeFileSync(join(newer, '.verified'), 'x');
+    expect((bin as () => string | null)()).toBe(join(newer, 'claude.app', 'Contents', 'MacOS', 'claude'));
+    expect(hosts).toHaveLength(1);
+    expect(relay.memberStatus.get('bob')).toMatchObject({ claude: { found: true } });
+    ac.abort();
+    expect(await done).toBe('stopped');
   });
 
   it('a 429 from the relay is logged and the daemon carries on', async () => {

@@ -15634,14 +15634,14 @@ var require__ = __commonJS({
 
 // src/daemon.ts
 import { dirname as dirname8 } from "node:path";
-import { fileURLToPath as fileURLToPath4 } from "node:url";
+import { fileURLToPath as fileURLToPath5 } from "node:url";
 
 // src/daemon-core.ts
 import { execFile as execFile8 } from "node:child_process";
-import { accessSync as accessSync2, appendFileSync, chmodSync as chmodSync6, constants as constants3, lstatSync as lstatSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync10, renameSync as renameSync6, statSync as statSync4 } from "node:fs";
+import { appendFileSync, chmodSync as chmodSync6, lstatSync as lstatSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync11, renameSync as renameSync6 } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir as homedir7 } from "node:os";
-import { basename as basename7, dirname as dirname6, isAbsolute as isAbsolute10, join as join17 } from "node:path";
+import { basename as basename7, dirname as dirname6, join as join18 } from "node:path";
 
 // src/answer-host.ts
 import { randomUUID } from "node:crypto";
@@ -16513,9 +16513,11 @@ function openerFor(platform, env2 = process.env) {
 }
 function openInBrowser(url, opts) {
   const what = opts.what ?? "the URL above";
+  const told = (opened) => opts.onResult?.(opened);
   const opener = opts.opener ?? openerFor(opts.platform ?? process.platform);
   if (!opener) {
     opts.log(`no browser opener on this platform; open ${what} yourself`);
+    told(false);
     return null;
   }
   let dir;
@@ -16524,6 +16526,7 @@ function openInBrowser(url, opts) {
     chmodSync2(dir, 448);
   } catch {
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   const cleanup = () => rmSync5(dir, { recursive: true, force: true });
@@ -16533,6 +16536,7 @@ function openInBrowser(url, opts) {
   } catch {
     cleanup();
     opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
     return null;
   }
   process.once("exit", cleanup);
@@ -16542,6 +16546,7 @@ function openInBrowser(url, opts) {
   }, opts.deleteAfterMs ?? REDIRECT_TTL_MS).unref();
   (opts.run ?? defaultRun)(opener, [file2], (err) => {
     if (err) opts.log(`could not open a browser (${opener}); open ${what} yourself`);
+    told(!err);
   });
   return file2;
 }
@@ -26867,7 +26872,8 @@ var AnswerHost = class {
   }
   // -- one answerer run -------------------------------------------------------------------------
   claudeBin() {
-    const b = (this.o.claudeBin ?? this.env.TEAM_RELAY_CLAUDE_BIN ?? "").trim();
+    const given = typeof this.o.claudeBin === "function" ? this.o.claudeBin() : this.o.claudeBin;
+    const b = (given ?? this.env.TEAM_RELAY_CLAUDE_BIN ?? "").trim();
     return b && isAbsolute9(b) ? b : "claude";
   }
   /** One answerer run for the job; false when it was declined without running one. */
@@ -27726,6 +27732,84 @@ function foundGithubKeys(clones, s) {
 
 // src/daemon-core.ts
 init_credentials();
+
+// src/locate.ts
+import { accessSync as accessSync2, constants as constants3, readFileSync as readFileSync10, readdirSync as readdirSync2, statSync as statSync4 } from "node:fs";
+import { delimiter, isAbsolute as isAbsolute10, join as join17 } from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
+function executableFile(path) {
+  try {
+    if (!statSync4(path).isFile()) return false;
+    accessSync2(path, constants3.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+var DESKTOP_CLAUDE_DIR = ["Library", "Application Support", "Claude", "claude-code"];
+var DESKTOP_CLAUDE_EXE = ["claude.app", "Contents", "MacOS", "claude"];
+var DESKTOP_VERIFIED = ".verified";
+function versionOf(name) {
+  const m = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})$/.exec(name);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+function compareVersions(a, b) {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return 0;
+}
+function dirNames(dir) {
+  try {
+    return readdirSync2(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+function desktopClaude(home2) {
+  const root = join17(home2, ...DESKTOP_CLAUDE_DIR);
+  const versions = dirNames(root).map((name) => ({ name, v: versionOf(name) })).filter((x) => x.v !== null).sort((a, b) => compareVersions(b.v, a.v));
+  for (const { name } of versions) {
+    const builds = [];
+    for (const build of dirNames(join17(root, name))) {
+      const dir = join17(root, name, build);
+      let at;
+      try {
+        const st = statSync4(join17(dir, DESKTOP_VERIFIED));
+        if (!st.isFile()) continue;
+        at = st.mtimeMs;
+      } catch {
+        continue;
+      }
+      const exe = join17(dir, ...DESKTOP_CLAUDE_EXE);
+      if (executableFile(exe)) builds.push({ exe, at, build });
+    }
+    builds.sort((a, b) => b.at - a.at || (a.build < b.build ? 1 : a.build > b.build ? -1 : 0));
+    if (builds[0]) return builds[0].exe;
+  }
+  return null;
+}
+function findClaude(env2) {
+  for (const dir of (env2.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute10(dir)) continue;
+    const c = join17(dir, "claude");
+    if (executableFile(c)) return c;
+  }
+  const home2 = homeDir(env2);
+  for (const c of [join17(home2, ".local", "bin", "claude"), join17(home2, ".claude", "local", "claude")]) {
+    if (executableFile(c)) return c;
+  }
+  return desktopClaude(home2);
+}
+function resolveClaudeBin(env2) {
+  const b = env2.TEAM_RELAY_CLAUDE_BIN?.trim() ?? "";
+  if (!b || !isAbsolute10(b)) return null;
+  if (executableFile(b)) return b;
+  return findClaude(env2);
+}
+var NODE_PINS_FILE = fileURLToPath4(new URL("../bin/node-pins.sh", import.meta.url));
+var RUN_NODE_FILE = fileURLToPath4(new URL("../bin/run-node", import.meta.url));
+var FETCH_NODE_TIMEOUT_MS = 15 * 60 * 1e3;
+
+// src/daemon-core.ts
 init_relay_client();
 
 // src/relay-connect.ts
@@ -27795,7 +27879,7 @@ var DEFAULT_INTERVALS = {
   lockRetryMs: 3e4
 };
 function daemonLogPath(env2) {
-  return join17(env2.HOME?.trim() || homedir7(), "Library", "Logs", "team-relay", "daemon.log");
+  return join18(env2.HOME?.trim() || homedir7(), "Library", "Logs", "team-relay", "daemon.log");
 }
 var DaemonLog = class {
   constructor(path, maxBytes = DAEMON_LOG_MAX_BYTES, now = Date.now) {
@@ -27834,15 +27918,7 @@ var DaemonLog = class {
   }
 };
 function claudeBinFrom(env2) {
-  const b = env2.TEAM_RELAY_CLAUDE_BIN?.trim() ?? "";
-  if (!b || !isAbsolute10(b)) return null;
-  try {
-    if (!statSync4(b).isFile()) return null;
-    accessSync2(b, constants3.X_OK);
-    return b;
-  } catch {
-    return null;
-  }
+  return resolveClaudeBin(env2);
 }
 var defaultRun2 = (file2, args, opts) => new Promise((resolve) => {
   execFile8(file2, args, { env: opts.env, timeout: opts.timeoutMs, maxBuffer: 1024 * 1024, windowsHide: true }, (err) => {
@@ -28017,7 +28093,7 @@ async function runDaemon(o) {
     await checkReadable([
       ...github.github_orgs.length + github.github_repos.length > 0 ? folders2.repo_roots.flatMap((r) => named("a repo root", r)) : [],
       ...ownFolders ? folders2.extra_folders.flatMap((r) => named("a folder of your own", r)) : [],
-      ...drives > 0 ? [{ what: "the Google Drive folder", path: join17(home2, "Library", "CloudStorage") }] : []
+      ...drives > 0 ? [{ what: "the Google Drive folder", path: join18(home2, "Library", "CloudStorage") }] : []
     ]);
   };
   const folders = (team) => {
@@ -28072,7 +28148,9 @@ async function runDaemon(o) {
         },
         log: log2,
         background: true,
-        claudeBin: bin,
+        // Asked again before every answer: a claude the desktop app replaced while the host runs
+        // is found anew, never started from its old path.
+        claudeBin: () => claudeBinFrom(env2),
         distDir: o.dist,
         lockRetryMs: iv.lockRetryMs,
         // M8: a desktop notification, unless TEAM_RELAY_DESKTOP_NOTIFY=0.
@@ -28190,7 +28268,7 @@ async function runDaemon(o) {
 }
 function pluginVersion(dist2) {
   try {
-    const v = JSON.parse(readFileSync10(join17(dist2, "..", ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync11(join18(dist2, "..", ".claude-plugin", "plugin.json"), "utf8")).version;
     if (typeof v === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(v)) return v;
   } catch {
   }
@@ -28198,12 +28276,12 @@ function pluginVersion(dist2) {
 }
 
 // src/daemon-launch.ts
-import { accessSync as accessSync3, chmodSync as chmodSync7, closeSync as closeSync5, constants as constants4, fsyncSync as fsyncSync3, lstatSync as lstatSync4, mkdirSync as mkdirSync8, openSync as openSync5, readFileSync as readFileSync11, renameSync as renameSync7, rmSync as rmSync10, statSync as statSync5, writeSync as writeSync4 } from "node:fs";
-import { basename as basename8, dirname as dirname7, isAbsolute as isAbsolute11, join as join18 } from "node:path";
+import { accessSync as accessSync3, chmodSync as chmodSync7, closeSync as closeSync5, constants as constants4, fsyncSync as fsyncSync3, lstatSync as lstatSync4, mkdirSync as mkdirSync8, openSync as openSync5, readFileSync as readFileSync12, renameSync as renameSync7, rmSync as rmSync10, statSync as statSync5, writeSync as writeSync4 } from "node:fs";
+import { basename as basename8, dirname as dirname7, isAbsolute as isAbsolute11, join as join19 } from "node:path";
 var PLUGIN_KEY_RE = /^team-relay@[A-Za-z0-9._-]{1,100}$/;
 var PLUGIN_KEY_ENV = "TEAM_RELAY_PLUGIN_KEY";
 function installedPluginsPath(home2) {
-  return join18(home2, ".claude", "plugins", "installed_plugins.json");
+  return join19(home2, ".claude", "plugins", "installed_plugins.json");
 }
 var isObj4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function pickPluginEntry(json, key) {
@@ -28218,7 +28296,7 @@ function pickPluginEntry(json, key) {
 }
 function readInstalledPlugin(home2, key) {
   try {
-    return pickPluginEntry(JSON.parse(readFileSync11(installedPluginsPath(home2), "utf8")), key);
+    return pickPluginEntry(JSON.parse(readFileSync12(installedPluginsPath(home2), "utf8")), key);
   } catch {
     return null;
   }
@@ -28229,7 +28307,7 @@ var STOP_WITHIN_MS = 14e3;
 var env = process.env;
 var file = new DaemonLog(daemonLogPath(env));
 var log = (line) => file.line(line);
-var dist = dirname8(fileURLToPath4(import.meta.url));
+var dist = dirname8(fileURLToPath5(import.meta.url));
 var controller = new AbortController();
 function stop(why) {
   if (controller.signal.aborted) return;

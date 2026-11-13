@@ -7,10 +7,11 @@ import { Agents } from '@/components/console/agents'
 import { AskPage } from '@/components/console/ask'
 import { Header } from '@/components/console/header'
 import { JoinCard, useShowJoinCard } from '@/components/console/join'
+import { SetupFinished, SetupView, useSetupFinished } from '@/components/console/local-setup'
 import { Members, progressByMember } from '@/components/console/members'
 import { RequestSheet } from '@/components/console/request-sheet'
 import { ResizableRow } from '@/components/console/resizable-row'
-import { AcceptBanner, SetupPage, useViewerSetup, ViewTabs } from '@/components/console/setup'
+import { AcceptBanner, useViewerSetup, ViewTabs } from '@/components/console/setup'
 import { Expired, Loading, MissingKey, NotOnTeam, SessionExpired, UnreachableBanner } from '@/components/console/states'
 import { mapMembers, TeamMap } from '@/components/console/team-map'
 import { CreateTeamDialog, NoTeamPage, TeamSettings } from '@/components/console/teams'
@@ -76,7 +77,7 @@ export function Console() {
       <main className="mx-auto flex max-w-[1440px] flex-col gap-4 px-3 py-4 sm:px-6 sm:py-5">
         {conn.state === 'unreachable' ? <UnreachableBanner conn={conn} /> : null}
         <ViewTabs setup={setupDone !== null ? { done: setupDone } : null} />
-        {nav.view === 'ask' ? <AskPage /> : nav.view === 'join' ? <SetupPage /> : teamView()}
+        {nav.view === 'ask' ? <AskPage /> : nav.view === 'join' ? <SetupView /> : teamView()}
       </main>
       <RequestSheet req={selected} me={member} now={now} onClose={() => setOpenId(null)} />
     </div>
@@ -268,6 +269,9 @@ function Teams() {
 }
 
 export function App() {
+  // /team-relay:setup's page after Done: its server has stopped, so nothing else is shown or read.
+  const finished = useSetupFinished()
+  if (finished) return <SetupFinished />
   // Hosted behind IAP (M3 §4) no key is needed; locally the link's key is.
   if (consoleKey() === null && !isHosted()) return <MissingKey />
   return <Teams />

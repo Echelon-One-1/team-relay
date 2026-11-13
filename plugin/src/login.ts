@@ -99,6 +99,13 @@ function respond(res: ServerResponse, status: number, body: string): void {
 /** Why `done` rejects when this sign-in is replaced by a new one (or the session ends). */
 export const SUPERSEDED = 'the sign-in was replaced by a newer one';
 
+/** What a tool result that carries the sign-in URL says about it (M5-SPEC §9 item 3). */
+export const SIGN_IN_URL_RULE =
+  'sign_in_url is for the user of this session only: show it to them once, exactly as it is, as plain text on a line of its own ' +
+  '(not as a markdown link), to open themselves if no browser tab opened. ' +
+  'Never repeat it to anyone else, never put it in a message to a teammate or in any tool call, and never open or fetch it yourself: ' +
+  'whoever finishes the sign-in at that link decides who this computer is signed in as.';
+
 export class LoginError extends Error {
   constructor(message: string) {
     super(message);
@@ -182,6 +189,11 @@ export type LoginFlow = {
   port: number;
   /** Resolves with what was stored and what it replaced; rejects with a LoginError. */
   done: Promise<LoginResult>;
+  /**
+   * Whether a browser was opened on `url`: false when there is no opener, the hand-off could not
+   * be prepared or the opener failed; then the URL must be shown to the user (SIGN_IN_URL_RULE).
+   */
+  opened: Promise<boolean>;
   /** Stop waiting (a new login replaces this one). */
   cancel(): void;
 };
@@ -394,11 +406,19 @@ export async function startLogin(opts: LoginOptions): Promise<LoginFlow> {
   timer = setTimeout(() => fail('the sign-in timed out after 5 minutes; run /team-relay:login again'), opts.timeoutMs ?? LOGIN_TIMEOUT_MS);
   timer.unref?.();
 
+  let told!: (opened: boolean) => void;
+  const opened = new Promise<boolean>((resolve) => (told = resolve));
   try {
-    (opts.open ?? ((u: string) => void openInBrowser(u, { log, title: 'Team relay sign-in', what: 'the sign-in link' })))(url);
+    if (opts.open) {
+      opts.open(url);
+      told(true);
+    } else {
+      openInBrowser(url, { log, title: 'Team relay sign-in', what: 'the sign-in link', onResult: told });
+    }
   } catch {
     log('could not open a browser; open the sign-in link yourself');
+    told(false);
   }
 
-  return { url, port, done, cancel: () => fail(SUPERSEDED) };
+  return { url, port, done, opened, cancel: () => fail(SUPERSEDED) };
 }

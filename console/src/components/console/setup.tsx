@@ -92,7 +92,7 @@ function Line({ icon, children }: { icon: ReactNode; children: ReactNode }) {
 }
 
 /** Step 2: what the team shares, with what is new since the viewer last accepted, and Accept. */
-function AcceptBoundaries({
+export function AcceptBoundaries({
   bounds,
   accepted,
   current,
@@ -311,9 +311,14 @@ export function SetupPage() {
           Your Mac answers teammates in the background. To change your folders, run the setup line again.
         </p>
       ) : (
-        <p className="text-[12.5px] leading-relaxed text-subtle">
-          Open Terminal (press Cmd+Space, type Terminal, press Enter). Paste this line, press Enter and answer its questions.
-        </p>
+        <>
+          <p className="text-[12.5px] leading-relaxed text-subtle">
+            Open Terminal (press Cmd+Space, type Terminal, press Enter). Paste this line, press Enter and answer its questions.
+          </p>
+          <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-command>
+            Or, in Claude Code, type <span className="font-mono text-[12px] text-foreground">/team-relay:setup</span>
+          </p>
+        </>
       )}
       {command ? (
         step.done ? (
