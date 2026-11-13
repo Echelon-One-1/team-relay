@@ -11,9 +11,12 @@ still holds `github_orgs`, `github_repos`, `drive_folders`, `drives` or `member_
 rest on the next save. What a member's answerer may read is no longer the team's: every member,
 owner included, chooses up to 20 folders on their own Mac (one list in `boundaries.local.json`,
 `{"teams": {"<team>": {"folders": [...]}}}`, set with `/team-relay:setup` or `/team-relay:folders
-add|remove|list`); an earlier `repo_roots` and `extra_folders` are merged into it on read (in that
-order, duplicates dropped, the first 20 kept, the rest named to the member) and dropped on the next
-write. Reading rule: inside a chosen folder, files of a git work tree are read only when git tracks
+add|remove|list`). An earlier `repo_roots` and `extra_folders` are never read from: a repo root
+was only searched for clones of the team's own repositories, so taking it whole would widen what is
+read without the member choosing it. They are shown once where folders are chosen (the setup page,
+`/team-relay:folders`, setup-cli's folders step) as "previously chosen", with their kind, for the
+member to add again through the folder chooser or `/team-relay:folders add`; the first save under
+the new scheme removes them from the file. Reading rule: inside a chosen folder, files of a git work tree are read only when git tracks
 them; elsewhere every file (5 MB cap); the credential deny list, the sensitive names and the
 secret-name screen apply everywhere, as before. §2's GitHub and Drive matching, §2a (Google Docs
 through the Drive API, `/team-relay:drive`, `GET /v1/teams/{team}/drive-client`) and the

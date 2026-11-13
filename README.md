@@ -138,9 +138,11 @@ below). Then, in Claude Code:
 
 (Correction, 13 Nov 2026: teams no longer list GitHub repositories or shared-drive folders, and
 there is no Google Drive sign-in. Every member, owner included, answers from the folders they
-choose on their own Mac. Folders set before as repository roots or own folders are merged into
-the one list the first time it is read: duplicates dropped, the first 20 kept, and the session
-names any that did not fit. Owners see how many folders each member chose, never which.)
+choose on their own Mac. Repository roots and own folders set before are not used for reading:
+a repository root was only searched for the team's own repositories, so reading it whole would
+share more than you chose. The setup page, `/team-relay:folders` and the setup line list them
+once as "folders you chose before"; add the ones you still want, and the old entries are removed
+from your settings when you save. Owners see how many folders each member chose, never which.)
 
 That is all. In a team with boundaries (Team settings in the console), questions on the
 team's topic are answered on their own from the folders you chose, with no

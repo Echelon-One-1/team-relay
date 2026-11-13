@@ -15,7 +15,8 @@ What holds now:
 - Every member, owner included, chooses up to 20 folders on their own Mac (`/team-relay:setup` or
   `/team-relay:folders`). Inside a git work tree only the files git tracks are read; elsewhere
   every file in the folder; the credential deny list and the secret-name screen apply everywhere.
-  Earlier repository roots and own folders are merged into that one list when it is first read.
+  Earlier repository roots and own folders are not read from; they are listed once as "previously
+  chosen" for the member to add again, and removed from the settings on the next save.
 - A member's plugin reports how many folders they chose (0 to 20); owners see the count per
   member, never names or paths. [M11-SPEC.md](M11-SPEC.md) has the dated correction.
 
