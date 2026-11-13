@@ -332,6 +332,14 @@ URL>/ask".
   `~/.local/share/team-relay/node-v<version>-*/bin/node` that runs and is new enough, else prints
   "Team relay needs its helper: paste the setup line from your team page into Terminal again."
   on stderr and exits 1; then `exec "$node" "$@"`.
+  Correction (13 Nov 2026): on a Mac (arm64 or x86_64) with neither, run-node now gets the pinned
+  build itself instead of that line: the same version and SHA-256s as this script, kept in
+  `plugin/bin/node-pins.sh` (`scripts/tests/run-node.test.sh` fails when the two differ), downloaded
+  with `curl -fsSL --proto '=https' --tlsv1.2`, checked with `shasum -a 256`, unpacked and renamed
+  into `~/.local/share/team-relay/node-<version>-darwin-<arch>`, then run. A lock folder there
+  (`.node-download.lock`, holding its owner's process id) lets one start download; the others wait
+  up to 120 s. Any failure removes the download and says "Could not get Node.js for the team relay:
+  <why>. Check your internet connection and restart Claude." Elsewhere the line above is unchanged.
 - The pinned values are plain assignments that only an edit of the script changes; no
   environment variable can replace them. The tests (`scripts/tests/setup-script.test.sh`) serve
   their own tarballs and run a copy of the script with the two hash lines edited by `sed`; the

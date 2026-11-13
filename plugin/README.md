@@ -45,6 +45,7 @@ Commands (`commands/*.md`, namespaced by the plugin name):
 | Command | What it does |
 |---|---|
 | `/team-relay:login` | Calls the `login` tool, which takes no arguments: signs this computer in to the configured relay (below). The relay's page lists your open team invitations (Accept, Decline) and lets you create a team (at most 3 per Google account). |
+| `/team-relay:setup` | Calls the `setup` tool (no arguments): signs in first when needed (the `login` sign-in, waited for up to 5 minutes), then starts the setup page on this Mac (the console server on 127.0.0.1, a fresh key, opened on `/join` by way of a private redirect file) and returns at once. The page's own routes (`/api/local/*`, local only) show who is signed in, the one list of folders your Claude answers from (added only with the Mac's folder chooser, checked by the folder rules, at most 20; Remove only removes), background answering (the same LaunchAgent as `setup-cli daemon install`) and Done. It stops 3 s after Done, after 30 minutes without use, or with the MCP server; a second call reopens the same page. |
 | `/team-relay:logout` | Runs `dist/logout.js` itself through `bin/run-node` (the `` !`…` `` form, when the command expands): revokes this computer's credential at its relay, then deletes it. |
 | `/team-relay:approvals` | Calls the `review_approvals` tool (no arguments): each answer or step waiting for your approval opens as a dialog (MCP elicitation), and you decide there (M8, below). |
 | `/team-relay:answering` | Optional: prints the one command that starts a manual answering session (`"${CLAUDE_PLUGIN_ROOT}/bin/answerer"`), and the settings that share folders and offer capabilities (generated from `manifest.yaml`). |
@@ -386,8 +387,13 @@ node dist/setup-cli.js status [--after-setup]         # your setup checklist (--
 Claude Code starts the plugin's servers, its SessionStart hook and the `!` lines of its commands
 with `/bin/sh bin/run-node <script>`, never `node` from PATH: `bin/run-node` uses the first `node`
 in an absolute PATH entry when it is 22.12 or newer, else the newest Node.js the setup line installed in
-`~/.local/share/team-relay/node-v<version>-*`, else says in one line to paste the setup line
-again (M11-SPEC "Simpler joining" §3).
+`~/.local/share/team-relay/node-v<version>-*`. On a Mac with neither it gets the pinned build itself
+(`bin/node-pins.sh`, the same version and SHA-256 the setup line uses): it downloads the tarball
+from nodejs.org over https, refuses it unless its SHA-256 is the pinned one, unpacks it and renames
+it into that same folder, then runs it. One start downloads at a time; the others wait for it, up to
+120 s. When that fails it removes what it downloaded and says in one line why ("Could not get
+Node.js for the team relay: ... Check your internet connection and restart Claude."). Anywhere
+else it says in one line to paste the setup line again (M11-SPEC "Simpler joining" §3).
 
 `daemon install` writes `~/.config/team-relay/daemon-launch.mjs` (at each start it finds the
 plugin installed for you under exactly that `team-relay@<marketplace>` key in

@@ -48,6 +48,8 @@ import { invitationFields } from './invitations.js';
 import { ActiveRequests, AnswerDeadlines, deadlineOf } from './active.js';
 import { AnswerHost } from './answer-host.js';
 import { FOLDERS_TOOL, foldersTool } from './folders-tool.js';
+import { SetupPages, type SetupLive } from './setup-page.js';
+import { SETUP_TOOL, setupTool } from './setup-tool.js';
 import { heldBy, lockPath, tryAcquire, type Acquired } from './answering-lock.js';
 import type { Elicit } from './approvals-review.js';
 import {
@@ -529,6 +531,7 @@ const SESSION_TOOLS = [
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   FOLDERS_TOOL,
+  SETUP_TOOL,
 ] as const;
 
 const STATUS_NOTE =
@@ -898,6 +901,63 @@ class AskerConnection {
     });
   }
 
+  /**
+   * /team-relay:setup: who the setup page is for, while connected (the email only when the stored
+   * sign-in still names the same member).
+   */
+  setupLive(): SetupLive | null {
+    if (!this.live) return null;
+    let email: string | null = null;
+    if (this.live.mode === 'credential') {
+      try {
+        const stored = readCredential(this.path);
+        if (stored && stored.member === this.live.me.member && stored.team === this.live.me.team) email = stored.email ?? null;
+      } catch {
+        email = null;
+      }
+    }
+    return { client: this.live.client, member: this.live.me.member, team: this.live.me.team, email };
+  }
+
+  /**
+   * /team-relay:setup: the same sign-in as login, waited for as login_wait waits (at most
+   * `waitMs`), until this session is connected as the new member. Null once connected, else why not.
+   */
+  async signInAndWait(waitMs: number, progress: (message: string) => void): Promise<string | null> {
+    const started = await this.login({});
+    if (started.isError) return started.content.map((c) => c.text).join('');
+    const deadline = Date.now() + waitMs;
+    const tick = setInterval(() => progress('waiting for the sign-in in the browser'), 15_000);
+    try {
+      for (;;) {
+        const current = this.outcome;
+        if (!current) break;
+        let timer: NodeJS.Timeout | undefined;
+        const timedOut = Symbol('timed out');
+        const result = await Promise.race([
+          current,
+          new Promise<typeof timedOut>((resolve) => {
+            timer = setTimeout(() => resolve(timedOut), Math.max(0, deadline - Date.now()));
+          }),
+        ]).finally(() => clearTimeout(timer));
+        if (result === timedOut) return `The sign-in did not finish within ${Math.round(waitMs / 60_000)} minutes.`;
+        if (!result.ok) {
+          if (result.superseded && this.outcome && this.outcome !== current) continue;
+          return `The sign-in did not complete: ${result.why}.`;
+        }
+        // The connection picks the new credential up within a moment.
+        const until = Math.min(deadline, Date.now() + 5000);
+        while (Date.now() < until && !(this.live && this.live.me.member === result.member && this.live.me.team === result.team)) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return this.live ? null : 'The sign-in finished, but this session could not connect to the team yet.';
+      }
+      return this.live ? null : 'No sign-in is waiting.';
+    } finally {
+      clearInterval(tick);
+    }
+  }
+
   async whoami(args: Record<string, unknown>): Promise<ToolResult> {
     const bad = unknownKey(args, []);
     if (bad) return toolError(`unknown argument: ${bad}`);
@@ -1085,6 +1145,8 @@ async function main(): Promise<void> {
   );
 
   const connection = role === 'asker' ? new AskerConnection(env, server, channel) : null;
+  // /team-relay:setup: at most one setup page, stopped with this server.
+  const setupPages = connection ? new SetupPages({ env, log }) : null;
   const liveNow = (): Live | null => fixed ?? connection?.current() ?? null;
 
   const tools = role === 'asker' ? [...ASKER_TOOLS, ...SESSION_TOOLS] : ANSWERER_TOOLS;
@@ -1114,6 +1176,16 @@ async function main(): Promise<void> {
             void extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: ++n, message } }).catch(() => {});
           };
           return await connection.loginWait(args, progress);
+        }
+        if (name === 'setup') {
+          if (!connection || !setupPages) return toolError('this session signs in with RELAY_AUTH from its environment; unset it and restart Claude Code to use /team-relay:setup');
+          const token = extra._meta?.progressToken;
+          let n = 0;
+          const progress = (message: string) => {
+            if (token === undefined) return;
+            void extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: ++n, message } }).catch(() => {});
+          };
+          return await setupTool(args, { live: () => connection.setupLive(), signIn: (ms, p) => connection.signInAndWait(ms, p), pages: setupPages }, progress);
         }
         if (name === 'folders') {
           // M10-SPEC §2: every change is the member's, in a dialog (folders-tool.ts).
@@ -1241,6 +1313,7 @@ async function main(): Promise<void> {
     if (stopper.stopped) return;
     stopper.stop();
     answeringLock?.release();
+    void setupPages?.stop();
     // The host withdraws its shared folder at the relay as it stops (bounded: 1.5 s).
     const stopped = connection?.stop() ?? Promise.resolve();
     void Promise.race([stopped, new Promise((r) => setTimeout(r, 1600))])

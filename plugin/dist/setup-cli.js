@@ -7960,11 +7960,11 @@ var require_codegen = __commonJS({
         const rhs = this.rhs === void 0 ? "" : ` = ${this.rhs}`;
         return `${varKind} ${this.name}${rhs};` + _n;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         if (!names[this.name.str])
           return;
         if (this.rhs)
-          this.rhs = optimizeExpr(this.rhs, names, constants2);
+          this.rhs = optimizeExpr(this.rhs, names, constants3);
         return this;
       }
       get names() {
@@ -7981,10 +7981,10 @@ var require_codegen = __commonJS({
       render({ _n }) {
         return `${this.lhs} = ${this.rhs};` + _n;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
           return;
-        this.rhs = optimizeExpr(this.rhs, names, constants2);
+        this.rhs = optimizeExpr(this.rhs, names, constants3);
         return this;
       }
       get names() {
@@ -8045,8 +8045,8 @@ var require_codegen = __commonJS({
       optimizeNodes() {
         return `${this.code}` ? this : void 0;
       }
-      optimizeNames(names, constants2) {
-        this.code = optimizeExpr(this.code, names, constants2);
+      optimizeNames(names, constants3) {
+        this.code = optimizeExpr(this.code, names, constants3);
         return this;
       }
       get names() {
@@ -8075,12 +8075,12 @@ var require_codegen = __commonJS({
         }
         return nodes.length > 0 ? this : void 0;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         const { nodes } = this;
         let i = nodes.length;
         while (i--) {
           const n = nodes[i];
-          if (n.optimizeNames(names, constants2))
+          if (n.optimizeNames(names, constants3))
             continue;
           subtractNames(names, n.names);
           nodes.splice(i, 1);
@@ -8133,12 +8133,12 @@ var require_codegen = __commonJS({
           return void 0;
         return this;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         var _a;
-        this.else = (_a = this.else) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants2);
-        if (!(super.optimizeNames(names, constants2) || this.else))
+        this.else = (_a = this.else) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants3);
+        if (!(super.optimizeNames(names, constants3) || this.else))
           return;
-        this.condition = optimizeExpr(this.condition, names, constants2);
+        this.condition = optimizeExpr(this.condition, names, constants3);
         return this;
       }
       get names() {
@@ -8161,10 +8161,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.iteration})` + super.render(opts);
       }
-      optimizeNames(names, constants2) {
-        if (!super.optimizeNames(names, constants2))
+      optimizeNames(names, constants3) {
+        if (!super.optimizeNames(names, constants3))
           return;
-        this.iteration = optimizeExpr(this.iteration, names, constants2);
+        this.iteration = optimizeExpr(this.iteration, names, constants3);
         return this;
       }
       get names() {
@@ -8200,10 +8200,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
       }
-      optimizeNames(names, constants2) {
-        if (!super.optimizeNames(names, constants2))
+      optimizeNames(names, constants3) {
+        if (!super.optimizeNames(names, constants3))
           return;
-        this.iterable = optimizeExpr(this.iterable, names, constants2);
+        this.iterable = optimizeExpr(this.iterable, names, constants3);
         return this;
       }
       get names() {
@@ -8245,11 +8245,11 @@ var require_codegen = __commonJS({
         (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNodes();
         return this;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         var _a, _b;
-        super.optimizeNames(names, constants2);
-        (_a = this.catch) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants2);
-        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants2);
+        super.optimizeNames(names, constants3);
+        (_a = this.catch) === null || _a === void 0 ? void 0 : _a.optimizeNames(names, constants3);
+        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants3);
         return this;
       }
       get names() {
@@ -8550,7 +8550,7 @@ var require_codegen = __commonJS({
     function addExprNames(names, from) {
       return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
     }
-    function optimizeExpr(expr, names, constants2) {
+    function optimizeExpr(expr, names, constants3) {
       if (expr instanceof code_1.Name)
         return replaceName(expr);
       if (!canOptimize(expr))
@@ -8565,14 +8565,14 @@ var require_codegen = __commonJS({
         return items;
       }, []));
       function replaceName(n) {
-        const c = constants2[n.str];
+        const c = constants3[n.str];
         if (c === void 0 || names[n.str] !== 1)
           return n;
         delete names[n.str];
         return c;
       }
       function canOptimize(e) {
-        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants2[c.str] !== void 0);
+        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants3[c.str] !== void 0);
       }
     }
     function subtractNames(names, from) {
@@ -15678,19 +15678,9 @@ var init_relay_client = __esm({
 });
 
 // src/setup-cli.ts
-import { execFile as execFile6 } from "node:child_process";
-import { createReadStream, existsSync as existsSync2, openSync as openSync4 } from "node:fs";
+import { createReadStream, openSync as openSync4 } from "node:fs";
 import { basename as basename6, join as join9 } from "node:path";
 import { createInterface } from "node:readline";
-
-// src/answering-lock.ts
-import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
-function configDir(env) {
-  const xdg = env.XDG_CONFIG_HOME?.trim();
-  const base = xdg && isAbsolute(xdg) ? xdg : join(env.HOME?.trim() || homedir(), ".config");
-  return join(base, "team-relay");
-}
 
 // src/boundaries-rule.ts
 var TOPIC_MAX = 500;
@@ -15955,6 +15945,17 @@ import { randomBytes as randomBytes2 } from "node:crypto";
 import { chmodSync as chmodSync2, closeSync as closeSync2, fsyncSync as fsyncSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, writeSync as writeSync2 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { basename as basename3, dirname as dirname3, isAbsolute as isAbsolute4, join as join4, normalize as normalize3 } from "node:path";
+
+// src/answering-lock.ts
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
+function configDir(env) {
+  const xdg = env.XDG_CONFIG_HOME?.trim();
+  const base = xdg && isAbsolute(xdg) ? xdg : join(env.HOME?.trim() || homedir(), ".config");
+  return join(base, "team-relay");
+}
+
+// src/member-folders.ts
 init_relay_client_core();
 
 // src/scope.ts
@@ -16642,9 +16643,6 @@ async function uninstallAgent(i) {
   }
   return found;
 }
-
-// src/drive-cli.ts
-init_credentials();
 
 // src/drive-login.ts
 import { createHash as createHash2, randomBytes as randomBytes5, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
@@ -17472,7 +17470,55 @@ async function driveDisconnect(keychain, doFetch = (u, i) => fetch(u, i)) {
   return revoked ? `Google Drive disconnected: ${account}'s access was revoked at Google and removed from this Mac.` : `Google Drive disconnected: removed from this Mac. Google could not confirm the revocation; remove "team relay" at myaccount.google.com/permissions to be sure.`;
 }
 
+// src/setup-cli.ts
+init_relay_client();
+init_relay_default();
+
+// src/relay-connect.ts
+init_relay_client();
+
+// src/tool-util.ts
+init_relay_client();
+function describeError(err) {
+  if (err instanceof RelayError) {
+    return `relay refused (${err.status} ${err.code})${err.detail ? `: ${err.detail}` : ""}`;
+  }
+  if (err instanceof RelayNetworkError) return err.message;
+  if (err instanceof Error) return err.message;
+  return "unexpected error";
+}
+
+// src/relay-connect.ts
+async function connectOnce(env, opts = {}) {
+  let c;
+  try {
+    c = connectionFromEnv(env);
+  } catch (err) {
+    return err instanceof NotConnected ? { kind: "not_signed_in" } : { kind: "config", problem: describeError(err) };
+  }
+  let client;
+  try {
+    client = new RelayClient({ url: c.url, team: c.team, token: c.token });
+  } catch (err) {
+    return { kind: "config", problem: describeError(err) };
+  }
+  let me;
+  try {
+    me = await client.me({ attempts: 1, timeoutMs: opts.timeoutMs ?? 15e3 });
+  } catch (err) {
+    if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused" };
+    return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})` };
+  }
+  if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team" };
+  return { kind: "connected", client, me, connection: c };
+}
+
+// src/setup-steps.ts
+import { execFile as execFile6 } from "node:child_process";
+import { accessSync as accessSync2, constants as constants2, existsSync as existsSync2, statSync as statSync3 } from "node:fs";
+
 // src/drive-cli.ts
+init_credentials();
 var USAGE = "usage: /team-relay:drive [status | connect [your-email] | disconnect]";
 function parseDriveArgs(argv) {
   const a = argv.filter((x) => x !== "");
@@ -17545,47 +17591,98 @@ if (process.argv[1] && /drive-cli\.[jt]s$/.test(process.argv[1])) {
   );
 }
 
-// src/setup-cli.ts
-init_relay_client();
-init_relay_default();
-
-// src/relay-connect.ts
-init_relay_client();
-
-// src/tool-util.ts
-init_relay_client();
-function describeError(err) {
-  if (err instanceof RelayError) {
-    return `relay refused (${err.status} ${err.code})${err.detail ? `: ${err.detail}` : ""}`;
-  }
-  if (err instanceof RelayNetworkError) return err.message;
-  if (err instanceof Error) return err.message;
-  return "unexpected error";
+// src/setup-steps.ts
+var CHOOSE_FOLDER_SCRIPT = [
+  "on run argv",
+  "activate",
+  "set chosen to choose folder with prompt (item 1 of argv) with multiple selections allowed",
+  'set out to ""',
+  "repeat with f in chosen",
+  "set out to out & (POSIX path of (f as alias)) & (character id 0)",
+  "end repeat",
+  "return out",
+  "end run"
+];
+var OSASCRIPT = "/usr/bin/osascript";
+var CHOOSER_TIMEOUT_MS = 10 * 60 * 1e3;
+function chosenPaths(stdout) {
+  return stdout.replace(/\n$/, "").split("\0").filter((p) => p !== "").map((p) => p.length > 1 ? p.replace(/\/+$/, "") || "/" : p);
 }
-
-// src/relay-connect.ts
-async function connectOnce(env, opts = {}) {
-  let c;
+var runExecFile = (f, a, o, cb) => void execFile6(f, a, o, (e, out, err) => cb(e, String(out), String(err)));
+function osascriptChooser(run = runExecFile) {
+  return (prompt) => new Promise((resolve) => {
+    const args = CHOOSE_FOLDER_SCRIPT.flatMap((line) => ["-e", line]);
+    args.push(prompt);
+    try {
+      run(OSASCRIPT, args, { timeout: CHOOSER_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+        if (!err) resolve({ kind: "chosen", paths: chosenPaths(stdout) });
+        else if (/\(-128\)/.test(stderr)) resolve({ kind: "cancelled" });
+        else resolve({ kind: "unavailable" });
+      });
+    } catch {
+      resolve({ kind: "unavailable" });
+    }
+  });
+}
+function chooserAvailable(platform) {
+  return platform === "darwin" && existsSync2(OSASCRIPT);
+}
+function defaultChooser(platform) {
+  if (!chooserAvailable(platform)) return async () => ({ kind: "unavailable" });
+  return osascriptChooser();
+}
+function addFolder(out, raw, env) {
+  const { reason } = memberFolderProblem(raw, env);
+  if (reason) return { kind: "refused", reason };
+  const target = expandPath(raw, env);
+  if (out.some((e) => e === raw || expandPath(e, env) === target)) return { kind: "duplicate" };
+  if (out.length >= MAX_FOLDERS) return { kind: "full" };
+  out.push(raw);
+  return { kind: "added" };
+}
+function saveTeamFolders(env, team, change) {
+  const file = memberFoldersPath(env);
+  const fresh = readMemberSettings(file, env);
+  const mine = teamSettings(fresh, team);
+  const next = change({ repo_roots: mine.repo_roots, extra_folders: mine.extra_folders });
+  writeMemberSettings(file, withTeam(fresh, team, { repo_roots: next.repo_roots, extra_folders: next.extra_folders, accepted: mine.accepted }), env);
+  return { repo_roots: [...next.repo_roots], extra_folders: [...next.extra_folders] };
+}
+async function teamBoundaries(client) {
   try {
-    c = connectionFromEnv(env);
-  } catch (err) {
-    return err instanceof NotConnected ? { kind: "not_signed_in" } : { kind: "config", problem: describeError(err) };
+    const tb = await client.boundaries({ attempts: 2, timeoutMs: 15e3 });
+    return validBoundaries(tb) && tb.team === client.team ? tb : null;
+  } catch {
+    return null;
   }
-  let client;
-  try {
-    client = new RelayClient({ url: c.url, team: c.team, token: c.token });
-  } catch (err) {
-    return { kind: "config", problem: describeError(err) };
-  }
-  let me;
-  try {
-    me = await client.me({ attempts: 1, timeoutMs: opts.timeoutMs ?? 15e3 });
-  } catch (err) {
-    if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused" };
-    return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})` };
-  }
-  if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team" };
-  return { kind: "connected", client, me, connection: c };
+}
+function driveConnect(client, platform, keychain, log) {
+  return runDriveCli(["connect"], {
+    platform,
+    keychain,
+    relay: () => ({ driveClient: () => client.driveClient(), boundaries: () => client.boundaries() }),
+    log
+  });
+}
+async function installBackground(i) {
+  const xdg = i.env.XDG_CONFIG_HOME?.trim();
+  await installAgent({
+    home: homeDir(i.env),
+    configDir: configDir(i.env),
+    node: i.node,
+    claude: i.claude,
+    uid: i.uid,
+    pluginKey: i.pluginKey,
+    ...i.exec ? { exec: i.exec } : {},
+    ...i.sleep ? { sleep: i.sleep } : {},
+    ...xdg && xdg.startsWith("/") ? { xdgConfigHome: xdg } : {}
+  });
+}
+function uninstallBackground(i) {
+  return uninstallAgent({ home: homeDir(i.env), configDir: configDir(i.env), uid: i.uid, ...i.exec ? { exec: i.exec } : {} });
+}
+function currentUid() {
+  return typeof process.getuid === "function" ? process.getuid() : -1;
 }
 
 // src/setup-cli.ts
@@ -17621,14 +17718,6 @@ async function defaultConnect(env) {
   if (a.kind === "not_signed_in") return { error: NOT_SIGNED_IN };
   if (a.kind === "refused") return { error: "Your sign-in to the team has ended (or you are no longer on the team). Run the setup line again to sign in." };
   return { error: `Could not reach your team just now (${a.problem}). Check your internet connection, then run the setup line again.` };
-}
-async function teamBoundaries(client) {
-  try {
-    const tb = await client.boundaries({ attempts: 2, timeoutMs: 15e3 });
-    return validBoundaries(tb) && tb.team === client.team ? tb : null;
-  } catch {
-    return null;
-  }
 }
 var yes = (answer, byDefault) => {
   const a = (answer ?? "").trim().toLowerCase();
@@ -17697,42 +17786,6 @@ async function login(argv, d) {
     return 1;
   }
 }
-var CHOOSE_FOLDER_SCRIPT = [
-  "on run argv",
-  "activate",
-  "set chosen to choose folder with prompt (item 1 of argv) with multiple selections allowed",
-  'set out to ""',
-  "repeat with f in chosen",
-  "set out to out & (POSIX path of (f as alias)) & (character id 0)",
-  "end repeat",
-  "return out",
-  "end run"
-];
-var OSASCRIPT = "/usr/bin/osascript";
-var CHOOSER_TIMEOUT_MS = 10 * 60 * 1e3;
-function chosenPaths(stdout) {
-  return stdout.replace(/\n$/, "").split("\0").filter((p) => p !== "").map((p) => p.length > 1 ? p.replace(/\/+$/, "") || "/" : p);
-}
-var runExecFile = (f, a, o, cb) => void execFile6(f, a, o, (e, out, err) => cb(e, String(out), String(err)));
-function osascriptChooser(run = runExecFile) {
-  return (prompt) => new Promise((resolve) => {
-    const args = CHOOSE_FOLDER_SCRIPT.flatMap((line) => ["-e", line]);
-    args.push(prompt);
-    try {
-      run(OSASCRIPT, args, { timeout: CHOOSER_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-        if (!err) resolve({ kind: "chosen", paths: chosenPaths(stdout) });
-        else if (/\(-128\)/.test(stderr)) resolve({ kind: "cancelled" });
-        else resolve({ kind: "unavailable" });
-      });
-    } catch {
-      resolve({ kind: "unavailable" });
-    }
-  });
-}
-function defaultChooser(platform) {
-  if (platform !== "darwin" || !existsSync2(OSASCRIPT)) return async () => ({ kind: "unavailable" });
-  return osascriptChooser();
-}
 var plural = (n, one, many) => `${n === 0 ? "no" : n} ${n === 1 ? one : many}`;
 async function chooseList(d, spec) {
   const { io, env } = d;
@@ -17748,22 +17801,11 @@ async function chooseList(d, spec) {
     return `Found ${plural(n, "project folder", "project folders")} in ${name(raw)}.`;
   };
   const add = async (raw, out2) => {
-    const { reason } = memberFolderProblem(raw, env);
-    if (reason) {
-      io.print(`  Not used: ${raw} (${reason}).`);
-      return;
-    }
-    const target = expandPath(raw, env);
-    if (out2.some((e) => e === raw || expandPath(e, env) === target)) {
-      io.print(`  ${name(raw)} is already in the list.`);
-      return;
-    }
-    if (out2.length >= MAX_FOLDERS) {
-      io.print(`  At most ${MAX_FOLDERS} folders; ${name(raw)} is not added.`);
-      return;
-    }
-    out2.push(raw);
-    io.print(`  ${await describe(raw)}`);
+    const r2 = addFolder(out2, raw, env);
+    if (r2.kind === "refused") io.print(`  Not used: ${raw} (${r2.reason}).`);
+    else if (r2.kind === "duplicate") io.print(`  ${name(raw)} is already in the list.`);
+    else if (r2.kind === "full") io.print(`  At most ${MAX_FOLDERS} folders; ${name(raw)} is not added.`);
+    else io.print(`  ${await describe(raw)}`);
   };
   let saidNo = false;
   if (spec.current.length > 0) {
@@ -17860,9 +17902,7 @@ async function folders(d) {
     io.print("Your team no longer allows folders of your own, so the ones you picked earlier are not used.");
   }
   try {
-    const fresh = readMemberSettings(file, env);
-    const mine = teamSettings(fresh, c.team);
-    writeMemberSettings(file, withTeam(fresh, c.team, { repo_roots: roots, extra_folders: extra, accepted: mine.accepted }), env);
+    saveTeamFolders(env, c.team, () => ({ repo_roots: roots, extra_folders: extra }));
   } catch (err) {
     io.print(`Nothing was saved (${err instanceof MemberFoldersError ? err.message : describeError(err)}).`);
     return 1;
@@ -17913,8 +17953,7 @@ async function drive(d) {
     return 0;
   }
   io.print("Connecting Google Drive (read only): sign in with your work Google account in the browser window that opens.");
-  const run = d.drive ?? ((argv, client, kc) => runDriveCli(argv, { platform, keychain: kc, relay: () => ({ driveClient: () => client.driveClient(), boundaries: () => client.boundaries() }), log: (l) => io.print(`  ${l}`) }));
-  const r = await run(["connect"], c.client, keychain);
+  const r = d.drive ? await d.drive(["connect"], c.client, keychain) : await driveConnect(c.client, platform, keychain, (l) => io.print(`  ${l}`));
   io.print(r.line);
   if (r.exitCode === 0) io.print(PRIVACY_DRIVE_NOTE);
   return r.exitCode;
@@ -17941,12 +17980,10 @@ async function daemon(argv, d) {
     io.print("The background answerer runs on macOS only.");
     return 1;
   }
-  const uid3 = d.uid ?? (typeof process.getuid === "function" ? process.getuid() : -1);
-  const home2 = homeDir(env);
-  const cfg = configDir(env);
+  const uid3 = d.uid ?? currentUid();
   try {
     if (sub === "uninstall") {
-      const found = await uninstallAgent({ home: home2, configDir: cfg, uid: uid3, ...d.exec ? { exec: d.exec } : {} });
+      const found = await uninstallBackground({ env, uid: uid3, ...d.exec ? { exec: d.exec } : {} });
       io.print(found ? "Your Mac no longer answers your team in the background." : "Your Mac was not answering your team in the background; nothing to do.");
       return 0;
     }
@@ -17958,17 +17995,14 @@ async function daemon(argv, d) {
       io.print("daemon install needs --plugin team-relay@<marketplace name>, the plugin as the setup command installed it.");
       return 2;
     }
-    const xdg = env.XDG_CONFIG_HOME?.trim();
-    await installAgent({
-      home: home2,
-      configDir: cfg,
+    await installBackground({
+      env,
+      uid: uid3,
       node: d.node ?? process.execPath,
       claude,
-      uid: uid3,
       pluginKey: plugin,
       ...d.exec ? { exec: d.exec } : {},
-      ...d.sleep ? { sleep: d.sleep } : {},
-      ...xdg && xdg.startsWith("/") ? { xdgConfigHome: xdg } : {}
+      ...d.sleep ? { sleep: d.sleep } : {}
     });
     io.print("Your Mac now answers your team in the background whenever it is on. Claude Code does not need to be open.");
     return 0;

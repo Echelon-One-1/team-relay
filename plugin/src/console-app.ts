@@ -36,6 +36,9 @@
 //   orgs where the relay's GitHub App is installed). Both are owners' reads, proxied with the
 //   other team routes' rules and shaped here (sourcesConfigView, githubListingView) before the
 //   page sees them; neither ever holds a key or a token.
+// - The setup page (/team-relay:setup, local-setup.ts), local mode only and only on a server
+//   given it: GET /api/local/setup and its changes (choose or remove a folder, connect Google
+//   Drive, background answering on or off, done). Hosted, every /api/local/* path is 404.
 // - Static files from dist/console/ under a strict CSP; a placeholder page when it is absent.
 //   PICKERS-SPEC §5.4: hosted only, GET/HEAD /pick/drive serves dist/console/pick-drive.html
 //   under its own headers (PICKER_HEADERS), the one page Google's Picker runs on; locally it is
@@ -84,6 +87,7 @@ import type { AddressInfo } from 'node:net';
 import { extname, join, sep } from 'node:path';
 import { BadRequest, NotFound, RosterRefusal, type DemoAccount } from './console-demo.js';
 import { IAP_HEADER, type IapIdentity } from './iap.js';
+import { LOCAL_BODY_LIMIT, LOCAL_ROUTES, type LocalSetup } from './local-setup.js';
 import {
   MEMBER_RE,
   REQUEST_ID_RE,
@@ -1038,6 +1042,11 @@ export type ConsoleServerOptions = {
    * channel working session on this computer (GET /api/approvals/summary; 404 without it).
    */
   approvals?: () => { pending: number };
+  /**
+   * The setup page's routes (/team-relay:setup), local mode only: /api/local/* (local-setup.ts).
+   * Without it, and always hosted, every /api/local/* path is 404.
+   */
+  local?: LocalSetup;
   log?: (line: string) => void;
 } & (
   | { /** Local mode: the per-launch key. */ key: string; hosted?: undefined }
@@ -1456,6 +1465,7 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     }
     const ctx: ReadContext = viewer !== undefined ? { viewer } : {};
     const path = url.pathname;
+    if (path === '/api/local' || path.startsWith('/api/local/')) return localApi(req, res, url);
     const route = changeRoute(path);
     if (req.method !== 'GET') {
       if (route) return change(req, res, url, ctx, route);
@@ -1617,6 +1627,64 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
         path === '/api/sources/github';
       return failure(res, err, viewer, requestMatch || newer ? undefined : team);
     }
+  }
+
+  /**
+   * The setup page's routes (local-setup.ts), on the member's Mac only: hosted, or on a console
+   * server started without them, every one is 404. The key and the cross-site check have been
+   * passed (api); a change also needs Sec-Fetch-Site: same-origin and JSON, and every body is at
+   * most LOCAL_BODY_LIMIT bytes and holds only the route's own fields.
+   */
+  async function localApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    const local = hosted ? undefined : opts.local;
+    const route = local && Object.prototype.hasOwnProperty.call(LOCAL_ROUTES, url.pathname) ? LOCAL_ROUTES[url.pathname] : undefined;
+    if (!local || !route) {
+      req.resume();
+      return sendJson(res, 404, { error: 'not_found' });
+    }
+    const method = req.method ?? '';
+    if (method !== route.method) {
+      req.resume();
+      return sendJson(res, 405, { error: 'method_not_allowed' }, { Allow: route.method });
+    }
+    if (url.search !== '') {
+      req.resume();
+      return sendJson(res, 400, { error: 'bad_request', detail: 'no query parameters here' });
+    }
+    if (method === 'GET') {
+      req.resume();
+      const out = await local.handle(url.pathname, undefined);
+      return sendJson(res, out.status, out.body);
+    }
+    if (headerValue(req, 'sec-fetch-site') !== 'same-origin') {
+      req.resume();
+      return sendJson(res, 403, { error: 'forbidden', detail: 'Sec-Fetch-Site: same-origin is required' });
+    }
+    if (!/^application\/json\s*(;.*)?$/i.test(headerValue(req, 'content-type') ?? '')) {
+      req.resume();
+      return sendJson(res, 415, { error: 'unsupported_media_type', detail: 'Content-Type must be application/json' });
+    }
+    let text: string;
+    try {
+      text = await readBody(req, LOCAL_BODY_LIMIT);
+    } catch {
+      return sendJson(res, 413, { error: 'too_large', detail: `at most ${LOCAL_BODY_LIMIT} bytes` });
+    }
+    let body: Record<string, unknown> | undefined;
+    if (text.trim() !== '') {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(text);
+      } catch {
+        return sendJson(res, 400, { error: 'bad_request', detail: 'the body is not JSON' });
+      }
+      if (!isRecord(raw)) return sendJson(res, 400, { error: 'bad_request', detail: 'the body must be a JSON object' });
+      const unknown = Object.keys(raw).find((k) => !route.fields.includes(k));
+      if (unknown !== undefined) return sendJson(res, 400, { error: 'bad_request', detail: `unknown field ${JSON.stringify(unknown.slice(0, 40))}` });
+      body = raw;
+    }
+    const out = await local.handle(url.pathname, body);
+    return sendJson(res, out.status, out.body);
   }
 
   function staticFile(req: IncomingMessage, res: ServerResponse, url: URL): void {

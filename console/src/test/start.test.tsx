@@ -105,8 +105,9 @@ describe('/start: where the sign-in page leads', () => {
     renderWithClient(<App />)
     await screen.findByRole('region', { name: 'Your setup' })
     const paths = new Set(s.calls.map((c) => c.path.split('?')[0]))
+    // On a Mac, the Setup tab also asks for /team-relay:setup's page (404 here: the usual page).
     for (const p of paths) {
-      expect(['/api/teams', '/api/me', '/api/members-status', '/api/acceptance', '/api/boundaries', '/api/directory', '/api/activity', '/api/roster', '/api/join', '/api/my-requests', '/api/inbox/summary', '/api/approvals/summary']).toContain(p)
+      expect(['/api/teams', '/api/me', '/api/members-status', '/api/acceptance', '/api/boundaries', '/api/directory', '/api/activity', '/api/roster', '/api/join', '/api/my-requests', '/api/inbox/summary', '/api/approvals/summary', '/api/local/setup']).toContain(p)
     }
   })
 

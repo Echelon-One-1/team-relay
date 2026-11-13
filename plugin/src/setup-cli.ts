@@ -19,37 +19,39 @@
 // What it prints is read by members who have never used Terminal (M11-SPEC "Simpler joining"):
 // plain, short sentences that say what to do, never the names of tools or files.
 
-import { execFile } from 'node:child_process';
-import { createReadStream, existsSync, openSync } from 'node:fs';
+import { createReadStream, openSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { configDir } from './answering-lock.js';
 import { boundaryItems, itemKey, sinceByKey } from './boundaries-rule.js';
 import { SELF_TEST_PENDING, type Boundaries, type MemberSources, type MemberStatusEntry, type TeamBoundaries } from './boundaries-types.js';
-import { homeDir, validBoundaries, type GithubSources } from './boundary-set.js';
+import { homeDir, type GithubSources } from './boundary-set.js';
 import { clonesUnder } from './clones.js';
 import { consoleUrl } from './console-url.js';
 import { CredentialFileError, credentialsPath, normaliseRelayUrl, readCredential } from './credentials.js';
-import { AgentError, installAgent, uninstallAgent, type Exec } from './daemon-launch.js';
-import { runDriveCli, type DriveCliOutcome } from './drive-cli.js';
+import { AgentError, type Exec } from './daemon-launch.js';
+import type { DriveCliOutcome } from './drive-cli.js';
 import { MAC_ONLY } from './drive-login.js';
 import { defaultKeychain, type Keychain } from './google-drive.js';
 import { LoginError, connectedAs, identityChange, startLogin, type LoginFlow, type LoginOptions } from './login.js';
-import {
-  MAX_FOLDERS,
-  MemberFoldersError,
-  expandPath,
-  memberFolderProblem,
-  memberFoldersPath,
-  readMemberSettings,
-  teamSettings,
-  withTeam,
-  writeMemberSettings,
-} from './member-folders.js';
+import { MAX_FOLDERS, MemberFoldersError, expandPath, memberFolderProblem, memberFoldersPath, readMemberSettings, teamSettings } from './member-folders.js';
 import { configValue, parseRelayUrl, type RelayClient } from './relay-client.js';
 import { defaultRelayUrl } from './relay-default.js';
 import { connectOnce } from './relay-connect.js';
+import {
+  addFolder,
+  currentUid,
+  defaultChooser,
+  driveConnect,
+  installBackground,
+  saveTeamFolders,
+  teamBoundaries,
+  uninstallBackground,
+  type FolderChooser,
+} from './setup-steps.js';
 import { describeError } from './tool-util.js';
+
+// The Mac's folder chooser lives in setup-steps.ts (the setup page uses it too).
+export { CHOOSE_FOLDER_SCRIPT, CHOOSER_TIMEOUT_MS, chosenPaths, osascriptChooser, type ChooseResult, type ExecFileLike, type FolderChooser } from './setup-steps.js';
 
 export const HELP = [
   'usage: node setup-cli.js <command>',
@@ -118,15 +120,6 @@ async function defaultConnect(env: NodeJS.ProcessEnv): Promise<{ client: RelayCl
   if (a.kind === 'not_signed_in') return { error: NOT_SIGNED_IN };
   if (a.kind === 'refused') return { error: 'Your sign-in to the team has ended (or you are no longer on the team). Run the setup line again to sign in.' };
   return { error: `Could not reach your team just now (${a.problem}). Check your internet connection, then run the setup line again.` };
-}
-
-async function teamBoundaries(client: RelayClient): Promise<TeamBoundaries | null> {
-  try {
-    const tb = await client.boundaries({ attempts: 2, timeoutMs: 15_000 });
-    return validBoundaries(tb) && tb.team === client.team ? tb : null;
-  } catch {
-    return null;
-  }
 }
 
 const yes = (answer: string | null, byDefault: boolean) => {
@@ -203,79 +196,6 @@ async function login(argv: string[], d: SetupDeps): Promise<number> {
 
 // -- folders ---------------------------------------------------------------------------------------
 
-/** What the Mac's folder chooser gave: folders, a Cancel, or no chooser here (then the member types). */
-export type ChooseResult = { kind: 'chosen'; paths: string[] } | { kind: 'cancelled' } | { kind: 'unavailable' };
-export type FolderChooser = (prompt: string) => Promise<ChooseResult>;
-
-/**
- * The AppleScript of the chooser. It brings its window to the front first (Terminal may be behind
- * the browser). The prompt is the run handler's argument, never part of the script text; each
- * chosen folder is turned into a POSIX path here, each followed by a NUL (a folder name may hold a
- * new line, never a NUL).
- */
-export const CHOOSE_FOLDER_SCRIPT = [
-  'on run argv',
-  'activate',
-  'set chosen to choose folder with prompt (item 1 of argv) with multiple selections allowed',
-  'set out to ""',
-  'repeat with f in chosen',
-  'set out to out & (POSIX path of (f as alias)) & (character id 0)',
-  'end repeat',
-  'return out',
-  'end run',
-];
-const OSASCRIPT = '/usr/bin/osascript';
-/** A chooser left open this long closes, and the member types the folders instead. */
-export const CHOOSER_TIMEOUT_MS = 10 * 60 * 1000;
-
-export type ExecFileLike = (
-  file: string,
-  args: string[],
-  opts: { timeout: number; maxBuffer: number },
-  cb: (err: (Error & { code?: unknown; killed?: boolean }) | null, stdout: string, stderr: string) => void,
-) => void;
-
-/**
- * The folders in osascript's output: NUL-separated, with the one new line osascript adds at the
- * end dropped; a trailing slash dropped (but never from "/").
- */
-export function chosenPaths(stdout: string): string[] {
-  return stdout
-    .replace(/\n$/, '')
-    .split('\0')
-    .filter((p) => p !== '')
-    .map((p) => (p.length > 1 ? p.replace(/\/+$/, '') || '/' : p));
-}
-
-const runExecFile: ExecFileLike = (f, a, o, cb) => void execFile(f, a, o, (e, out, err) => cb(e, String(out), String(err)));
-
-/**
- * The Mac's own folder chooser: osascript, run directly (no shell), with the prompt as an
- * argument. Cancel (AppleScript error -128) is a Cancel; any other failure (no osascript, no
- * screen to show it on, left open past CHOOSER_TIMEOUT_MS) means the member types the folders.
- */
-export function osascriptChooser(run: ExecFileLike = runExecFile): FolderChooser {
-  return (prompt) =>
-    new Promise((resolve) => {
-      const args = CHOOSE_FOLDER_SCRIPT.flatMap((line) => ['-e', line]);
-      args.push(prompt);
-      try {
-        run(OSASCRIPT, args, { timeout: CHOOSER_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
-          if (!err) resolve({ kind: 'chosen', paths: chosenPaths(stdout) });
-          else if (/\(-128\)/.test(stderr)) resolve({ kind: 'cancelled' });
-          else resolve({ kind: 'unavailable' });
-        });
-      } catch {
-        resolve({ kind: 'unavailable' });
-      }
-    });
-}
-
-function defaultChooser(platform: NodeJS.Platform): FolderChooser {
-  if (platform !== 'darwin' || !existsSync(OSASCRIPT)) return async () => ({ kind: 'unavailable' });
-  return osascriptChooser();
-}
-
 type ListSpec = {
   /** "Your folders for projects now:" */
   nowTitle: string;
@@ -309,22 +229,11 @@ async function chooseList(d: SetupDeps, spec: ListSpec): Promise<string[]> {
   };
   /** Adds `raw` to `out` when it can be used; says what happened. */
   const add = async (raw: string, out: string[]) => {
-    const { reason } = memberFolderProblem(raw, env);
-    if (reason) {
-      io.print(`  Not used: ${raw} (${reason}).`);
-      return;
-    }
-    const target = expandPath(raw, env);
-    if (out.some((e) => e === raw || expandPath(e, env) === target)) {
-      io.print(`  ${name(raw)} is already in the list.`);
-      return;
-    }
-    if (out.length >= MAX_FOLDERS) {
-      io.print(`  At most ${MAX_FOLDERS} folders; ${name(raw)} is not added.`);
-      return;
-    }
-    out.push(raw);
-    io.print(`  ${await describe(raw)}`);
+    const r = addFolder(out, raw, env);
+    if (r.kind === 'refused') io.print(`  Not used: ${raw} (${r.reason}).`);
+    else if (r.kind === 'duplicate') io.print(`  ${name(raw)} is already in the list.`);
+    else if (r.kind === 'full') io.print(`  At most ${MAX_FOLDERS} folders; ${name(raw)} is not added.`);
+    else io.print(`  ${await describe(raw)}`);
   };
 
   let saidNo = false;
@@ -429,9 +338,7 @@ async function folders(d: SetupDeps): Promise<number> {
   }
   try {
     // Read again: the file may have changed while the questions were open.
-    const fresh = readMemberSettings(file, env);
-    const mine = teamSettings(fresh, c.team);
-    writeMemberSettings(file, withTeam(fresh, c.team, { repo_roots: roots, extra_folders: extra, accepted: mine.accepted }), env);
+    saveTeamFolders(env, c.team, () => ({ repo_roots: roots, extra_folders: extra }));
   } catch (err) {
     io.print(`Nothing was saved (${err instanceof MemberFoldersError ? err.message : describeError(err)}).`);
     return 1;
@@ -487,11 +394,7 @@ async function drive(d: SetupDeps): Promise<number> {
     return 0;
   }
   io.print('Connecting Google Drive (read only): sign in with your work Google account in the browser window that opens.');
-  const run =
-    d.drive ??
-    ((argv: string[], client: RelayClient, kc: Keychain) =>
-      runDriveCli(argv, { platform, keychain: kc, relay: () => ({ driveClient: () => client.driveClient(), boundaries: () => client.boundaries() }), log: (l) => io.print(`  ${l}`) }));
-  const r = await run(['connect'], c.client, keychain);
+  const r = d.drive ? await d.drive(['connect'], c.client, keychain) : await driveConnect(c.client, platform, keychain, (l) => io.print(`  ${l}`));
   io.print(r.line);
   if (r.exitCode === 0) io.print(PRIVACY_DRIVE_NOTE);
   return r.exitCode;
@@ -521,12 +424,10 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
     io.print('The background answerer runs on macOS only.');
     return 1;
   }
-  const uid = d.uid ?? (typeof process.getuid === 'function' ? process.getuid() : -1);
-  const home = homeDir(env);
-  const cfg = configDir(env);
+  const uid = d.uid ?? currentUid();
   try {
     if (sub === 'uninstall') {
-      const found = await uninstallAgent({ home, configDir: cfg, uid, ...(d.exec ? { exec: d.exec } : {}) });
+      const found = await uninstallBackground({ env, uid, ...(d.exec ? { exec: d.exec } : {}) });
       io.print(found ? 'Your Mac no longer answers your team in the background.' : 'Your Mac was not answering your team in the background; nothing to do.');
       return 0;
     }
@@ -538,17 +439,14 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
       io.print('daemon install needs --plugin team-relay@<marketplace name>, the plugin as the setup command installed it.');
       return 2;
     }
-    const xdg = env.XDG_CONFIG_HOME?.trim();
-    await installAgent({
-      home,
-      configDir: cfg,
+    await installBackground({
+      env,
+      uid,
       node: d.node ?? process.execPath,
       claude,
-      uid,
       pluginKey: plugin,
       ...(d.exec ? { exec: d.exec } : {}),
       ...(d.sleep ? { sleep: d.sleep } : {}),
-      ...(xdg && xdg.startsWith('/') ? { xdgConfigHome: xdg } : {}),
     });
     io.print('Your Mac now answers your team in the background whenever it is on. Claude Code does not need to be open.');
     return 0;

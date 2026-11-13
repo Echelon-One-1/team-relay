@@ -9,7 +9,15 @@
 #   1. the first `node` on PATH (absolute entries only), when it is 22.12 or newer;
 #   2. the Node.js the setup line installs privately, ~/.local/share/team-relay/node-v<x.y.z>-*/
 #      bin/node (relay/relay/static/setup.sh), the newest version there that runs;
-# else it says in one plain line what to do and exits 1. POSIX sh, builtins only.
+#   3. on a Mac (arm64 or x86_64) only, the pinned Node.js build (bin/node-pins.sh, the same one
+#      setup.sh installs), downloaded from nodejs.org over https, checked against its pinned SHA-256,
+#      unpacked and renamed into that same private folder, so either installer's copy serves both.
+#      One start downloads at a time (a lock folder there); the others wait for it, up to 120 s.
+#      Any failure removes what it downloaded and says in one plain line why, then exits 1.
+# Elsewhere, with none found, it says in one plain line what to do and exits 1.
+#
+# POSIX sh. Its stdin and stdout belong to the bundle (the MCP servers speak on them), so every
+# tool it runs reads nothing and writes nothing there; the tools are found on PATH.
 
 MIN_MAJOR=22
 MIN_MINOR=12
@@ -77,6 +85,139 @@ if [ -z "$found" ] && [ -n "${HOME:-}" ]; then
       bpat=$VPAT
     fi
   done
+fi
+
+# ---------------------------------------------------------------- 3. the pinned download
+# Where the download goes, a lock taken by this start, and the pinned copy for this Mac.
+WORK_DIR=""
+LOCK=""
+HAVE_LOCK=""
+PRIVATE_DIR=""
+PINNED_DIR=""
+PINNED_NODE=""
+
+cleanup() {
+  if [ -n "$WORK_DIR" ]; then rm -rf "$WORK_DIR" >/dev/null 2>&1; WORK_DIR=""; fi
+  if [ -n "$HAVE_LOCK" ]; then rm -rf "$LOCK" >/dev/null 2>&1; HAVE_LOCK=""; fi
+}
+
+# One plain line on stderr, nothing left behind, exit 1.
+cannot_get() {
+  cleanup
+  echo "Could not get Node.js for the team relay: $1. Check your internet connection and restart Claude." >&2
+  exit 1
+}
+
+# Whether the pinned copy for this Mac is there, runs and is new enough.
+pinned_ok() {
+  [ -x "$PINNED_NODE" ] && node_version "$PINNED_NODE" && new_enough
+}
+
+# Takes the lock folder, or waits (sleep 1, at most 120 times) for the start holding it. Returns 0
+# with the lock held, 2 when the pinned copy appeared meanwhile. A lock whose owner is no longer
+# running is taken over at once; one that never says its owner, after the whole wait.
+take_lock() {
+  waited=0
+  while :; do
+    if mkdir "$LOCK" >/dev/null 2>&1; then
+      HAVE_LOCK=1
+      echo "$$" >"$LOCK/pid" 2>/dev/null || cannot_get "its folder could not be written"
+      return 0
+    fi
+    pinned_ok && return 2
+    owner=""
+    if [ -f "$LOCK/pid" ]; then IFS= read -r owner <"$LOCK/pid" || :; fi
+    case "$owner" in
+      '' | *[!0-9]* | ??????????*) owner="" ;;
+    esac
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -rf "$LOCK" >/dev/null 2>&1 || cannot_get "its folder could not be written"
+      continue
+    fi
+    if [ "$waited" -ge 120 ]; then
+      if [ -z "$owner" ] && [ -z "${took_over:-}" ]; then
+        took_over=1
+        rm -rf "$LOCK" >/dev/null 2>&1 || cannot_get "its folder could not be written"
+        continue
+      fi
+      cannot_get "another start of the team relay is still getting it"
+    fi
+    sleep 1 >/dev/null 2>&1
+    waited=$((waited + 1))
+  done
+}
+
+download_node() {
+  name="node-$NODE_VERSION-darwin-$NODE_ARCH"
+  WORK_DIR=$(mktemp -d "$PRIVATE_DIR/.download.XXXXXX" 2>/dev/null </dev/null) || WORK_DIR=""
+  case "$WORK_DIR" in "$PRIVATE_DIR"/.download.*) ;; *) WORK_DIR=""; cannot_get "its folder could not be made" ;; esac
+  curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK_DIR/node.tar.gz" \
+    "https://nodejs.org/dist/$NODE_VERSION/$name.tar.gz" >/dev/null 2>&1 </dev/null \
+    || cannot_get "the download did not work"
+  got=$(shasum -a 256 "$WORK_DIR/node.tar.gz" 2>/dev/null </dev/null) || got=""
+  got=${got%% *}
+  if [ -z "$got" ] || [ "$got" != "$NODE_SHA256" ]; then
+    cannot_get "the download was not the file it should be"
+  fi
+  if ! tar -xzf "$WORK_DIR/node.tar.gz" -C "$WORK_DIR" >/dev/null 2>&1 </dev/null \
+    || [ ! -f "$WORK_DIR/$name/bin/node" ] || [ ! -x "$WORK_DIR/$name/bin/node" ]; then
+    cannot_get "the download could not be unpacked"
+  fi
+  # Another start may have put a working copy in place meanwhile: that one is used, this download
+  # dropped. A copy there that does not run is set aside (and removed with the download folder),
+  # then the unpacked one is renamed into place, so a half-unpacked copy is never used.
+  if pinned_ok; then return 0; fi
+  if [ -e "$PINNED_DIR" ] || [ -L "$PINNED_DIR" ]; then
+    mv "$PINNED_DIR" "$WORK_DIR/old" >/dev/null 2>&1 || cannot_get "its old copy could not be replaced"
+  fi
+  mv "$WORK_DIR/$name" "$PINNED_DIR" >/dev/null 2>&1 || cannot_get "the download could not be put in place"
+  if ! pinned_ok; then
+    mv "$PINNED_DIR" "$WORK_DIR/bad" >/dev/null 2>&1 || :
+    cannot_get "the Node.js it got does not run on this computer"
+  fi
+}
+
+if [ -z "$found" ] && [ -n "${HOME:-}" ]; then
+  os=$(uname -s 2>/dev/null) || os=""
+  machine=$(uname -m 2>/dev/null) || machine=""
+  case "$os:$machine" in
+    Darwin:arm64) NODE_ARCH=arm64 ;;
+    Darwin:x86_64) NODE_ARCH=x64 ;;
+    *) NODE_ARCH="" ;;
+  esac
+  if [ -n "$NODE_ARCH" ]; then
+    case "$0" in */*) here=${0%/*} ;; *) here=. ;; esac
+    NODE_VERSION=""
+    NODE_SHA256_ARM64=""
+    NODE_SHA256_X64=""
+    if [ -f "$here/node-pins.sh" ] && [ -r "$here/node-pins.sh" ]; then
+      # shellcheck source-path=SCRIPTDIR source=node-pins.sh
+      . "$here/node-pins.sh"
+    fi
+    if [ "$NODE_ARCH" = arm64 ]; then NODE_SHA256=$NODE_SHA256_ARM64; else NODE_SHA256=$NODE_SHA256_X64; fi
+    case "$NODE_VERSION" in v[0-9]*.[0-9]*.[0-9]*) ;; *) cannot_get "its pinned version is missing" ;; esac
+    case "$NODE_VERSION" in *[!v0-9.]*) cannot_get "its pinned version is missing" ;; esac
+    case "$NODE_SHA256" in *[!0-9a-f]* | '') cannot_get "its pinned version is missing" ;; esac
+    [ ${#NODE_SHA256} -eq 64 ] || cannot_get "its pinned version is missing"
+
+    PRIVATE_DIR=$HOME/.local/share/team-relay
+    PINNED_DIR=$PRIVATE_DIR/node-$NODE_VERSION-darwin-$NODE_ARCH
+    PINNED_NODE=$PINNED_DIR/bin/node
+    LOCK=$PRIVATE_DIR/.node-download.lock
+    trap cleanup EXIT
+    trap 'exit 1' HUP INT TERM
+    if ! mkdir -p "$PRIVATE_DIR" >/dev/null 2>&1 || ! chmod 700 "$PRIVATE_DIR" >/dev/null 2>&1; then
+      cannot_get "its folder could not be made"
+    fi
+    if take_lock; then
+      # The start that held the lock before may have finished just now.
+      pinned_ok || download_node
+    fi
+    cleanup
+    trap - EXIT HUP INT TERM
+    found=$PINNED_NODE
+    exec "$found" "$@"
+  fi
 fi
 
 if [ -z "$found" ]; then

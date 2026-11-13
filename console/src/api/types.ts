@@ -491,3 +491,22 @@ export interface AskResult {
   request_id: string
   recipients: string[]
 }
+
+/** /team-relay:setup's page (GET /api/local/setup, on the member's own Mac only). */
+export interface LocalSetup {
+  signed_in: { member: string; team: string; email: string | null }
+  /** The folders the member's Claude answers from, ~/ for the home folder. */
+  folders: string[]
+  /** Whether this computer has the Mac's folder chooser. */
+  chooser: boolean
+  background: { installed: boolean }
+  limits: { max_folders: number }
+}
+
+/** What the Mac's folder chooser added (POST /api/local/folders/choose). */
+export interface LocalChoice {
+  added: string[]
+  refused: Array<{ path: string; reason: string }>
+  cancelled: boolean
+  folders: string[]
+}
