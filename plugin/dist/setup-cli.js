@@ -181,6 +181,14 @@ function credentialFileExists(path) {
     return false;
   }
 }
+function credentialFingerprint(path) {
+  try {
+    const st = lstatSync(path);
+    return `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
 function ensureDir(dir) {
   let st = null;
   try {
@@ -17489,6 +17497,7 @@ init_relay_default();
 
 // src/relay-connect.ts
 init_relay_client();
+init_credentials();
 
 // src/tool-util.ts
 init_relay_client();
@@ -17502,28 +17511,41 @@ function describeError(err) {
 }
 
 // src/relay-connect.ts
-async function connectOnce(env, opts = {}) {
-  let c;
-  try {
-    c = connectionFromEnv(env);
-  } catch (err) {
-    return err instanceof NotConnected ? { kind: "not_signed_in" } : { kind: "config", problem: describeError(err) };
+var STABLE_READ_TRIES = 5;
+function readConnection(env) {
+  const path = credentialsPath(env);
+  for (let tries = 1; ; tries++) {
+    const before = credentialFingerprint(path);
+    let connection;
+    try {
+      connection = connectionFromEnv(env);
+    } catch (err) {
+      connection = err instanceof Error ? err : new Error(String(err));
+    }
+    const after = credentialFingerprint(path);
+    if (before === after) return { fingerprint: after, connection };
+    if (tries >= STABLE_READ_TRIES) return { fingerprint: after, connection: new Error("the credential file kept changing while it was read") };
   }
+}
+async function connectOnce(env, opts = {}) {
+  const { fingerprint, connection: c } = readConnection(env);
+  if (c instanceof NotConnected) return { kind: "not_signed_in", fingerprint };
+  if (c instanceof Error) return { kind: "config", problem: describeError(c), fingerprint };
   let client;
   try {
     client = new RelayClient({ url: c.url, team: c.team, token: c.token });
   } catch (err) {
-    return { kind: "config", problem: describeError(err) };
+    return { kind: "config", problem: describeError(err), fingerprint };
   }
   let me;
   try {
     me = await client.me({ attempts: 1, timeoutMs: opts.timeoutMs ?? 15e3 });
   } catch (err) {
-    if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused" };
-    return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})` };
+    if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused", fingerprint };
+    return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})`, fingerprint };
   }
-  if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team" };
-  return { kind: "connected", client, me, connection: c };
+  if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team", fingerprint };
+  return { kind: "connected", client, me, connection: c, fingerprint };
 }
 
 // src/setup-steps.ts

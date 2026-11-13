@@ -2,6 +2,7 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 export const DIST = fileURLToPath(new URL('../../dist/', import.meta.url));
@@ -80,6 +81,31 @@ export async function waitFor<T>(fn: () => T | undefined | false | null, timeout
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The entries test/fixtures/fake-browser.mjs logged to `file` (FAKE_BROWSER_LOG), once there
+ * are `count` complete lines. The fake browser is its own process and logs only after its
+ * callback request has its answer, while the sign-in on the plugin's side ends on that same
+ * request: a sign-in that has finished says nothing about whether the log is written yet.
+ */
+export async function browserLog(file: string, count = 1): Promise<Array<Record<string, unknown>>> {
+  const lines = await waitFor(
+    () => {
+      let text: string;
+      try {
+        text = readFileSync(file, 'utf8');
+      } catch {
+        return null;
+      }
+      // Only whole lines: the browser appends each entry with its newline in one write.
+      const whole = text.slice(0, text.lastIndexOf('\n') + 1).split('\n').filter(Boolean);
+      return whole.length >= count ? whole : null;
+    },
+    10_000,
+    `the fake browser's log (${file})`,
+  );
+  return lines.map((l) => JSON.parse(l) as Record<string, unknown>);
+}
 
 export function textOf(result: unknown): string {
   const r = result as { content?: Array<{ type: string; text?: string }> };

@@ -51,7 +51,7 @@ import {
 } from '../src/relay-client.js';
 import { defaultRelayUrl } from '../src/relay-default.js';
 import { FakeRelay } from './helpers/fake-relay.js';
-import { PLUGIN_ROOT } from './helpers/mcp.js';
+import { PLUGIN_ROOT, browserLog } from './helpers/mcp.js';
 
 let relay: FakeRelay;
 let dir: string;
@@ -397,7 +397,8 @@ describe('the default opener: the URL is never in a process argument (M2-SPEC §
     try {
       const flow = await startLogin({ relayUrl: relay.url, credentialsFile: credFile() });
       await flow.done;
-      const entry = JSON.parse(readFileSync(logFile, 'utf8').trim().split('\n')[0]!) as { argv: string[]; url: string; done: boolean };
+      // The browser logs after the sign-in has ended here (it is another process): wait for it.
+      const entry = (await browserLog(logFile))[0] as { argv: string[]; url: string; done: boolean };
       expect(entry.url).toBe(flow.url);
       expect(entry.done).toBe(true);
       expect(entry.argv).toHaveLength(1);
