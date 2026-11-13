@@ -668,15 +668,18 @@ class AskerConnection {
         continue;
       }
       this.refusedAt = undefined;
-      const delay = await this.tryConnect(fp);
+      const delay = await this.tryConnect();
       await this.sleep(delay);
     }
   }
 
   /** One attempt; returns how long to wait before the next look. */
-  private async tryConnect(fp: string | null): Promise<number> {
+  private async tryConnect(): Promise<number> {
     const attempt = await connectOnce(this.env);
     this.lastAttempt = attempt.kind;
+    // The file the attempt read, not the one looked at before it: a sign-in stored in between
+    // would otherwise look like a new one at the next look, and drop this connection for it.
+    const fp = attempt.fingerprint;
     switch (attempt.kind) {
       case 'not_signed_in':
         this.problem = null;

@@ -556,12 +556,14 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
       refusedAt = undefined;
       const a = await connectOnce(env);
       if (signal.aborted || updated) break;
+      // Compared from now on: the file the attempt read, not the one looked at before it.
+      const read = a.fingerprint;
       if (a.kind !== 'connected') {
         if (a.kind === 'not_signed_in') {
           note('not signed in: waiting for a sign-in (setup-cli.js login)');
           await sleep(iv.tickMs);
         } else if (a.kind === 'refused') {
-          refusedAt = fp;
+          refusedAt = read;
           note('the relay refused the stored sign-in (401): waiting for a new sign-in');
         } else if (a.kind === 'unreachable') {
           note(`not connected yet: ${a.problem}; trying again`);
@@ -575,8 +577,8 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
       failures = 0;
       said = '';
       log(`connected as ${a.me.member} in team ${a.me.team}`);
-      const out = await session(a, fp);
-      if (out === 'refused') refusedAt = fp;
+      const out = await session(a, read);
+      if (out === 'refused') refusedAt = read;
     }
   } finally {
     clearInterval(pluginTimer);

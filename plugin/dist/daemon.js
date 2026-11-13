@@ -27814,28 +27814,42 @@ init_relay_client();
 
 // src/relay-connect.ts
 init_relay_client();
-async function connectOnce(env2, opts = {}) {
-  let c;
-  try {
-    c = connectionFromEnv(env2);
-  } catch (err) {
-    return err instanceof NotConnected ? { kind: "not_signed_in" } : { kind: "config", problem: describeError(err) };
+init_credentials();
+var STABLE_READ_TRIES = 5;
+function readConnection(env2) {
+  const path = credentialsPath(env2);
+  for (let tries = 1; ; tries++) {
+    const before = credentialFingerprint(path);
+    let connection;
+    try {
+      connection = connectionFromEnv(env2);
+    } catch (err) {
+      connection = err instanceof Error ? err : new Error(String(err));
+    }
+    const after = credentialFingerprint(path);
+    if (before === after) return { fingerprint: after, connection };
+    if (tries >= STABLE_READ_TRIES) return { fingerprint: after, connection: new Error("the credential file kept changing while it was read") };
   }
+}
+async function connectOnce(env2, opts = {}) {
+  const { fingerprint, connection: c } = readConnection(env2);
+  if (c instanceof NotConnected) return { kind: "not_signed_in", fingerprint };
+  if (c instanceof Error) return { kind: "config", problem: describeError(c), fingerprint };
   let client;
   try {
     client = new RelayClient({ url: c.url, team: c.team, token: c.token });
   } catch (err) {
-    return { kind: "config", problem: describeError(err) };
+    return { kind: "config", problem: describeError(err), fingerprint };
   }
   let me;
   try {
     me = await client.me({ attempts: 1, timeoutMs: opts.timeoutMs ?? 15e3 });
   } catch (err) {
-    if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused" };
-    return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})` };
+    if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused", fingerprint };
+    return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})`, fingerprint };
   }
-  if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team" };
-  return { kind: "connected", client, me, connection: c };
+  if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team", fingerprint };
+  return { kind: "connected", client, me, connection: c, fingerprint };
 }
 function hostConnection(c, env2, credentialsFile) {
   return {
@@ -28234,12 +28248,13 @@ async function runDaemon(o) {
       refusedAt = void 0;
       const a = await connectOnce(env2);
       if (signal.aborted || updated) break;
+      const read = a.fingerprint;
       if (a.kind !== "connected") {
         if (a.kind === "not_signed_in") {
           note("not signed in: waiting for a sign-in (setup-cli.js login)");
           await sleep(iv.tickMs);
         } else if (a.kind === "refused") {
-          refusedAt = fp;
+          refusedAt = read;
           note("the relay refused the stored sign-in (401): waiting for a new sign-in");
         } else if (a.kind === "unreachable") {
           note(`not connected yet: ${a.problem}; trying again`);
@@ -28253,8 +28268,8 @@ async function runDaemon(o) {
       failures = 0;
       said = "";
       log2(`connected as ${a.me.member} in team ${a.me.team}`);
-      const out = await session(a, fp);
-      if (out === "refused") refusedAt = fp;
+      const out = await session(a, read);
+      if (out === "refused") refusedAt = read;
     }
   } finally {
     clearInterval(pluginTimer);

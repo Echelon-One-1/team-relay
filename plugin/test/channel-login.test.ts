@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeCredential } from '../src/credentials.js';
 import { FakeRelay } from './helpers/fake-relay.js';
-import { DIST, FIXTURES, sleep, spawnServer, textOf, waitFor, type Spawned } from './helpers/mcp.js';
+import { DIST, FIXTURES, browserLog as browserLogEntries, sleep, spawnServer, textOf, waitFor, type Spawned } from './helpers/mcp.js';
 
 let relay: FakeRelay;
 let xdg: string;
@@ -119,8 +119,9 @@ describe('login tool (M5-SPEC §2, §6, §9)', () => {
     expect(stored.email).toBe('alice@example.com');
     expect(r.text).not.toContain(stored.credential);
 
-    // The browser got the URL from a file, never from its arguments.
-    const entry = JSON.parse(readFileSync(browserLog, 'utf8').trim());
+    // The browser got the URL from a file, never from its arguments. (It logs after the
+    // sign-in has ended here: it is another process, so wait for its line.)
+    const entry = (await browserLogEntries(browserLog))[0] as { argv: string[]; url: string };
     expect(entry.argv).toHaveLength(1);
     expect(entry.argv[0]).not.toContain('login');
     expect(entry.url).toBe(res.sign_in_url);
@@ -213,9 +214,8 @@ describe('login tool (M5-SPEC §2, §6, §9)', () => {
   it('a callback with the wrong state does not end the sign-in, and whoami never repeats the URL', async () => {
     const s = await asker({ FAKE_BROWSER_MODE: 'wrong-state' });
     await call(s, 'login');
-    await waitFor(() => (existsSync(browserLog) ? readFileSync(browserLog, 'utf8') : null), 10_000, 'the browser');
-    const entry = JSON.parse(readFileSync(browserLog, 'utf8').trim());
-    expect(entry.steps.at(-1).status).toBe(404);
+    const entry = (await browserLogEntries(browserLog))[0] as { steps: Array<{ status: number }> };
+    expect(entry.steps.at(-1)!.status).toBe(404);
     await sleep(300);
     expect(statusNotes(s)).toEqual([]);
     const who = JSON.parse((await call(s, 'whoami')).text);
