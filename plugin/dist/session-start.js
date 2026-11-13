@@ -142,19 +142,395 @@ function credentialFileExists(path) {
   }
 }
 
+// src/drive-token-cleanup.ts
+import { execFile as execFile2 } from "node:child_process";
+import { existsSync as existsSync2 } from "node:fs";
+import { join as join5 } from "node:path";
+
+// src/boundary-set.ts
+import { homedir as homedir5 } from "node:os";
+
+// src/boundaries-rule.ts
+var TOPIC_MAX = 500;
+var BOUNDARIES_VERSION_MAX = 2 ** 31 - 1;
+var REMOVED_BOUNDARIES_FIELDS = ["github_orgs", "github_repos", "drive_folders", "drives", "member_folders"];
+var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
+var EDGE_SPACE_RE = /^[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+var chars = (s) => [...s].length;
+var trimText = (s) => s.replace(EDGE_SPACE_RE, "");
+var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+function topicOk(topic) {
+  if (typeof topic !== "string") return false;
+  const t = trimText(topic);
+  return chars(t) >= 1 && chars(t) <= TOPIC_MAX && !TOPIC_FORBIDDEN_RE.test(topic);
+}
+var versionOk = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= BOUNDARIES_VERSION_MAX;
+function readBoundaries(raw) {
+  if (!isObj(raw) || !has(raw, "topic") || !topicOk(raw.topic)) return null;
+  const removed = REMOVED_BOUNDARIES_FIELDS;
+  if (!Object.keys(raw).every((k) => k === "topic" || removed.includes(k))) return null;
+  return { topic: raw.topic };
+}
+
+// src/deny-list.ts
+import { realpathSync } from "node:fs";
+import { normalize } from "node:path";
+var HOME_PATHS = [
+  "~/.ssh/**",
+  "~/.gnupg/**",
+  "~/.aws/**",
+  "~/.config/gcloud/**",
+  "~/.azure/**",
+  "~/.kube/**",
+  "~/.docker/**",
+  "~/.netrc",
+  "~/.npmrc",
+  "~/.pypirc",
+  "~/.git-credentials",
+  "~/.claude/**",
+  "~/.claude-team-relay/**",
+  "~/.config/team-relay/**",
+  "~/Library/Keychains/**",
+  "~/.config/gh/**",
+  "~/.zsh_history",
+  "~/.bash_history",
+  "~/.*_history",
+  "~/Library/Application Support/**/Cookies*",
+  "~/Library/Application Support/Firefox/**",
+  "~/Library/Application Support/Google/Chrome/**",
+  "~/.terraform.d/**",
+  "~/.cargo/credentials*",
+  "~/.vault-token",
+  "~/.pgpass",
+  "~/.config/solana/**",
+  "~/.foundry/**",
+  "~/.ethereum/**"
+];
+var ANY_DEPTH = [
+  "**/.env",
+  "**/.env.*",
+  "**/.envrc",
+  "**/*.pem",
+  "**/*.key",
+  "**/id_rsa*",
+  "**/id_ed25519*",
+  "**/*.p12",
+  "**/*.pfx",
+  "**/*.keystore",
+  "**/*.jks",
+  "**/credentials.json",
+  "**/*.tfvars",
+  "**/keystore/**",
+  "**/.npmrc",
+  "**/.netrc",
+  "**/.pypirc",
+  "**/.git-credentials",
+  "**/id_ecdsa*",
+  "**/id_dsa*",
+  "**/*.ppk",
+  "**/*.tfstate",
+  "**/*.tfstate.*",
+  "**/.aws/**",
+  "**/.kube/**"
+];
+function globRe(glob) {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*" && glob[i + 1] === "*") {
+      if (glob[i + 2] === "/") {
+        re += "(?:.*/)?";
+        i += 2;
+      } else {
+        re += ".*";
+        i += 1;
+      }
+    } else if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${re}$`);
+}
+function within(p, dir) {
+  return p === dir || p.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
+}
+function realOr(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return normalize(p);
+  }
+}
+function credentialHit(p, ctx) {
+  const homes = [.../* @__PURE__ */ new Set([normalize(ctx.home), realOr(ctx.home)])];
+  for (const rule of HOME_PATHS) {
+    const re = globRe(rule.slice(2).replace(/\/\*\*$/, ""));
+    for (const h of homes) {
+      if (p === h || !within(p, h)) continue;
+      const parts = p.slice(h.length).split("/").filter(Boolean);
+      for (let k = 1; k <= parts.length; k++) if (re.test(parts.slice(0, k).join("/"))) return rule;
+    }
+  }
+  for (const rule of ANY_DEPTH) {
+    const re = globRe(rule.replace(/^\*\*\//, "").replace(/\/\*\*$/, ""));
+    if (p.split("/").some((part) => part !== "" && re.test(part))) return rule;
+  }
+  if (ctx.cloudsdkConfig && ctx.cloudsdkConfig.startsWith("/") && within(p, realOr(ctx.cloudsdkConfig))) return "CLOUDSDK_CONFIG";
+  for (const d of ctx.credentialDirs ?? []) {
+    if (within(p, d) || within(p, realOr(d))) return `${d}/**`;
+  }
+  return null;
+}
+
+// src/member-folders.ts
+import { chmodSync as chmodSync2, closeSync as closeSync2, fsyncSync as fsyncSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, writeSync as writeSync2 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { basename as basename3, dirname as dirname3, isAbsolute as isAbsolute4, join as join4, normalize as normalize3 } from "node:path";
+
+// src/answering-lock.ts
+import { homedir as homedir2 } from "node:os";
+import { isAbsolute as isAbsolute2, join as join2 } from "node:path";
+function configDir(env) {
+  const xdg = env.XDG_CONFIG_HOME?.trim();
+  const base2 = xdg && isAbsolute2(xdg) ? xdg : join2(env.HOME?.trim() || homedir2(), ".config");
+  return join2(base2, "team-relay");
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+
+// src/scope.ts
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute3, join as join3, normalize as normalize2 } from "node:path";
+function relayCredentialDirs(env) {
+  const dirs = [configDir(env)];
+  try {
+    dirs.push(dirname2(credentialsPath(env)));
+  } catch {
+  }
+  return [...new Set(dirs)];
+}
+function folderSafety(cwd, env) {
+  const path = realOr(cwd);
+  const refuse = (reason) => ({ path, reason });
+  if (!isAbsolute3(path)) return refuse("it is not an absolute path");
+  try {
+    if (!statSync(path).isDirectory()) return refuse("it is not a directory");
+  } catch {
+    return refuse("it does not exist");
+  }
+  const home2 = env.HOME?.trim() || homedir3();
+  const homeReal = realOr(home2);
+  if (path === "/") return refuse("it is the root directory");
+  if (path === homeReal || normalize2(cwd) === normalize2(home2)) return refuse("it is your home directory");
+  if (within(homeReal, path) || within(normalize2(home2), path)) return refuse("it contains your home directory");
+  const configDirs = [join3(homeReal, ".claude"), join3(homeReal, ".claude-team-relay"), ...relayCredentialDirs(env).map(realOr)];
+  const claudeConfig = env.CLAUDE_CONFIG_DIR?.trim();
+  if (claudeConfig && isAbsolute3(claudeConfig)) configDirs.push(realOr(claudeConfig));
+  for (const d of configDirs) {
+    if (within(path, d)) return refuse(`it is inside a configuration directory (${d})`);
+  }
+  const cloudsdk = env.CLOUDSDK_CONFIG?.trim();
+  const hit = credentialHit(path, {
+    home: home2,
+    cloudsdkConfig: cloudsdk && isAbsolute3(cloudsdk) ? cloudsdk : void 0,
+    credentialDirs: relayCredentialDirs(env)
+  });
+  if (hit) return refuse(`it is inside a credential location on the deny list (${hit})`);
+  if (dirname2(path) === homeReal || dirname2(normalize2(cwd)) === normalize2(home2)) return refuse("it is a folder directly in your home directory");
+  const hidden = homeEntries(homeReal);
+  for (const e of hidden) {
+    if (within(path, e.path) || within(path, e.real)) return refuse(`it is inside ~/${e.name}`);
+    if (within(e.real, path)) return refuse(`it contains ~/${e.name}`);
+  }
+  return { path, reason: null };
+}
+function homeEntries(homeReal) {
+  let names;
+  try {
+    names = readdirSync(homeReal);
+  } catch {
+    names = [];
+  }
+  const wanted = /* @__PURE__ */ new Set(["Library", ...names.filter((n) => n.startsWith(".") && n !== "." && n !== "..")]);
+  return [...wanted].map((name) => {
+    const path = join3(homeReal, name);
+    return { name, path, real: realOr(path) };
+  });
+}
+
+// src/member-folders.ts
+var MEMBER_FOLDERS_FILE = "boundaries.local.json";
+var MAX_FOLDERS = 20;
+var MAX_TEAMS = 20;
+var MAX_PATH = 1024;
+var MAX_FILE_BYTES2 = 256 * 1024;
+var OLD_FOLDER_LISTS = ["repo_roots", "extra_folders"];
+var MemberFoldersError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "MemberFoldersError";
+  }
+};
+function memberFoldersPath(env) {
+  return join4(configDir(env), MEMBER_FOLDERS_FILE);
+}
+function home(env) {
+  return env.HOME?.trim() || homedir4();
+}
+function expandPath(raw, env) {
+  if (raw === "~") return normalize3(home(env));
+  if (raw.startsWith("~/")) return normalize3(join4(home(env), raw.slice(2)));
+  if (isAbsolute4(raw)) return normalize3(raw);
+  return null;
+}
+function memberFolderProblem(raw, env) {
+  if (typeof raw !== "string" || raw.length === 0) return { path: null, reason: "it is not a path" };
+  if (raw.length > MAX_PATH) return { path: null, reason: "it is longer than 1024 characters" };
+  if (/[\u0000-\u001f\u007f]/.test(raw)) return { path: null, reason: "it contains control characters" };
+  const expanded = expandPath(raw, env);
+  if (!expanded) return { path: null, reason: "it is not an absolute path or one starting with ~/" };
+  const { path, reason } = folderSafety(expanded, env);
+  return { path, reason };
+}
+var isObj2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+function onlyKeys(o, allowed, what) {
+  for (const k of Object.keys(o)) {
+    if (!allowed.includes(k)) throw new MemberFoldersError(`${what} has an unknown field (${JSON.stringify(k.slice(0, 40))})`);
+  }
+}
+function holds(list, raw, env) {
+  const target = expandPath(raw, env);
+  return list.some((e) => e === raw || target !== null && expandPath(e, env) === target);
+}
+function parseList(raw, key, env) {
+  const list = raw ?? [];
+  if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
+  if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
+  for (const entry of list) {
+    const { reason } = memberFolderProblem(entry, env);
+    if (reason && reason !== "it does not exist") throw new MemberFoldersError(`${key} entry ${JSON.stringify(String(entry).slice(0, 200))} cannot be used: ${reason}`);
+  }
+  return list;
+}
+function parseOldList(raw, key, env) {
+  const list = raw ?? [];
+  if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
+  if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
+  if (list.some((e) => typeof e !== "string")) throw new MemberFoldersError(`${key} must be a list of paths`);
+  return list.filter((e) => {
+    const { reason } = memberFolderProblem(e, env);
+    return reason === null || reason === "it does not exist";
+  });
+}
+function parseTeamSettings(raw, env, team = "a team") {
+  if (!isObj2(raw)) throw new MemberFoldersError(`the settings for ${team} are not a JSON object`);
+  onlyKeys(raw, ["folders", ...OLD_FOLDER_LISTS, "accepted"], `the settings for ${team}`);
+  const folders = [];
+  for (const entry of parseList(raw.folders, "folders", env)) if (!holds(folders, entry, env)) folders.push(entry);
+  const previous = [];
+  const seen = [...folders];
+  for (const [key, kind] of [["repo_roots", "repo_root"], ["extra_folders", "own_folder"]]) {
+    for (const entry of parseOldList(raw[key], key, env)) {
+      if (holds(seen, entry, env)) continue;
+      seen.push(entry);
+      previous.push({ path: entry, kind });
+    }
+  }
+  return { folders, previous };
+}
+function emptyTeams() {
+  return /* @__PURE__ */ Object.create(null);
+}
+function parseMemberSettings(raw, env) {
+  if (!isObj2(raw)) throw new MemberFoldersError("the folders file is not a JSON object");
+  if ("repo_roots" in raw || "extra_folders" in raw || "folders" in raw) {
+    throw new MemberFoldersError('the folders file has an older format (no "teams"); remove it and set your folders again with /team-relay:folders');
+  }
+  onlyKeys(raw, ["teams"], "the folders file");
+  if (!isObj2(raw.teams)) throw new MemberFoldersError('the folders file needs "teams", an object');
+  const names = Object.keys(raw.teams);
+  if (names.length > MAX_TEAMS) throw new MemberFoldersError(`the folders file has more than ${MAX_TEAMS} teams`);
+  const teams = emptyTeams();
+  const old = /* @__PURE__ */ Object.create(null);
+  for (const name of names) {
+    if (!TEAM_RE.test(name)) throw new MemberFoldersError(`the folders file has a team name that is not a team id (${JSON.stringify(name.slice(0, 40))})`);
+    const entry = raw.teams[name];
+    teams[name] = parseTeamSettings(entry, env, `team ${name}`);
+    const kept = {};
+    for (const key of OLD_FOLDER_LISTS) {
+      const list = entry[key];
+      if (Array.isArray(list)) kept[key] = [...list];
+    }
+    if (Object.keys(kept).length) old[name] = kept;
+  }
+  return { teams, old };
+}
+function teamSettings(settings, team) {
+  const t = Object.prototype.hasOwnProperty.call(settings.teams, team) ? settings.teams[team] : void 0;
+  return t ? { folders: [...t.folders], previous: t.previous.map((x) => ({ ...x })) } : { folders: [], previous: [] };
+}
+function uid2() {
+  return typeof process.getuid === "function" ? process.getuid() : null;
+}
+function checkPrivate(st, what, kind) {
+  if (st.isSymbolicLink()) throw new MemberFoldersError(`${what} is a symbolic link; refusing to use it`);
+  if (kind === "file" ? !st.isFile() : !st.isDirectory()) throw new MemberFoldersError(`${what} is not a ${kind}; refusing to use it`);
+  const me = uid2();
+  if (me !== null && st.uid !== me) throw new MemberFoldersError(`${what} is owned by another user; refusing to use it`);
+  if ((st.mode & 63) !== 0) {
+    const mode = (st.mode & 511).toString(8).padStart(3, "0");
+    throw new MemberFoldersError(`${what} has mode ${mode}, readable or writable by others; refusing to use it (chmod ${kind === "file" ? "600" : "700"} it)`);
+  }
+}
+function readMemberSettings(path, env) {
+  let st;
+  try {
+    st = lstatSync2(path);
+  } catch (err) {
+    const code = err.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { teams: emptyTeams() };
+    throw new MemberFoldersError(`cannot read the folders file (${code ?? "error"})`);
+  }
+  checkPrivate(lstatSync2(dirname3(path)), "the team relay configuration directory", "directory");
+  checkPrivate(st, "the folders file", "file");
+  if (st.size > MAX_FILE_BYTES2) throw new MemberFoldersError("the folders file is too large");
+  let json;
+  try {
+    json = JSON.parse(readFileSync2(path, "utf8"));
+  } catch {
+    throw new MemberFoldersError("the folders file is not valid JSON");
+  }
+  return parseMemberSettings(json, env);
+}
+function readTeamSettings(path, env, team) {
+  return teamSettings(readMemberSettings(path, env), team);
+}
+function hasAccepted(acceptedVersion, currentVersion) {
+  return typeof acceptedVersion === "number" && Number.isSafeInteger(acceptedVersion) && acceptedVersion >= 1 && acceptedVersion <= BOUNDARIES_VERSION_MAX && acceptedVersion <= currentVersion;
+}
+
 // src/relay-client.ts
 import { execFile } from "node:child_process";
-import { readFileSync as readFileSync3 } from "node:fs";
+import { readFileSync as readFileSync4 } from "node:fs";
 
 // src/relay-default.ts
-import { readFileSync as readFileSync2 } from "node:fs";
+import { readFileSync as readFileSync3 } from "node:fs";
 import { fileURLToPath } from "node:url";
 function defaultRelayFile() {
   return fileURLToPath(new URL("../relay.default.json", import.meta.url));
 }
 function defaultRelayUrl(file = defaultRelayFile()) {
   try {
-    const raw = JSON.parse(readFileSync2(file, "utf8"));
+    const raw = JSON.parse(readFileSync3(file, "utf8"));
     if (typeof raw.relay_url !== "string") return null;
     parseRelayUrl(raw.relay_url);
     return raw.relay_url;
@@ -217,7 +593,7 @@ function tokenProviderFromEnv(env) {
     return staticTokenProvider(() => {
       let raw;
       try {
-        raw = readFileSync3(file, "utf8");
+        raw = readFileSync4(file, "utf8");
       } catch (err) {
         throw new Error(`cannot read RELAY_TOKEN_FILE (${err.code ?? "error"})`);
       }
@@ -727,10 +1103,131 @@ var RelayClient = class _RelayClient {
   }
 };
 
+// src/notify.ts
+var DATA_JSON_LIMIT = 16 * 1024;
+
+// src/boundary-set.ts
+var MAX_WALK_FILE_BYTES = 5 * 1024 * 1024;
+function homeDir(env) {
+  return env.HOME?.trim() || homedir5();
+}
+var ANY_DEPTH_RES = ANY_DEPTH.map((rule) => globRe(rule.replace(/^\*\*\//, "").replace(/\/\*\*$/, "")));
+function foldersText(count) {
+  if (count === 0) return "nothing yet: you have chosen no folders (choose them with /team-relay:setup or /team-relay:folders add <path>)";
+  return `your ${count === 1 ? "chosen folder" : `${count} chosen folders`} (only the files git tracks inside a repository; /team-relay:folders list shows them)`;
+}
+function boundariesSentence(version, settings, acceptedVersion, consoleAt) {
+  if ("error" in settings) {
+    return `Your team has boundaries (version ${version}), but your folders file cannot be used (${settings.error.slice(0, 200)}), so teammates' questions to you are declined until you fix it: run /team-relay:folders.`;
+  }
+  const n = settings.previous.length;
+  const tail = n ? ` ${n === 1 ? "1 folder" : `${n} folders`} you chose before 13 Nov 2026 ${n === 1 ? "is" : "are"} not used now; /team-relay:folders list shows ${n === 1 ? "it" : "them"}.` : "";
+  if (!hasAccepted(acceptedVersion, version)) {
+    return `Your team has boundaries (version ${version}) that you have not accepted yet, so teammates' questions to you are declined. Accept them in the console at ${consoleAt} (your answerer would then answer on its own from ${foldersText(settings.folders.length)}).${tail}`;
+  }
+  return `Your team has boundaries (version ${version}): your answerer answers teammates on its own from ${foldersText(settings.folders.length)}; reads of anything else are denied and off-topic questions declined.${tail}`;
+}
+var isObj3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+function validBoundaries(v) {
+  if (!isObj3(v) || !versionOk(v.version)) return false;
+  if (v.boundaries !== null) {
+    const b = readBoundaries(v.boundaries);
+    if (!b) return false;
+    v.boundaries = b;
+  }
+  delete v.since;
+  return true;
+}
+
+// src/drive-token-cleanup.ts
+var OLD_DRIVE_SERVICE = "team-relay-drive";
+var GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
+var SECURITY = "/usr/bin/security";
+var ITEM_NOT_FOUND = 44;
+var MAX_ITEMS = 20;
+var REVOKE_TIMEOUT_MS = 5e3;
+var TOKEN_RE = /^[\x21-\x7e]{1,4096}$/;
+var runSecurity = (args) => new Promise((resolve) => {
+  const child = execFile2(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8" }, (err, stdout) => {
+    const code = err ? typeof err.code === "number" ? err.code : 1 : 0;
+    resolve({ code, stdout: String(stdout ?? "") });
+  });
+  child.stdin?.end();
+});
+async function revoke(doFetch, token) {
+  try {
+    const r = await doFetch(GOOGLE_REVOKE_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token }).toString(),
+      signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS)
+    });
+    if (r.status === 200) return true;
+    if (r.status !== 400) return false;
+    const j = await r.json().catch(() => null);
+    return j?.error === "invalid_token";
+  } catch {
+    return false;
+  }
+}
+function loginKeychainPath(env) {
+  return join5(homeDir(env), "Library", "Keychains", "login.keychain-db");
+}
+async function removeOldDriveSignIn(o) {
+  if ((o.platform ?? process.platform) !== "darwin") return "not_macos";
+  const keychain = loginKeychainPath(o.env);
+  try {
+    if (!existsSync2(keychain)) return "no_keychain";
+  } catch {
+    return "no_keychain";
+  }
+  const run2 = o.run ?? runSecurity;
+  const doFetch = o.fetch ?? globalThis.fetch;
+  let removed = 0;
+  let revoked = 0;
+  try {
+    for (let i = 0; i < MAX_ITEMS; i++) {
+      const found = await run2(["find-generic-password", "-s", OLD_DRIVE_SERVICE, "-w", keychain]);
+      if (found.code === ITEM_NOT_FOUND) break;
+      if (found.code !== 0) {
+        o.log(`could not check the Keychain for the old Google Drive sign-in (security exit ${found.code}); trying again next start`);
+        return removed > 0 ? report() : "failed";
+      }
+      const token = found.stdout.replace(/\r?\n$/, "");
+      if (TOKEN_RE.test(token) && await revoke(doFetch, token)) revoked++;
+      const del = await run2(["delete-generic-password", "-s", OLD_DRIVE_SERVICE, keychain]);
+      if (del.code === ITEM_NOT_FOUND) break;
+      if (del.code !== 0) {
+        o.log(`could not remove the old Google Drive sign-in from the Keychain (security exit ${del.code}); trying again next start`);
+        return removed > 0 ? report() : "failed";
+      }
+      removed++;
+    }
+  } catch {
+    o.log("could not check the Keychain for the old Google Drive sign-in; trying again next start");
+    return removed > 0 ? report() : "failed";
+  }
+  return removed > 0 ? report() : "absent";
+  function report() {
+    const google = revoked === removed ? "Google revoked it" : revoked === 0 ? "Google could not be asked to revoke it" : `Google revoked ${revoked} of ${removed}`;
+    o.log(`removed the old Google Drive sign-in from the Keychain (${google})`);
+    return "removed";
+  }
+}
+
+// src/log.ts
+function makeLogger(component) {
+  return (...parts) => {
+    const text = parts.map((p) => p instanceof Error ? p.message : typeof p === "string" ? p : JSON.stringify(p)).join(" ");
+    process.stderr.write(`[team-relay ${component}] ${text}
+`);
+  };
+}
+
 // src/channel-mode.ts
-import { execFile as execFile2 } from "node:child_process";
+import { execFile as execFile3 } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { dirname as dirname2, sep } from "node:path";
+import { dirname as dirname4, sep } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 var CHANNEL_FLAGS = ["--dangerously-load-development-channels", "--channels"];
 var MAX_ANCESTORS = 4;
@@ -783,7 +1280,7 @@ function splitPsArgs(args, comm) {
 }
 function run(file, args) {
   return new Promise((resolve, reject) => {
-    execFile2(
+    execFile3(
       file,
       args,
       { encoding: "utf8", timeout: 2e3, maxBuffer: 1024 * 1024, env: { PATH: "/bin:/usr/bin:/usr/sbin:/sbin", LC_ALL: "C" } },
@@ -856,7 +1353,7 @@ function pluginRef(env, bundleRoot = ownRoot()) {
 }
 function ownRoot() {
   try {
-    return dirname2(dirname2(fileURLToPath2(import.meta.url))) + sep;
+    return dirname4(dirname4(fileURLToPath2(import.meta.url))) + sep;
   } catch {
     return null;
   }
@@ -941,36 +1438,16 @@ function invitationsSentence(list) {
 }
 
 // src/approvals-state.ts
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync4, renameSync as renameSync2, rmSync as rmSync2, writeFileSync } from "node:fs";
-import { join as join3 } from "node:path";
-
-// src/answering-lock.ts
-import { homedir as homedir2 } from "node:os";
-import { isAbsolute as isAbsolute2, join as join2 } from "node:path";
-function configDir(env) {
-  const xdg = env.XDG_CONFIG_HOME?.trim();
-  const base2 = xdg && isAbsolute2(xdg) ? xdg : join2(env.HOME?.trim() || homedir2(), ".config");
-  return join2(base2, "team-relay");
-}
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return err.code === "EPERM";
-  }
-}
-
-// src/approvals-state.ts
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync5, renameSync as renameSync3, rmSync as rmSync3, writeFileSync } from "node:fs";
+import { join as join6 } from "node:path";
 var STATE_FILE = "approvals.json";
 function statePath(env) {
-  return join3(configDir(env), STATE_FILE);
+  return join6(configDir(env), STATE_FILE);
 }
 function readApprovalsState(path, alive = pidAlive) {
   let raw;
   try {
-    raw = readFileSync4(path, "utf8");
+    raw = readFileSync5(path, "utf8");
   } catch {
     return null;
   }
@@ -987,381 +1464,6 @@ function readApprovalsState(path, alive = pidAlive) {
 function approvalsSentence(pending) {
   if (pending <= 0) return null;
   return `${pending} ${pending === 1 ? "answer" : "answers"} waiting for your approval`;
-}
-
-// src/boundaries-rule.ts
-var TOPIC_MAX = 500;
-var BOUNDARIES_VERSION_MAX = 2 ** 31 - 1;
-var REMOVED_BOUNDARIES_FIELDS = ["github_orgs", "github_repos", "drive_folders", "drives", "member_folders"];
-var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
-var EDGE_SPACE_RE = /^[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
-var chars = (s) => [...s].length;
-var trimText = (s) => s.replace(EDGE_SPACE_RE, "");
-var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
-function topicOk(topic) {
-  if (typeof topic !== "string") return false;
-  const t = trimText(topic);
-  return chars(t) >= 1 && chars(t) <= TOPIC_MAX && !TOPIC_FORBIDDEN_RE.test(topic);
-}
-var versionOk = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= BOUNDARIES_VERSION_MAX;
-function readBoundaries(raw) {
-  if (!isObj(raw) || !has(raw, "topic") || !topicOk(raw.topic)) return null;
-  const removed = REMOVED_BOUNDARIES_FIELDS;
-  if (!Object.keys(raw).every((k) => k === "topic" || removed.includes(k))) return null;
-  return { topic: raw.topic };
-}
-
-// src/deny-list.ts
-import { realpathSync } from "node:fs";
-import { normalize } from "node:path";
-var HOME_PATHS = [
-  "~/.ssh/**",
-  "~/.gnupg/**",
-  "~/.aws/**",
-  "~/.config/gcloud/**",
-  "~/.azure/**",
-  "~/.kube/**",
-  "~/.docker/**",
-  "~/.netrc",
-  "~/.npmrc",
-  "~/.pypirc",
-  "~/.git-credentials",
-  "~/.claude/**",
-  "~/.claude-team-relay/**",
-  "~/.config/team-relay/**",
-  "~/Library/Keychains/**",
-  "~/.config/gh/**",
-  "~/.zsh_history",
-  "~/.bash_history",
-  "~/.*_history",
-  "~/Library/Application Support/**/Cookies*",
-  "~/Library/Application Support/Firefox/**",
-  "~/Library/Application Support/Google/Chrome/**",
-  "~/.terraform.d/**",
-  "~/.cargo/credentials*",
-  "~/.vault-token",
-  "~/.pgpass",
-  "~/.config/solana/**",
-  "~/.foundry/**",
-  "~/.ethereum/**"
-];
-var ANY_DEPTH = [
-  "**/.env",
-  "**/.env.*",
-  "**/.envrc",
-  "**/*.pem",
-  "**/*.key",
-  "**/id_rsa*",
-  "**/id_ed25519*",
-  "**/*.p12",
-  "**/*.pfx",
-  "**/*.keystore",
-  "**/*.jks",
-  "**/credentials.json",
-  "**/*.tfvars",
-  "**/keystore/**",
-  "**/.npmrc",
-  "**/.netrc",
-  "**/.pypirc",
-  "**/.git-credentials",
-  "**/id_ecdsa*",
-  "**/id_dsa*",
-  "**/*.ppk",
-  "**/*.tfstate",
-  "**/*.tfstate.*",
-  "**/.aws/**",
-  "**/.kube/**"
-];
-function globRe(glob) {
-  let re = "";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === "*" && glob[i + 1] === "*") {
-      if (glob[i + 2] === "/") {
-        re += "(?:.*/)?";
-        i += 2;
-      } else {
-        re += ".*";
-        i += 1;
-      }
-    } else if (c === "*") re += "[^/]*";
-    else if (c === "?") re += "[^/]";
-    else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-  }
-  return new RegExp(`^${re}$`);
-}
-function within(p, dir) {
-  return p === dir || p.startsWith(dir.endsWith("/") ? dir : `${dir}/`);
-}
-function realOr(p) {
-  try {
-    return realpathSync(p);
-  } catch {
-    return normalize(p);
-  }
-}
-function credentialHit(p, ctx) {
-  const homes = [.../* @__PURE__ */ new Set([normalize(ctx.home), realOr(ctx.home)])];
-  for (const rule of HOME_PATHS) {
-    const re = globRe(rule.slice(2).replace(/\/\*\*$/, ""));
-    for (const h of homes) {
-      if (p === h || !within(p, h)) continue;
-      const parts = p.slice(h.length).split("/").filter(Boolean);
-      for (let k = 1; k <= parts.length; k++) if (re.test(parts.slice(0, k).join("/"))) return rule;
-    }
-  }
-  for (const rule of ANY_DEPTH) {
-    const re = globRe(rule.replace(/^\*\*\//, "").replace(/\/\*\*$/, ""));
-    if (p.split("/").some((part) => part !== "" && re.test(part))) return rule;
-  }
-  if (ctx.cloudsdkConfig && ctx.cloudsdkConfig.startsWith("/") && within(p, realOr(ctx.cloudsdkConfig))) return "CLOUDSDK_CONFIG";
-  for (const d of ctx.credentialDirs ?? []) {
-    if (within(p, d) || within(p, realOr(d))) return `${d}/**`;
-  }
-  return null;
-}
-
-// src/member-folders.ts
-import { chmodSync as chmodSync2, closeSync as closeSync2, fsyncSync as fsyncSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync3, openSync as openSync2, readFileSync as readFileSync5, renameSync as renameSync3, rmSync as rmSync3, writeSync as writeSync2 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { basename as basename3, dirname as dirname4, isAbsolute as isAbsolute4, join as join5, normalize as normalize3 } from "node:path";
-
-// src/scope.ts
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { basename as basename2, dirname as dirname3, isAbsolute as isAbsolute3, join as join4, normalize as normalize2 } from "node:path";
-function relayCredentialDirs(env) {
-  const dirs = [configDir(env)];
-  try {
-    dirs.push(dirname3(credentialsPath(env)));
-  } catch {
-  }
-  return [...new Set(dirs)];
-}
-function folderSafety(cwd, env) {
-  const path = realOr(cwd);
-  const refuse = (reason) => ({ path, reason });
-  if (!isAbsolute3(path)) return refuse("it is not an absolute path");
-  try {
-    if (!statSync(path).isDirectory()) return refuse("it is not a directory");
-  } catch {
-    return refuse("it does not exist");
-  }
-  const home2 = env.HOME?.trim() || homedir3();
-  const homeReal = realOr(home2);
-  if (path === "/") return refuse("it is the root directory");
-  if (path === homeReal || normalize2(cwd) === normalize2(home2)) return refuse("it is your home directory");
-  if (within(homeReal, path) || within(normalize2(home2), path)) return refuse("it contains your home directory");
-  const configDirs = [join4(homeReal, ".claude"), join4(homeReal, ".claude-team-relay"), ...relayCredentialDirs(env).map(realOr)];
-  const claudeConfig = env.CLAUDE_CONFIG_DIR?.trim();
-  if (claudeConfig && isAbsolute3(claudeConfig)) configDirs.push(realOr(claudeConfig));
-  for (const d of configDirs) {
-    if (within(path, d)) return refuse(`it is inside a configuration directory (${d})`);
-  }
-  const cloudsdk = env.CLOUDSDK_CONFIG?.trim();
-  const hit = credentialHit(path, {
-    home: home2,
-    cloudsdkConfig: cloudsdk && isAbsolute3(cloudsdk) ? cloudsdk : void 0,
-    credentialDirs: relayCredentialDirs(env)
-  });
-  if (hit) return refuse(`it is inside a credential location on the deny list (${hit})`);
-  if (dirname3(path) === homeReal || dirname3(normalize2(cwd)) === normalize2(home2)) return refuse("it is a folder directly in your home directory");
-  const hidden = homeEntries(homeReal);
-  for (const e of hidden) {
-    if (within(path, e.path) || within(path, e.real)) return refuse(`it is inside ~/${e.name}`);
-    if (within(e.real, path)) return refuse(`it contains ~/${e.name}`);
-  }
-  return { path, reason: null };
-}
-function homeEntries(homeReal) {
-  let names;
-  try {
-    names = readdirSync(homeReal);
-  } catch {
-    names = [];
-  }
-  const wanted = /* @__PURE__ */ new Set(["Library", ...names.filter((n) => n.startsWith(".") && n !== "." && n !== "..")]);
-  return [...wanted].map((name) => {
-    const path = join4(homeReal, name);
-    return { name, path, real: realOr(path) };
-  });
-}
-
-// src/member-folders.ts
-var MEMBER_FOLDERS_FILE = "boundaries.local.json";
-var MAX_FOLDERS = 20;
-var MAX_TEAMS = 20;
-var MAX_PATH = 1024;
-var MAX_FILE_BYTES2 = 256 * 1024;
-var OLD_FOLDER_LISTS = ["repo_roots", "extra_folders"];
-var MemberFoldersError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "MemberFoldersError";
-  }
-};
-function memberFoldersPath(env) {
-  return join5(configDir(env), MEMBER_FOLDERS_FILE);
-}
-function home(env) {
-  return env.HOME?.trim() || homedir4();
-}
-function expandPath(raw, env) {
-  if (raw === "~") return normalize3(home(env));
-  if (raw.startsWith("~/")) return normalize3(join5(home(env), raw.slice(2)));
-  if (isAbsolute4(raw)) return normalize3(raw);
-  return null;
-}
-function memberFolderProblem(raw, env) {
-  if (typeof raw !== "string" || raw.length === 0) return { path: null, reason: "it is not a path" };
-  if (raw.length > MAX_PATH) return { path: null, reason: "it is longer than 1024 characters" };
-  if (/[\u0000-\u001f\u007f]/.test(raw)) return { path: null, reason: "it contains control characters" };
-  const expanded = expandPath(raw, env);
-  if (!expanded) return { path: null, reason: "it is not an absolute path or one starting with ~/" };
-  const { path, reason } = folderSafety(expanded, env);
-  return { path, reason };
-}
-var isObj2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-function onlyKeys(o, allowed, what) {
-  for (const k of Object.keys(o)) {
-    if (!allowed.includes(k)) throw new MemberFoldersError(`${what} has an unknown field (${JSON.stringify(k.slice(0, 40))})`);
-  }
-}
-function holds(list, raw, env) {
-  const target = expandPath(raw, env);
-  return list.some((e) => e === raw || target !== null && expandPath(e, env) === target);
-}
-function parseList(raw, key, env) {
-  const list = raw ?? [];
-  if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
-  if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
-  for (const entry of list) {
-    const { reason } = memberFolderProblem(entry, env);
-    if (reason && reason !== "it does not exist") throw new MemberFoldersError(`${key} entry ${JSON.stringify(String(entry).slice(0, 200))} cannot be used: ${reason}`);
-  }
-  return list;
-}
-function parseOldList(raw, key, env) {
-  const list = raw ?? [];
-  if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
-  if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
-  if (list.some((e) => typeof e !== "string")) throw new MemberFoldersError(`${key} must be a list of paths`);
-  return list.filter((e) => {
-    const { reason } = memberFolderProblem(e, env);
-    return reason === null || reason === "it does not exist";
-  });
-}
-function parseTeamSettings(raw, env, team = "a team") {
-  if (!isObj2(raw)) throw new MemberFoldersError(`the settings for ${team} are not a JSON object`);
-  onlyKeys(raw, ["folders", ...OLD_FOLDER_LISTS, "accepted"], `the settings for ${team}`);
-  const folders = [];
-  for (const entry of parseList(raw.folders, "folders", env)) if (!holds(folders, entry, env)) folders.push(entry);
-  const previous = [];
-  const seen = [...folders];
-  for (const [key, kind] of [["repo_roots", "repo_root"], ["extra_folders", "own_folder"]]) {
-    for (const entry of parseOldList(raw[key], key, env)) {
-      if (holds(seen, entry, env)) continue;
-      seen.push(entry);
-      previous.push({ path: entry, kind });
-    }
-  }
-  return { folders, previous };
-}
-function emptyTeams() {
-  return /* @__PURE__ */ Object.create(null);
-}
-function parseMemberSettings(raw, env) {
-  if (!isObj2(raw)) throw new MemberFoldersError("the folders file is not a JSON object");
-  if ("repo_roots" in raw || "extra_folders" in raw || "folders" in raw) {
-    throw new MemberFoldersError('the folders file has an older format (no "teams"); remove it and set your folders again with /team-relay:folders');
-  }
-  onlyKeys(raw, ["teams"], "the folders file");
-  if (!isObj2(raw.teams)) throw new MemberFoldersError('the folders file needs "teams", an object');
-  const names = Object.keys(raw.teams);
-  if (names.length > MAX_TEAMS) throw new MemberFoldersError(`the folders file has more than ${MAX_TEAMS} teams`);
-  const teams = emptyTeams();
-  for (const name of names) {
-    if (!TEAM_RE.test(name)) throw new MemberFoldersError(`the folders file has a team name that is not a team id (${JSON.stringify(name.slice(0, 40))})`);
-    teams[name] = parseTeamSettings(raw.teams[name], env, `team ${name}`);
-  }
-  return { teams };
-}
-function teamSettings(settings, team) {
-  const t = Object.prototype.hasOwnProperty.call(settings.teams, team) ? settings.teams[team] : void 0;
-  return t ? { folders: [...t.folders], previous: t.previous.map((x) => ({ ...x })) } : { folders: [], previous: [] };
-}
-function uid2() {
-  return typeof process.getuid === "function" ? process.getuid() : null;
-}
-function checkPrivate(st, what, kind) {
-  if (st.isSymbolicLink()) throw new MemberFoldersError(`${what} is a symbolic link; refusing to use it`);
-  if (kind === "file" ? !st.isFile() : !st.isDirectory()) throw new MemberFoldersError(`${what} is not a ${kind}; refusing to use it`);
-  const me = uid2();
-  if (me !== null && st.uid !== me) throw new MemberFoldersError(`${what} is owned by another user; refusing to use it`);
-  if ((st.mode & 63) !== 0) {
-    const mode = (st.mode & 511).toString(8).padStart(3, "0");
-    throw new MemberFoldersError(`${what} has mode ${mode}, readable or writable by others; refusing to use it (chmod ${kind === "file" ? "600" : "700"} it)`);
-  }
-}
-function readMemberSettings(path, env) {
-  let st;
-  try {
-    st = lstatSync2(path);
-  } catch (err) {
-    const code = err.code;
-    if (code === "ENOENT" || code === "ENOTDIR") return { teams: emptyTeams() };
-    throw new MemberFoldersError(`cannot read the folders file (${code ?? "error"})`);
-  }
-  checkPrivate(lstatSync2(dirname4(path)), "the team relay configuration directory", "directory");
-  checkPrivate(st, "the folders file", "file");
-  if (st.size > MAX_FILE_BYTES2) throw new MemberFoldersError("the folders file is too large");
-  let json;
-  try {
-    json = JSON.parse(readFileSync5(path, "utf8"));
-  } catch {
-    throw new MemberFoldersError("the folders file is not valid JSON");
-  }
-  return parseMemberSettings(json, env);
-}
-function readTeamSettings(path, env, team) {
-  return teamSettings(readMemberSettings(path, env), team);
-}
-function hasAccepted(acceptedVersion, currentVersion) {
-  return typeof acceptedVersion === "number" && Number.isSafeInteger(acceptedVersion) && acceptedVersion >= 1 && acceptedVersion <= BOUNDARIES_VERSION_MAX && acceptedVersion <= currentVersion;
-}
-
-// src/notify.ts
-var DATA_JSON_LIMIT = 16 * 1024;
-
-// src/boundary-set.ts
-var MAX_WALK_FILE_BYTES = 5 * 1024 * 1024;
-var ANY_DEPTH_RES = ANY_DEPTH.map((rule) => globRe(rule.replace(/^\*\*\//, "").replace(/\/\*\*$/, "")));
-function foldersText(count) {
-  if (count === 0) return "nothing yet: you have chosen no folders (choose them with /team-relay:setup or /team-relay:folders add <path>)";
-  return `your ${count === 1 ? "chosen folder" : `${count} chosen folders`} (only the files git tracks inside a repository; /team-relay:folders list shows them)`;
-}
-function boundariesSentence(version, settings, acceptedVersion, consoleAt) {
-  if ("error" in settings) {
-    return `Your team has boundaries (version ${version}), but your folders file cannot be used (${settings.error.slice(0, 200)}), so teammates' questions to you are declined until you fix it: run /team-relay:folders.`;
-  }
-  const n = settings.previous.length;
-  const tail = n ? ` ${n === 1 ? "1 folder" : `${n} folders`} you chose before 13 Nov 2026 ${n === 1 ? "is" : "are"} not used now; /team-relay:folders list shows ${n === 1 ? "it" : "them"}.` : "";
-  if (!hasAccepted(acceptedVersion, version)) {
-    return `Your team has boundaries (version ${version}) that you have not accepted yet, so teammates' questions to you are declined. Accept them in the console at ${consoleAt} (your answerer would then answer on its own from ${foldersText(settings.folders.length)}).${tail}`;
-  }
-  return `Your team has boundaries (version ${version}): your answerer answers teammates on its own from ${foldersText(settings.folders.length)}; reads of anything else are denied and off-topic questions declined.${tail}`;
-}
-var isObj3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-function validBoundaries(v) {
-  if (!isObj3(v) || !versionOk(v.version)) return false;
-  if (v.boundaries !== null) {
-    const b = readBoundaries(v.boundaries);
-    if (!b) return false;
-    v.boundaries = b;
-  }
-  delete v.since;
-  return true;
 }
 
 // src/console-url.ts
@@ -1446,12 +1548,13 @@ function teamSettings2(env, team) {
     return { error: err instanceof Error ? err.message : "error" };
   }
 }
+var cleanup = removeOldDriveSignIn({ env: process.env, log: makeLogger("session-start") });
 detectChannelSession({ env: process.env, role: "asker" }).then(({ channel }) => sessionStartLine(process.env, channel)).then((line) => {
   process.stdout.write(`${line.replace(/[\r\n]+/g, " ")}
 `);
 }).catch(() => {
   process.stdout.write("team-relay: status unavailable.\n");
-}).finally(() => process.exit(0));
+}).finally(() => cleanup.finally(() => process.exit(0)));
 export {
   NOT_CONNECTED_LINE,
   sessionStartLine

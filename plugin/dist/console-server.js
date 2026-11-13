@@ -21916,10 +21916,10 @@ var DemoTeam = class {
     const folderCount = (member) => owner || member === this.viewer ? DEMO_FOLDER_COUNTS[member] ?? 0 : null;
     const entry = (member) => {
       const accepted = member === this.viewer ? this.accepted.version : 0;
-      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted, folder_count: null };
+      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted, folder_count: null, folders_ok: null };
       const s = member === "bob" ? status({ seenAgo: 25e3 }) : member === "carol" ? status({ signedIn: false, selfOk: false, reason: "Claude Code is not signed in.", seenAgo: 9 * 6e4 }) : status({ seenAgo: 4e4 });
       const version = member === "bob" ? this.bounds.version : accepted;
-      return { member, status: s, answering: now - Date.parse(s.seen_at) < 18e4, accepted_version: version, folder_count: folderCount(member) };
+      return { member, status: s, answering: now - Date.parse(s.seen_at) < 18e4, accepted_version: version, folder_count: folderCount(member), folders_ok: folderCount(member) === null ? null : true };
     };
     return { members: active.map(entry), boundaries_version: this.bounds.version };
   }

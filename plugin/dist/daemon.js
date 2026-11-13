@@ -14790,7 +14790,7 @@ var require__ = __commonJS({
 });
 
 // src/daemon.ts
-import { dirname as dirname7 } from "node:path";
+import { dirname as dirname8 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 
 // src/daemon-core.ts
@@ -14798,13 +14798,13 @@ import { execFile as execFile6 } from "node:child_process";
 import { appendFileSync, chmodSync as chmodSync6, lstatSync as lstatSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync11, renameSync as renameSync6 } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir as homedir6 } from "node:os";
-import { basename as basename7, dirname as dirname5, join as join14 } from "node:path";
+import { basename as basename7, dirname as dirname6, join as join14 } from "node:path";
 
 // src/answer-host.ts
 import { randomUUID } from "node:crypto";
 import { execFile as execFile5 } from "node:child_process";
 import { chmodSync as chmodSync5, mkdirSync as mkdirSync6, mkdtempSync as mkdtempSync3, rmSync as rmSync8, writeFileSync as writeFileSync4 } from "node:fs";
-import { basename as basename6, dirname as dirname4, isAbsolute as isAbsolute8, join as join11, resolve as resolvePath } from "node:path";
+import { basename as basename6, dirname as dirname5, isAbsolute as isAbsolute8, join as join11, resolve as resolvePath } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // src/active.ts
@@ -16448,7 +16448,7 @@ function openInBrowser(url, opts) {
 import { execFile as execFile3 } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { basename as basename5, join as join8, normalize as normalize4, relative, sep } from "node:path";
+import { basename as basename5, dirname as dirname4, join as join8, normalize as normalize4, relative, sep } from "node:path";
 
 // src/boundaries-rule.ts
 var TOPIC_MAX = 500;
@@ -16772,11 +16772,19 @@ function parseMemberSettings(raw, env2) {
   const names = Object.keys(raw.teams);
   if (names.length > MAX_TEAMS) throw new MemberFoldersError(`the folders file has more than ${MAX_TEAMS} teams`);
   const teams = emptyTeams();
+  const old = /* @__PURE__ */ Object.create(null);
   for (const name of names) {
     if (!TEAM_RE.test(name)) throw new MemberFoldersError(`the folders file has a team name that is not a team id (${JSON.stringify(name.slice(0, 40))})`);
-    teams[name] = parseTeamSettings(raw.teams[name], env2, `team ${name}`);
+    const entry = raw.teams[name];
+    teams[name] = parseTeamSettings(entry, env2, `team ${name}`);
+    const kept = {};
+    for (const key of OLD_FOLDER_LISTS) {
+      const list = entry[key];
+      if (Array.isArray(list)) kept[key] = [...list];
+    }
+    if (Object.keys(kept).length) old[name] = kept;
   }
-  return { teams };
+  return { teams, old };
 }
 function teamSettings(settings, team) {
   const t = Object.prototype.hasOwnProperty.call(settings.teams, team) ? settings.teams[team] : void 0;
@@ -17058,25 +17066,43 @@ async function walk(root, limits) {
   }
   return { files, trees, truncated };
 }
+async function underGitEntry(dir) {
+  for (let d = dir; ; d = dirname4(d)) {
+    try {
+      await fsp.lstat(join8(d, ".git"));
+      return true;
+    } catch {
+    }
+    if (dirname4(d) === d) return false;
+  }
+}
+var quotedName = (p) => JSON.stringify((basename5(p) || p).slice(0, 200));
 async function folderFiles(root, input) {
   const { env: env2, git, cache, limits, ctx, budget } = input;
+  const unlisted = `folder ${quotedName(root)}: git could not list this repository's files, so none of them are used`;
   const inside = await git(root, ["rev-parse", "--is-inside-work-tree"], env2);
   if (inside?.trim() === "true") {
     const rel = await trackedFiles(root, env2, git, cache);
-    if (rel === null) return null;
-    return keepFiles(
+    if (rel === null) return { error: unlisted };
+    const kept = await keepFiles(
       rel.map((r) => join8(root, r)),
       ctx,
       { budget }
     );
+    return { ...kept, notes: [] };
   }
+  if (await underGitEntry(root)) return { error: unlisted };
   const w = await walk(root, limits);
   const walked = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
   const files = [...walked.files];
+  const notes = [];
   let truncated = w.truncated || walked.truncated;
   for (const tree of w.trees) {
     const rel = await trackedFiles(tree, env2, git, cache);
-    if (rel === null) continue;
+    if (rel === null) {
+      notes.push(`folder ${quotedName(root)}: git could not list the files of the repository ${quotedName(tree)} in it, so none of them are used`);
+      continue;
+    }
     const kept = await keepFiles(
       rel.map((r) => join8(tree, r)),
       ctx,
@@ -17086,7 +17112,7 @@ async function folderFiles(root, input) {
     truncated ||= kept.truncated;
   }
   files.sort();
-  return { files, truncated };
+  return { files, truncated, notes };
 }
 async function buildAllowedSet(input) {
   const { env: env2 } = input;
@@ -17106,9 +17132,16 @@ async function buildAllowedSet(input) {
       continue;
     }
     const root = await canonical(path);
-    if (!root) continue;
+    if (!root) {
+      notes.push(`folder ${quotedName(path)} is not used: it could not be resolved`);
+      continue;
+    }
     const kept = await folderFiles(root, { env: env2, git, cache, limits, ctx, budget });
-    if (!kept) continue;
+    if ("error" in kept) {
+      notes.push(kept.error);
+      continue;
+    }
+    notes.push(...kept.notes);
     areas.push({ kind: "folder", name: `folder:${basename5(root)}`, root, files: kept.files, truncated: kept.truncated });
   }
   const used = /* @__PURE__ */ new Set();
@@ -24885,7 +24918,7 @@ var HOUR_MS = 36e5;
 var NOTICE_GAP_MS = 5 * 6e4;
 var WITHDRAW_MS = 1500;
 function ownDist() {
-  const here = dirname4(fileURLToPath3(import.meta.url));
+  const here = dirname5(fileURLToPath3(import.meta.url));
   return basename6(here) === "src" ? join11(here, "..", "dist") : here;
 }
 function singleLine(text, limit) {
@@ -25162,7 +25195,7 @@ var AnswerHost = class {
       this.lock = null;
       return;
     }
-    const stale = await removeStaleSnapshotDirs(dirname4(this.socket.dir), lockedAt);
+    const stale = await removeStaleSnapshotDirs(dirname5(this.socket.dir), lockedAt);
     if (stale > 0) this.o.log(`removed ${stale} snapshot ${stale === 1 ? "folder" : "folders"} an earlier answering host left behind`);
     this.writeState();
     const tb = await this.readBoundaries();
@@ -25537,7 +25570,7 @@ var AnswerHost = class {
     let snapshots = null;
     if (boundary) {
       try {
-        snapshots = mkdtempSync3(join11(dirname4(socket.dir), snapshotDirPrefix()));
+        snapshots = mkdtempSync3(join11(dirname5(socket.dir), snapshotDirPrefix()));
         chmodSync5(snapshots, 448);
       } catch (err) {
         rmSync8(runDir, { recursive: true, force: true });
@@ -26423,7 +26456,7 @@ var DaemonLog = class {
     const entry = `${new Date(this.now()).toISOString()} ${flat}
 `;
     try {
-      const dir = dirname5(this.path);
+      const dir = dirname6(this.path);
       try {
         lstatSync3(dir);
       } catch {
@@ -26587,18 +26620,19 @@ async function runDaemon(o) {
   };
   const folders = (team) => {
     try {
-      return readTeamSettings(memberFoldersPath(env2), env2, team).folders;
+      return { list: readTeamSettings(memberFoldersPath(env2), env2, team).folders, ok: true };
     } catch {
-      return [];
+      return { list: [], ok: false };
     }
   };
   const sendStatus = async (client, team) => {
-    const f = folders(team);
+    const { list: f, ok: foldersOk } = folders(team);
     await refreshFacts(f);
     const body = {
       daemon: { version: o.version.slice(0, 32), started_at: startedAt },
       claude: { found: claudeBinFrom(env2) !== null, signed_in: signedIn },
       folder_count: clamp(f.length, FOLDER_COUNT_MAX),
+      folders_ok: foldersOk,
       self_test: { ok: test.ok, at: test.at, reason: test.reason }
     };
     try {
@@ -26761,13 +26795,92 @@ function pluginVersion(dist2) {
   return "0.0.0";
 }
 
+// src/drive-token-cleanup.ts
+import { execFile as execFile7 } from "node:child_process";
+import { existsSync as existsSync2 } from "node:fs";
+import { join as join15 } from "node:path";
+var OLD_DRIVE_SERVICE = "team-relay-drive";
+var GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
+var SECURITY = "/usr/bin/security";
+var ITEM_NOT_FOUND = 44;
+var MAX_ITEMS = 20;
+var REVOKE_TIMEOUT_MS = 5e3;
+var TOKEN_RE = /^[\x21-\x7e]{1,4096}$/;
+var runSecurity = (args) => new Promise((resolve) => {
+  const child = execFile7(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8" }, (err, stdout) => {
+    const code = err ? typeof err.code === "number" ? err.code : 1 : 0;
+    resolve({ code, stdout: String(stdout ?? "") });
+  });
+  child.stdin?.end();
+});
+async function revoke(doFetch, token) {
+  try {
+    const r = await doFetch(GOOGLE_REVOKE_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token }).toString(),
+      signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS)
+    });
+    if (r.status === 200) return true;
+    if (r.status !== 400) return false;
+    const j = await r.json().catch(() => null);
+    return j?.error === "invalid_token";
+  } catch {
+    return false;
+  }
+}
+function loginKeychainPath(env2) {
+  return join15(homeDir(env2), "Library", "Keychains", "login.keychain-db");
+}
+async function removeOldDriveSignIn(o) {
+  if ((o.platform ?? process.platform) !== "darwin") return "not_macos";
+  const keychain = loginKeychainPath(o.env);
+  try {
+    if (!existsSync2(keychain)) return "no_keychain";
+  } catch {
+    return "no_keychain";
+  }
+  const run2 = o.run ?? runSecurity;
+  const doFetch = o.fetch ?? globalThis.fetch;
+  let removed = 0;
+  let revoked = 0;
+  try {
+    for (let i = 0; i < MAX_ITEMS; i++) {
+      const found = await run2(["find-generic-password", "-s", OLD_DRIVE_SERVICE, "-w", keychain]);
+      if (found.code === ITEM_NOT_FOUND) break;
+      if (found.code !== 0) {
+        o.log(`could not check the Keychain for the old Google Drive sign-in (security exit ${found.code}); trying again next start`);
+        return removed > 0 ? report() : "failed";
+      }
+      const token = found.stdout.replace(/\r?\n$/, "");
+      if (TOKEN_RE.test(token) && await revoke(doFetch, token)) revoked++;
+      const del = await run2(["delete-generic-password", "-s", OLD_DRIVE_SERVICE, keychain]);
+      if (del.code === ITEM_NOT_FOUND) break;
+      if (del.code !== 0) {
+        o.log(`could not remove the old Google Drive sign-in from the Keychain (security exit ${del.code}); trying again next start`);
+        return removed > 0 ? report() : "failed";
+      }
+      removed++;
+    }
+  } catch {
+    o.log("could not check the Keychain for the old Google Drive sign-in; trying again next start");
+    return removed > 0 ? report() : "failed";
+  }
+  return removed > 0 ? report() : "absent";
+  function report() {
+    const google = revoked === removed ? "Google revoked it" : revoked === 0 ? "Google could not be asked to revoke it" : `Google revoked ${revoked} of ${removed}`;
+    o.log(`removed the old Google Drive sign-in from the Keychain (${google})`);
+    return "removed";
+  }
+}
+
 // src/daemon-launch.ts
 import { accessSync as accessSync3, chmodSync as chmodSync7, closeSync as closeSync4, constants as constants4, fsyncSync as fsyncSync3, lstatSync as lstatSync4, mkdirSync as mkdirSync8, openSync as openSync4, readFileSync as readFileSync12, renameSync as renameSync7, rmSync as rmSync10, statSync as statSync5, writeSync as writeSync4 } from "node:fs";
-import { basename as basename8, dirname as dirname6, isAbsolute as isAbsolute10, join as join15 } from "node:path";
+import { basename as basename8, dirname as dirname7, isAbsolute as isAbsolute10, join as join16 } from "node:path";
 var PLUGIN_KEY_RE = /^team-relay@[A-Za-z0-9._-]{1,100}$/;
 var PLUGIN_KEY_ENV = "TEAM_RELAY_PLUGIN_KEY";
 function installedPluginsPath(home2) {
-  return join15(home2, ".claude", "plugins", "installed_plugins.json");
+  return join16(home2, ".claude", "plugins", "installed_plugins.json");
 }
 var isObj4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function pickPluginEntry(json, key) {
@@ -26793,7 +26906,7 @@ var STOP_WITHIN_MS = 14e3;
 var env = process.env;
 var file = new DaemonLog(daemonLogPath(env));
 var log = (line) => file.line(line);
-var dist = dirname7(fileURLToPath5(import.meta.url));
+var dist = dirname8(fileURLToPath5(import.meta.url));
 var controller = new AbortController();
 function stop(why) {
   if (controller.signal.aborted) return;
@@ -26812,6 +26925,7 @@ var keyGiven = env[PLUGIN_KEY_ENV]?.trim() ?? "";
 var pluginKey = PLUGIN_KEY_RE.test(keyGiven) ? keyGiven : null;
 if (!pluginKey) log("not started by the launcher (no plugin key): updates of the plugin are not watched");
 log(`starting the background answerer (version ${version}, pid ${process.pid})`);
+void removeOldDriveSignIn({ env, log });
 runDaemon({
   env,
   log,

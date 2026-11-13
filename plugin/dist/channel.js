@@ -33606,7 +33606,7 @@ var AnswerDeadlines = class {
 import { randomUUID } from "node:crypto";
 import { execFile as execFile6 } from "node:child_process";
 import { chmodSync as chmodSync5, mkdirSync as mkdirSync6, mkdtempSync as mkdtempSync3, rmSync as rmSync8, writeFileSync as writeFileSync4 } from "node:fs";
-import { basename as basename6, dirname as dirname5, isAbsolute as isAbsolute8, join as join11, resolve as resolvePath } from "node:path";
+import { basename as basename6, dirname as dirname6, isAbsolute as isAbsolute8, join as join11, resolve as resolvePath } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // src/answering-lock.ts
@@ -34235,7 +34235,7 @@ function approvalsSentence(pending) {
 import { execFile as execFile4 } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { basename as basename5, join as join8, normalize as normalize4, relative, sep as sep2 } from "node:path";
+import { basename as basename5, dirname as dirname5, join as join8, normalize as normalize4, relative, sep as sep2 } from "node:path";
 
 // src/boundaries-rule.ts
 var TOPIC_MAX = 500;
@@ -34572,11 +34572,19 @@ function parseMemberSettings(raw, env) {
   const names = Object.keys(raw.teams);
   if (names.length > MAX_TEAMS) throw new MemberFoldersError(`the folders file has more than ${MAX_TEAMS} teams`);
   const teams = emptyTeams();
+  const old = /* @__PURE__ */ Object.create(null);
   for (const name of names) {
     if (!TEAM_RE.test(name)) throw new MemberFoldersError(`the folders file has a team name that is not a team id (${JSON.stringify(name.slice(0, 40))})`);
-    teams[name] = parseTeamSettings(raw.teams[name], env, `team ${name}`);
+    const entry = raw.teams[name];
+    teams[name] = parseTeamSettings(entry, env, `team ${name}`);
+    const kept = {};
+    for (const key of OLD_FOLDER_LISTS) {
+      const list = entry[key];
+      if (Array.isArray(list)) kept[key] = [...list];
+    }
+    if (Object.keys(kept).length) old[name] = kept;
   }
-  return { teams };
+  return { teams, old };
 }
 function teamSettings(settings, team) {
   const t = Object.prototype.hasOwnProperty.call(settings.teams, team) ? settings.teams[team] : void 0;
@@ -34587,7 +34595,9 @@ function withTeam(settings, team, value) {
   const teams = emptyTeams();
   for (const [k, v] of Object.entries(settings.teams)) teams[k] = v;
   teams[team] = { folders: [...value.folders], previous: [] };
-  return { teams };
+  const old = /* @__PURE__ */ Object.create(null);
+  for (const [k, v] of Object.entries(settings.old ?? {})) if (k !== team) old[k] = v;
+  return { teams, old };
 }
 function uid2() {
   return typeof process.getuid === "function" ? process.getuid() : null;
@@ -34627,7 +34637,10 @@ function readTeamSettings(path, env, team) {
 }
 function serialise(settings) {
   const teams = {};
-  for (const name of Object.keys(settings.teams).sort()) teams[name] = { folders: settings.teams[name].folders };
+  for (const name of Object.keys(settings.teams).sort()) {
+    const old = Object.prototype.hasOwnProperty.call(settings.old ?? {}, name) ? settings.old[name] : void 0;
+    teams[name] = { folders: settings.teams[name].folders, ...old ?? {} };
+  }
   return { teams };
 }
 function writeMemberSettings(path, value, env) {
@@ -34928,25 +34941,43 @@ async function walk(root, limits) {
   }
   return { files, trees, truncated };
 }
+async function underGitEntry(dir) {
+  for (let d = dir; ; d = dirname5(d)) {
+    try {
+      await fsp.lstat(join8(d, ".git"));
+      return true;
+    } catch {
+    }
+    if (dirname5(d) === d) return false;
+  }
+}
+var quotedName = (p) => JSON.stringify((basename5(p) || p).slice(0, 200));
 async function folderFiles(root, input) {
   const { env, git, cache, limits, ctx, budget } = input;
+  const unlisted = `folder ${quotedName(root)}: git could not list this repository's files, so none of them are used`;
   const inside = await git(root, ["rev-parse", "--is-inside-work-tree"], env);
   if (inside?.trim() === "true") {
     const rel = await trackedFiles(root, env, git, cache);
-    if (rel === null) return null;
-    return keepFiles(
+    if (rel === null) return { error: unlisted };
+    const kept = await keepFiles(
       rel.map((r) => join8(root, r)),
       ctx,
       { budget }
     );
+    return { ...kept, notes: [] };
   }
+  if (await underGitEntry(root)) return { error: unlisted };
   const w = await walk(root, limits);
   const walked = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
   const files = [...walked.files];
+  const notes = [];
   let truncated = w.truncated || walked.truncated;
   for (const tree of w.trees) {
     const rel = await trackedFiles(tree, env, git, cache);
-    if (rel === null) continue;
+    if (rel === null) {
+      notes.push(`folder ${quotedName(root)}: git could not list the files of the repository ${quotedName(tree)} in it, so none of them are used`);
+      continue;
+    }
     const kept = await keepFiles(
       rel.map((r) => join8(tree, r)),
       ctx,
@@ -34956,7 +34987,7 @@ async function folderFiles(root, input) {
     truncated ||= kept.truncated;
   }
   files.sort();
-  return { files, truncated };
+  return { files, truncated, notes };
 }
 async function buildAllowedSet(input) {
   const { env } = input;
@@ -34976,9 +35007,16 @@ async function buildAllowedSet(input) {
       continue;
     }
     const root = await canonical(path);
-    if (!root) continue;
+    if (!root) {
+      notes.push(`folder ${quotedName(path)} is not used: it could not be resolved`);
+      continue;
+    }
     const kept = await folderFiles(root, { env, git, cache, limits, ctx, budget });
-    if (!kept) continue;
+    if ("error" in kept) {
+      notes.push(kept.error);
+      continue;
+    }
+    notes.push(...kept.notes);
     areas.push({ kind: "folder", name: `folder:${basename5(root)}`, root, files: kept.files, truncated: kept.truncated });
   }
   const used = /* @__PURE__ */ new Set();
@@ -36037,7 +36075,7 @@ var HOUR_MS = 36e5;
 var NOTICE_GAP_MS = 5 * 6e4;
 var WITHDRAW_MS = 1500;
 function ownDist() {
-  const here = dirname5(fileURLToPath4(import.meta.url));
+  const here = dirname6(fileURLToPath4(import.meta.url));
   return basename6(here) === "src" ? join11(here, "..", "dist") : here;
 }
 function singleLine(text, limit) {
@@ -36314,7 +36352,7 @@ var AnswerHost = class {
       this.lock = null;
       return;
     }
-    const stale = await removeStaleSnapshotDirs(dirname5(this.socket.dir), lockedAt);
+    const stale = await removeStaleSnapshotDirs(dirname6(this.socket.dir), lockedAt);
     if (stale > 0) this.o.log(`removed ${stale} snapshot ${stale === 1 ? "folder" : "folders"} an earlier answering host left behind`);
     this.writeState();
     const tb = await this.readBoundaries();
@@ -36689,7 +36727,7 @@ var AnswerHost = class {
     let snapshots = null;
     if (boundary) {
       try {
-        snapshots = mkdtempSync3(join11(dirname5(socket.dir), snapshotDirPrefix()));
+        snapshots = mkdtempSync3(join11(dirname6(socket.dir), snapshotDirPrefix()));
         chmodSync5(snapshots, 448);
       } catch (err) {
         rmSync8(runDir, { recursive: true, force: true });
@@ -37440,7 +37478,7 @@ var MAX_JWKS_BYTES = 64 * 1024;
 import { execFile as execFile7 } from "node:child_process";
 import { randomBytes as randomBytes12 } from "node:crypto";
 import { accessSync as accessSync2, chmodSync as chmodSync6, closeSync as closeSync4, constants as constants3, fsyncSync as fsyncSync3, lstatSync as lstatSync3, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync9, renameSync as renameSync6, rmSync as rmSync9, statSync as statSync4, writeSync as writeSync4 } from "node:fs";
-import { basename as basename7, dirname as dirname6, isAbsolute as isAbsolute9, join as join12 } from "node:path";
+import { basename as basename7, dirname as dirname7, isAbsolute as isAbsolute9, join as join12 } from "node:path";
 var AGENT_LABEL = "com.team-relay.answerer";
 var LAUNCHER_FILE = "daemon-launch.mjs";
 var LAUNCHCTL = "/bin/launchctl";
@@ -37503,7 +37541,7 @@ function xmlEscape(text) {
   return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[c]);
 }
 function agentPath(node2, claude) {
-  const dirs = [dirname6(node2), dirname6(claude), "/usr/bin", "/bin"];
+  const dirs = [dirname7(node2), dirname7(claude), "/usr/bin", "/bin"];
   return dirs.filter((d, i) => dirs.indexOf(d) === i).join(":");
 }
 function plistXml(i) {
@@ -37581,7 +37619,7 @@ function writePrivate(path, text) {
   } catch (err) {
     if (err instanceof AgentError) throw err;
   }
-  const tmp = join12(dirname6(path), `.${basename7(path)}.${randomBytes12(8).toString("hex")}.tmp`);
+  const tmp = join12(dirname7(path), `.${basename7(path)}.${randomBytes12(8).toString("hex")}.tmp`);
   let fd = null;
   try {
     fd = openSync4(tmp, "wx", 384);
@@ -37624,7 +37662,7 @@ async function installAgent(i) {
   const launcher = launcherPath(i.configDir);
   writePrivate(launcher, source);
   const plist = agentPlistPath(i.home);
-  ensureDir2(dirname6(plist));
+  ensureDir2(dirname7(plist));
   writePrivate(plist, plistXml({ node: i.node, launcher, claude: i.claude, home: i.home, ...i.xdgConfigHome ? { xdgConfigHome: i.xdgConfigHome } : {} }));
   const target = `gui/${i.uid}/${AGENT_LABEL}`;
   await exec(LAUNCHCTL, ["bootout", target]);

@@ -496,11 +496,19 @@ function parseMemberSettings(raw, env) {
   const names = Object.keys(raw.teams);
   if (names.length > MAX_TEAMS) throw new MemberFoldersError(`the folders file has more than ${MAX_TEAMS} teams`);
   const teams = emptyTeams();
+  const old = /* @__PURE__ */ Object.create(null);
   for (const name of names) {
     if (!TEAM_RE.test(name)) throw new MemberFoldersError(`the folders file has a team name that is not a team id (${JSON.stringify(name.slice(0, 40))})`);
-    teams[name] = parseTeamSettings(raw.teams[name], env, `team ${name}`);
+    const entry = raw.teams[name];
+    teams[name] = parseTeamSettings(entry, env, `team ${name}`);
+    const kept = {};
+    for (const key of OLD_FOLDER_LISTS) {
+      const list = entry[key];
+      if (Array.isArray(list)) kept[key] = [...list];
+    }
+    if (Object.keys(kept).length) old[name] = kept;
   }
-  return { teams };
+  return { teams, old };
 }
 function teamSettings(settings, team) {
   const t = Object.prototype.hasOwnProperty.call(settings.teams, team) ? settings.teams[team] : void 0;
@@ -511,7 +519,9 @@ function withTeam(settings, team, value) {
   const teams = emptyTeams();
   for (const [k, v] of Object.entries(settings.teams)) teams[k] = v;
   teams[team] = { folders: [...value.folders], previous: [] };
-  return { teams };
+  const old = /* @__PURE__ */ Object.create(null);
+  for (const [k, v] of Object.entries(settings.old ?? {})) if (k !== team) old[k] = v;
+  return { teams, old };
 }
 function uid2() {
   return typeof process.getuid === "function" ? process.getuid() : null;
@@ -548,7 +558,10 @@ function readMemberSettings(path, env) {
 }
 function serialise(settings) {
   const teams = {};
-  for (const name of Object.keys(settings.teams).sort()) teams[name] = { folders: settings.teams[name].folders };
+  for (const name of Object.keys(settings.teams).sort()) {
+    const old = Object.prototype.hasOwnProperty.call(settings.old ?? {}, name) ? settings.old[name] : void 0;
+    teams[name] = { folders: settings.teams[name].folders, ...old ?? {} };
+  }
   return { teams };
 }
 function writeMemberSettings(path, value, env) {
@@ -2260,8 +2273,8 @@ function checklist(p) {
     { id: "answering", done: p.answering, todo: "Your Mac isn't answering right now. Make sure it's switched on; if this stays, run the setup line again." },
     {
       id: "folders",
-      done: typeof p.folderCount === "number" && p.folderCount > 0,
-      todo: "You have not chosen the folders your Claude answers from yet. Run the setup line again and pick them."
+      done: p.foldersOk !== false && typeof p.folderCount === "number" && p.folderCount > 0,
+      todo: p.foldersOk === false ? "Your saved folders file cannot be used on this Mac. In Claude Code, run /team-relay:folders to see why." : "You have not chosen the folders your Claude answers from yet. Run the setup line again and pick them."
     },
     {
       id: "self_test",
@@ -2324,6 +2337,7 @@ async function status(d, afterSetup) {
   const steps = checklist({
     status: entry?.status ?? null,
     folderCount: typeof entry?.folder_count === "number" ? entry.folder_count : null,
+    foldersOk: typeof entry?.folders_ok === "boolean" ? entry.folders_ok : null,
     answering: entry?.answering === true,
     acceptedVersion,
     boundariesVersion,
