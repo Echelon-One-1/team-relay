@@ -144,8 +144,26 @@ function credentialFileExists(path) {
 
 // src/drive-token-cleanup.ts
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync2 } from "node:fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync5, rmSync as rmSync3, writeFileSync } from "node:fs";
 import { join as join5 } from "node:path";
+
+// src/answering-lock.ts
+import { homedir as homedir2 } from "node:os";
+import { isAbsolute as isAbsolute2, join as join2 } from "node:path";
+function configDir(env) {
+  const xdg = env.XDG_CONFIG_HOME?.trim();
+  const base2 = xdg && isAbsolute2(xdg) ? xdg : join2(env.HOME?.trim() || homedir2(), ".config");
+  return join2(base2, "team-relay");
+}
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
 
 // src/boundary-set.ts
 import { homedir as homedir5 } from "node:os";
@@ -287,24 +305,6 @@ function credentialHit(p, ctx) {
 import { chmodSync as chmodSync2, closeSync as closeSync2, fsyncSync as fsyncSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync2, openSync as openSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, writeSync as writeSync2 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { basename as basename3, dirname as dirname3, isAbsolute as isAbsolute4, join as join4, normalize as normalize3 } from "node:path";
-
-// src/answering-lock.ts
-import { homedir as homedir2 } from "node:os";
-import { isAbsolute as isAbsolute2, join as join2 } from "node:path";
-function configDir(env) {
-  const xdg = env.XDG_CONFIG_HOME?.trim();
-  const base2 = xdg && isAbsolute2(xdg) ? xdg : join2(env.HOME?.trim() || homedir2(), ".config");
-  return join2(base2, "team-relay");
-}
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return err.code === "EPERM";
-  }
-}
 
 // src/scope.ts
 import { existsSync, readdirSync, statSync } from "node:fs";
@@ -1147,20 +1147,52 @@ var ITEM_NOT_FOUND = 44;
 var MAX_ITEMS = 20;
 var REVOKE_TIMEOUT_MS = 5e3;
 var TOKEN_RE = /^[\x21-\x7e]{1,4096}$/;
-var runSecurity = (args) => new Promise((resolve) => {
-  const child = execFile2(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8" }, (err, stdout) => {
-    const code = err ? typeof err.code === "number" ? err.code : 1 : 0;
-    resolve({ code, stdout: String(stdout ?? "") });
+var BACKOFF_FILE = "drive-cleanup-backoff";
+var BACKOFF_MS = 24 * 36e5;
+var SESSION_START_CLEANUP_CAP_MS = 2e3;
+var runSecurity = (args, signal) => new Promise((resolve) => {
+  const child = execFile2(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8", ...signal ? { signal } : {} }, (err, stdout) => {
+    const e = err;
+    const code = e ? typeof e.code === "number" ? e.code : 1 : 0;
+    resolve({ code, stdout: String(stdout ?? ""), timedOut: e !== null && (e.killed === true || e.name === "AbortError") });
   });
   child.stdin?.end();
 });
-async function revoke(doFetch, token) {
+function backoffPath(env) {
+  return join5(configDir(env), BACKOFF_FILE);
+}
+function backedOff(env, now) {
   try {
+    const at = Date.parse(readFileSync5(backoffPath(env), "utf8").trim());
+    return Number.isFinite(at) && now - at >= 0 && now - at < BACKOFF_MS;
+  } catch {
+    return false;
+  }
+}
+function rememberTimeout(env, now) {
+  try {
+    mkdirSync3(configDir(env), { recursive: true, mode: 448 });
+    const file = backoffPath(env);
+    rmSync3(file, { force: true });
+    writeFileSync(file, `${new Date(now).toISOString()}
+`, { mode: 384, flag: "wx" });
+  } catch {
+  }
+}
+function forgetTimeout(env) {
+  try {
+    rmSync3(backoffPath(env), { force: true });
+  } catch {
+  }
+}
+async function revoke(doFetch, token, stop) {
+  try {
+    const timeout = AbortSignal.timeout(REVOKE_TIMEOUT_MS);
     const r = await doFetch(GOOGLE_REVOKE_URL, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ token }).toString(),
-      signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS)
+      signal: stop ? AbortSignal.any([timeout, stop]) : timeout
     });
     if (r.status === 200) return true;
     if (r.status !== 400) return false;
@@ -1173,6 +1205,22 @@ async function revoke(doFetch, token) {
 function loginKeychainPath(env) {
   return join5(homeDir(env), "Library", "Keychains", "login.keychain-db");
 }
+async function removeOldDriveSignInWithin(capMs, o) {
+  const ac = new AbortController();
+  const stop = setTimeout(() => ac.abort(), capMs);
+  stop.unref?.();
+  let grace;
+  const late = new Promise((resolve) => {
+    grace = setTimeout(() => resolve("still_running"), capMs + 250);
+    grace.unref?.();
+  });
+  try {
+    return await Promise.race([removeOldDriveSignIn({ ...o, signal: ac.signal }), late]);
+  } finally {
+    clearTimeout(stop);
+    clearTimeout(grace);
+  }
+}
 async function removeOldDriveSignIn(o) {
   if ((o.platform ?? process.platform) !== "darwin") return "not_macos";
   const keychain = loginKeychainPath(o.env);
@@ -1181,21 +1229,28 @@ async function removeOldDriveSignIn(o) {
   } catch {
     return "no_keychain";
   }
+  const now = o.now ?? Date.now;
+  if (backedOff(o.env, now())) return "backed_off";
   const run2 = o.run ?? runSecurity;
   const doFetch = o.fetch ?? globalThis.fetch;
   let removed = 0;
   let revoked = 0;
   try {
     for (let i = 0; i < MAX_ITEMS; i++) {
-      const found = await run2(["find-generic-password", "-s", OLD_DRIVE_SERVICE, "-w", keychain]);
+      const found = await run2(["find-generic-password", "-s", OLD_DRIVE_SERVICE, "-w", keychain], o.signal);
+      if (found.timedOut) {
+        rememberTimeout(o.env, now());
+        o.log("the Keychain did not answer in time (it may be locked); not looking for the old Google Drive sign-in again for a day");
+        return removed > 0 ? report() : "timed_out";
+      }
       if (found.code === ITEM_NOT_FOUND) break;
       if (found.code !== 0) {
         o.log(`could not check the Keychain for the old Google Drive sign-in (security exit ${found.code}); trying again next start`);
         return removed > 0 ? report() : "failed";
       }
       const token = found.stdout.replace(/\r?\n$/, "");
-      if (TOKEN_RE.test(token) && await revoke(doFetch, token)) revoked++;
-      const del = await run2(["delete-generic-password", "-s", OLD_DRIVE_SERVICE, keychain]);
+      if (TOKEN_RE.test(token) && await revoke(doFetch, token, o.signal)) revoked++;
+      const del = await run2(["delete-generic-password", "-s", OLD_DRIVE_SERVICE, keychain], o.signal);
       if (del.code === ITEM_NOT_FOUND) break;
       if (del.code !== 0) {
         o.log(`could not remove the old Google Drive sign-in from the Keychain (security exit ${del.code}); trying again next start`);
@@ -1207,6 +1262,7 @@ async function removeOldDriveSignIn(o) {
     o.log("could not check the Keychain for the old Google Drive sign-in; trying again next start");
     return removed > 0 ? report() : "failed";
   }
+  forgetTimeout(o.env);
   return removed > 0 ? report() : "absent";
   function report() {
     const google = revoked === removed ? "Google revoked it" : revoked === 0 ? "Google could not be asked to revoke it" : `Google revoked ${revoked} of ${removed}`;
@@ -1438,7 +1494,7 @@ function invitationsSentence(list) {
 }
 
 // src/approvals-state.ts
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync5, renameSync as renameSync3, rmSync as rmSync3, writeFileSync } from "node:fs";
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync6, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join6 } from "node:path";
 var STATE_FILE = "approvals.json";
 function statePath(env) {
@@ -1447,7 +1503,7 @@ function statePath(env) {
 function readApprovalsState(path, alive = pidAlive) {
   let raw;
   try {
-    raw = readFileSync5(path, "utf8");
+    raw = readFileSync6(path, "utf8");
   } catch {
     return null;
   }
@@ -1548,7 +1604,7 @@ function teamSettings2(env, team) {
     return { error: err instanceof Error ? err.message : "error" };
   }
 }
-var cleanup = removeOldDriveSignIn({ env: process.env, log: makeLogger("session-start") });
+var cleanup = removeOldDriveSignInWithin(SESSION_START_CLEANUP_CAP_MS, { env: process.env, log: makeLogger("session-start") });
 detectChannelSession({ env: process.env, role: "asker" }).then(({ channel }) => sessionStartLine(process.env, channel)).then((line) => {
   process.stdout.write(`${line.replace(/[\r\n]+/g, " ")}
 `);

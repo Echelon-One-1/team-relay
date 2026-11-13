@@ -14804,7 +14804,7 @@ import { basename as basename7, dirname as dirname6, join as join14 } from "node
 import { randomUUID } from "node:crypto";
 import { execFile as execFile5 } from "node:child_process";
 import { chmodSync as chmodSync5, mkdirSync as mkdirSync6, mkdtempSync as mkdtempSync3, rmSync as rmSync8, writeFileSync as writeFileSync4 } from "node:fs";
-import { basename as basename6, dirname as dirname5, isAbsolute as isAbsolute8, join as join11, resolve as resolvePath } from "node:path";
+import { basename as basename6, dirname as dirname5, isAbsolute as isAbsolute9, join as join11, resolve as resolvePath } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // src/active.ts
@@ -16448,7 +16448,7 @@ function openInBrowser(url, opts) {
 import { execFile as execFile3 } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { basename as basename5, dirname as dirname4, join as join8, normalize as normalize4, relative, sep } from "node:path";
+import { basename as basename5, dirname as dirname4, isAbsolute as isAbsolute7, join as join8, normalize as normalize4, relative, sep } from "node:path";
 
 // src/boundaries-rule.ts
 var TOPIC_MAX = 500;
@@ -17025,9 +17025,15 @@ async function keepFiles(candidates, ctx, opts) {
   return { files, truncated };
 }
 var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git"]);
+var isGitEntryName = (name) => name.toLowerCase() === ".git";
+function looksLikeGitDir(entries) {
+  const has2 = (name, dir) => entries.some((e) => e.name === name && (dir ? e.isDirectory() : e.isFile()));
+  return has2("HEAD", false) && has2("objects", true) && has2("refs", true);
+}
 async function walk(root, limits) {
   const files = [];
   const trees = [];
+  const gitDirs = [];
   let dirs = 0;
   let truncated = false;
   const until = Date.now() + limits.walkMs;
@@ -17044,8 +17050,12 @@ async function walk(root, limits) {
     } catch {
       continue;
     }
-    if (entries.some((e) => e.name === ".git")) {
+    if (entries.some((e) => isGitEntryName(e.name))) {
       trees.push(dir);
+      continue;
+    }
+    if (looksLikeGitDir(entries)) {
+      gitDirs.push(dir);
       continue;
     }
     entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
@@ -17053,7 +17063,7 @@ async function walk(root, limits) {
       if (e.name.startsWith(".")) continue;
       const p = join8(dir, e.name);
       if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name) && depth < limits.walkDepth) queue.push({ dir: p, depth: depth + 1 });
+        if (!SKIP_DIRS.has(e.name.toLowerCase()) && depth < limits.walkDepth) queue.push({ dir: p, depth: depth + 1 });
       } else if (e.isFile()) {
         if (files.length >= limits.walkFiles) {
           truncated = true;
@@ -17064,7 +17074,7 @@ async function walk(root, limits) {
     }
     if (truncated) break;
   }
-  return { files, trees, truncated };
+  return { files, trees, gitDirs, truncated };
 }
 async function underGitEntry(dir) {
   for (let d = dir; ; d = dirname4(d)) {
@@ -17077,6 +17087,26 @@ async function underGitEntry(dir) {
   }
 }
 var quotedName = (p) => JSON.stringify((basename5(p) || p).slice(0, 200));
+async function inGitDirByShape(dir) {
+  for (let d = dir; ; d = dirname4(d)) {
+    try {
+      if (looksLikeGitDir(await fsp.readdir(d, { withFileTypes: true }))) return true;
+    } catch {
+    }
+    if (dirname4(d) === d) return false;
+  }
+}
+async function inGitDir(root, env2, git) {
+  if (await inGitDirByShape(root)) return true;
+  const out = await git(root, ["rev-parse", "--is-bare-repository", "--is-inside-git-dir", "--absolute-git-dir"], env2);
+  if (out === null) return false;
+  const [bare, insideGitDir, gitDir] = out.split("\n").map((l) => l.trim());
+  if (bare === "true" || insideGitDir === "true") return true;
+  if (!gitDir) return false;
+  const real = await canonical(gitDir) ?? gitDir;
+  const rel = relative(root, real);
+  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute7(rel);
+}
 async function folderFiles(root, input) {
   const { env: env2, git, cache, limits, ctx, budget } = input;
   const unlisted = `folder ${quotedName(root)}: git could not list this repository's files, so none of them are used`;
@@ -17092,10 +17122,13 @@ async function folderFiles(root, input) {
     return { ...kept, notes: [] };
   }
   if (await underGitEntry(root)) return { error: unlisted };
+  if (await inGitDir(root, env2, git)) {
+    return { error: `folder ${quotedName(root)} is not used: it is a git repository's own folder (a bare repository or a git directory), not a folder of files` };
+  }
   const w = await walk(root, limits);
   const walked = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
   const files = [...walked.files];
-  const notes = [];
+  const notes = w.gitDirs.map((d) => `folder ${quotedName(root)}: the git directory ${quotedName(d)} in it is not used`);
   let truncated = w.truncated || walked.truncated;
   for (const tree of w.trees) {
     const rel = await trackedFiles(tree, env2, git, cache);
@@ -24013,7 +24046,7 @@ async function searchFiles(set, args, opts) {
 
 // src/exposed.ts
 import { statSync as statSync3, accessSync, constants as constants2 } from "node:fs";
-import { isAbsolute as isAbsolute7 } from "node:path";
+import { isAbsolute as isAbsolute8 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/manifest.ts
@@ -24366,7 +24399,7 @@ function defaultManifestPath() {
   return fileURLToPath2(new URL("../manifest.yaml", import.meta.url));
 }
 function runnerProblem(path) {
-  if (!isAbsolute7(path)) return "runner path must be absolute";
+  if (!isAbsolute8(path)) return "runner path must be absolute";
   let st;
   try {
     st = statSync3(path);
@@ -25508,7 +25541,7 @@ var AnswerHost = class {
   claudeBin() {
     const given = typeof this.o.claudeBin === "function" ? this.o.claudeBin() : this.o.claudeBin;
     const b = (given ?? this.env.TEAM_RELAY_CLAUDE_BIN ?? "").trim();
-    return b && isAbsolute8(b) ? b : "claude";
+    return b && isAbsolute9(b) ? b : "claude";
   }
   /** One answerer run for the job; false when it was declined without running one. */
   async answer(job) {
@@ -25986,7 +26019,7 @@ var AnswerHost = class {
 function patternTarget(pattern, base, home2) {
   let p = pattern;
   if (p === "~" || p.startsWith("~/")) p = home2 + p.slice(1);
-  const whole = isAbsolute8(p) ? resolvePath(p) : resolvePath(base, p);
+  const whole = isAbsolute9(p) ? resolvePath(p) : resolvePath(base, p);
   const parts = whole.split("/");
   const fixed = [];
   for (const part of parts) {
@@ -26039,9 +26072,9 @@ function planRun(p) {
   }
   const denyDirs = [p.socket.dir, ...relayCredentialDirs(env2)];
   const cloudsdk = env2.CLOUDSDK_CONFIG?.trim();
-  if (p.connection.mode === "google" && cloudsdk && isAbsolute8(cloudsdk)) denyDirs.push(cloudsdk);
+  if (p.connection.mode === "google" && cloudsdk && isAbsolute9(cloudsdk)) denyDirs.push(cloudsdk);
   const claudeConfig = env2.CLAUDE_CONFIG_DIR?.trim();
-  if (claudeConfig && isAbsolute8(claudeConfig)) denyDirs.push(claudeConfig);
+  if (claudeConfig && isAbsolute9(claudeConfig)) denyDirs.push(claudeConfig);
   let capabilities = null;
   if (p.capabilities !== false) {
     try {
@@ -26304,7 +26337,7 @@ var FOLDER_COUNT_MAX = 20;
 
 // src/locate.ts
 import { accessSync as accessSync2, constants as constants3, readFileSync as readFileSync10, readdirSync as readdirSync2, statSync as statSync4 } from "node:fs";
-import { delimiter, isAbsolute as isAbsolute9, join as join13 } from "node:path";
+import { delimiter, isAbsolute as isAbsolute10, join as join13 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 function executableFile(path) {
   try {
@@ -26358,7 +26391,7 @@ function desktopClaude(home2) {
 }
 function findClaude(env2) {
   for (const dir of (env2.PATH ?? "").split(delimiter)) {
-    if (!isAbsolute9(dir)) continue;
+    if (!isAbsolute10(dir)) continue;
     const c = join13(dir, "claude");
     if (executableFile(c)) return c;
   }
@@ -26370,7 +26403,7 @@ function findClaude(env2) {
 }
 function resolveClaudeBin(env2) {
   const b = env2.TEAM_RELAY_CLAUDE_BIN?.trim() ?? "";
-  if (!b || !isAbsolute9(b)) return null;
+  if (!b || !isAbsolute10(b)) return null;
   if (executableFile(b)) return b;
   return findClaude(env2);
 }
@@ -26797,7 +26830,7 @@ function pluginVersion(dist2) {
 
 // src/drive-token-cleanup.ts
 import { execFile as execFile7 } from "node:child_process";
-import { existsSync as existsSync2 } from "node:fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync8, readFileSync as readFileSync12, rmSync as rmSync10, writeFileSync as writeFileSync5 } from "node:fs";
 import { join as join15 } from "node:path";
 var OLD_DRIVE_SERVICE = "team-relay-drive";
 var GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
@@ -26806,20 +26839,51 @@ var ITEM_NOT_FOUND = 44;
 var MAX_ITEMS = 20;
 var REVOKE_TIMEOUT_MS = 5e3;
 var TOKEN_RE = /^[\x21-\x7e]{1,4096}$/;
-var runSecurity = (args) => new Promise((resolve) => {
-  const child = execFile7(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8" }, (err, stdout) => {
-    const code = err ? typeof err.code === "number" ? err.code : 1 : 0;
-    resolve({ code, stdout: String(stdout ?? "") });
+var BACKOFF_FILE = "drive-cleanup-backoff";
+var BACKOFF_MS = 24 * 36e5;
+var runSecurity = (args, signal) => new Promise((resolve) => {
+  const child = execFile7(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8", ...signal ? { signal } : {} }, (err, stdout) => {
+    const e = err;
+    const code = e ? typeof e.code === "number" ? e.code : 1 : 0;
+    resolve({ code, stdout: String(stdout ?? ""), timedOut: e !== null && (e.killed === true || e.name === "AbortError") });
   });
   child.stdin?.end();
 });
-async function revoke(doFetch, token) {
+function backoffPath(env2) {
+  return join15(configDir(env2), BACKOFF_FILE);
+}
+function backedOff(env2, now) {
   try {
+    const at = Date.parse(readFileSync12(backoffPath(env2), "utf8").trim());
+    return Number.isFinite(at) && now - at >= 0 && now - at < BACKOFF_MS;
+  } catch {
+    return false;
+  }
+}
+function rememberTimeout(env2, now) {
+  try {
+    mkdirSync8(configDir(env2), { recursive: true, mode: 448 });
+    const file2 = backoffPath(env2);
+    rmSync10(file2, { force: true });
+    writeFileSync5(file2, `${new Date(now).toISOString()}
+`, { mode: 384, flag: "wx" });
+  } catch {
+  }
+}
+function forgetTimeout(env2) {
+  try {
+    rmSync10(backoffPath(env2), { force: true });
+  } catch {
+  }
+}
+async function revoke(doFetch, token, stop2) {
+  try {
+    const timeout = AbortSignal.timeout(REVOKE_TIMEOUT_MS);
     const r = await doFetch(GOOGLE_REVOKE_URL, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ token }).toString(),
-      signal: AbortSignal.timeout(REVOKE_TIMEOUT_MS)
+      signal: stop2 ? AbortSignal.any([timeout, stop2]) : timeout
     });
     if (r.status === 200) return true;
     if (r.status !== 400) return false;
@@ -26840,21 +26904,28 @@ async function removeOldDriveSignIn(o) {
   } catch {
     return "no_keychain";
   }
+  const now = o.now ?? Date.now;
+  if (backedOff(o.env, now())) return "backed_off";
   const run2 = o.run ?? runSecurity;
   const doFetch = o.fetch ?? globalThis.fetch;
   let removed = 0;
   let revoked = 0;
   try {
     for (let i = 0; i < MAX_ITEMS; i++) {
-      const found = await run2(["find-generic-password", "-s", OLD_DRIVE_SERVICE, "-w", keychain]);
+      const found = await run2(["find-generic-password", "-s", OLD_DRIVE_SERVICE, "-w", keychain], o.signal);
+      if (found.timedOut) {
+        rememberTimeout(o.env, now());
+        o.log("the Keychain did not answer in time (it may be locked); not looking for the old Google Drive sign-in again for a day");
+        return removed > 0 ? report() : "timed_out";
+      }
       if (found.code === ITEM_NOT_FOUND) break;
       if (found.code !== 0) {
         o.log(`could not check the Keychain for the old Google Drive sign-in (security exit ${found.code}); trying again next start`);
         return removed > 0 ? report() : "failed";
       }
       const token = found.stdout.replace(/\r?\n$/, "");
-      if (TOKEN_RE.test(token) && await revoke(doFetch, token)) revoked++;
-      const del = await run2(["delete-generic-password", "-s", OLD_DRIVE_SERVICE, keychain]);
+      if (TOKEN_RE.test(token) && await revoke(doFetch, token, o.signal)) revoked++;
+      const del = await run2(["delete-generic-password", "-s", OLD_DRIVE_SERVICE, keychain], o.signal);
       if (del.code === ITEM_NOT_FOUND) break;
       if (del.code !== 0) {
         o.log(`could not remove the old Google Drive sign-in from the Keychain (security exit ${del.code}); trying again next start`);
@@ -26866,6 +26937,7 @@ async function removeOldDriveSignIn(o) {
     o.log("could not check the Keychain for the old Google Drive sign-in; trying again next start");
     return removed > 0 ? report() : "failed";
   }
+  forgetTimeout(o.env);
   return removed > 0 ? report() : "absent";
   function report() {
     const google = revoked === removed ? "Google revoked it" : revoked === 0 ? "Google could not be asked to revoke it" : `Google revoked ${revoked} of ${removed}`;
@@ -26875,8 +26947,8 @@ async function removeOldDriveSignIn(o) {
 }
 
 // src/daemon-launch.ts
-import { accessSync as accessSync3, chmodSync as chmodSync7, closeSync as closeSync4, constants as constants4, fsyncSync as fsyncSync3, lstatSync as lstatSync4, mkdirSync as mkdirSync8, openSync as openSync4, readFileSync as readFileSync12, renameSync as renameSync7, rmSync as rmSync10, statSync as statSync5, writeSync as writeSync4 } from "node:fs";
-import { basename as basename8, dirname as dirname7, isAbsolute as isAbsolute10, join as join16 } from "node:path";
+import { accessSync as accessSync3, chmodSync as chmodSync7, closeSync as closeSync4, constants as constants4, fsyncSync as fsyncSync3, lstatSync as lstatSync4, mkdirSync as mkdirSync9, openSync as openSync4, readFileSync as readFileSync13, renameSync as renameSync7, rmSync as rmSync11, statSync as statSync5, writeSync as writeSync4 } from "node:fs";
+import { basename as basename8, dirname as dirname7, isAbsolute as isAbsolute11, join as join16 } from "node:path";
 var PLUGIN_KEY_RE = /^team-relay@[A-Za-z0-9._-]{1,100}$/;
 var PLUGIN_KEY_ENV = "TEAM_RELAY_PLUGIN_KEY";
 function installedPluginsPath(home2) {
@@ -26887,7 +26959,7 @@ function pickPluginEntry(json, key) {
   if (!PLUGIN_KEY_RE.test(key) || !isObj4(json) || !isObj4(json.plugins) || !Object.prototype.hasOwnProperty.call(json.plugins, key)) return null;
   const list = json.plugins[key];
   if (!Array.isArray(list)) return null;
-  const e = list.find((x) => isObj4(x) && x.scope === "user" && typeof x.installPath === "string" && isAbsolute10(x.installPath));
+  const e = list.find((x) => isObj4(x) && x.scope === "user" && typeof x.installPath === "string" && isAbsolute11(x.installPath));
   if (!e) return null;
   const path = e.installPath;
   const str2 = (v) => typeof v === "string" ? v : "";
@@ -26895,7 +26967,7 @@ function pickPluginEntry(json, key) {
 }
 function readInstalledPlugin(home2, key) {
   try {
-    return pickPluginEntry(JSON.parse(readFileSync12(installedPluginsPath(home2), "utf8")), key);
+    return pickPluginEntry(JSON.parse(readFileSync13(installedPluginsPath(home2), "utf8")), key);
   } catch {
     return null;
   }

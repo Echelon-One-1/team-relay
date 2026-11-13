@@ -33606,7 +33606,7 @@ var AnswerDeadlines = class {
 import { randomUUID } from "node:crypto";
 import { execFile as execFile6 } from "node:child_process";
 import { chmodSync as chmodSync5, mkdirSync as mkdirSync6, mkdtempSync as mkdtempSync3, rmSync as rmSync8, writeFileSync as writeFileSync4 } from "node:fs";
-import { basename as basename6, dirname as dirname6, isAbsolute as isAbsolute8, join as join11, resolve as resolvePath } from "node:path";
+import { basename as basename6, dirname as dirname6, isAbsolute as isAbsolute9, join as join11, resolve as resolvePath } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // src/answering-lock.ts
@@ -34235,7 +34235,7 @@ function approvalsSentence(pending) {
 import { execFile as execFile4 } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { basename as basename5, dirname as dirname5, join as join8, normalize as normalize4, relative, sep as sep2 } from "node:path";
+import { basename as basename5, dirname as dirname5, isAbsolute as isAbsolute8, join as join8, normalize as normalize4, relative, sep as sep2 } from "node:path";
 
 // src/boundaries-rule.ts
 var TOPIC_MAX = 500;
@@ -34900,9 +34900,15 @@ async function keepFiles(candidates, ctx, opts) {
   return { files, truncated };
 }
 var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git"]);
+var isGitEntryName = (name) => name.toLowerCase() === ".git";
+function looksLikeGitDir(entries) {
+  const has2 = (name, dir) => entries.some((e) => e.name === name && (dir ? e.isDirectory() : e.isFile()));
+  return has2("HEAD", false) && has2("objects", true) && has2("refs", true);
+}
 async function walk(root, limits) {
   const files = [];
   const trees = [];
+  const gitDirs = [];
   let dirs = 0;
   let truncated = false;
   const until = Date.now() + limits.walkMs;
@@ -34919,8 +34925,12 @@ async function walk(root, limits) {
     } catch {
       continue;
     }
-    if (entries.some((e) => e.name === ".git")) {
+    if (entries.some((e) => isGitEntryName(e.name))) {
       trees.push(dir);
+      continue;
+    }
+    if (looksLikeGitDir(entries)) {
+      gitDirs.push(dir);
       continue;
     }
     entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
@@ -34928,7 +34938,7 @@ async function walk(root, limits) {
       if (e.name.startsWith(".")) continue;
       const p = join8(dir, e.name);
       if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name) && depth < limits.walkDepth) queue.push({ dir: p, depth: depth + 1 });
+        if (!SKIP_DIRS.has(e.name.toLowerCase()) && depth < limits.walkDepth) queue.push({ dir: p, depth: depth + 1 });
       } else if (e.isFile()) {
         if (files.length >= limits.walkFiles) {
           truncated = true;
@@ -34939,7 +34949,7 @@ async function walk(root, limits) {
     }
     if (truncated) break;
   }
-  return { files, trees, truncated };
+  return { files, trees, gitDirs, truncated };
 }
 async function underGitEntry(dir) {
   for (let d = dir; ; d = dirname5(d)) {
@@ -34952,6 +34962,26 @@ async function underGitEntry(dir) {
   }
 }
 var quotedName = (p) => JSON.stringify((basename5(p) || p).slice(0, 200));
+async function inGitDirByShape(dir) {
+  for (let d = dir; ; d = dirname5(d)) {
+    try {
+      if (looksLikeGitDir(await fsp.readdir(d, { withFileTypes: true }))) return true;
+    } catch {
+    }
+    if (dirname5(d) === d) return false;
+  }
+}
+async function inGitDir(root, env, git) {
+  if (await inGitDirByShape(root)) return true;
+  const out = await git(root, ["rev-parse", "--is-bare-repository", "--is-inside-git-dir", "--absolute-git-dir"], env);
+  if (out === null) return false;
+  const [bare, insideGitDir, gitDir] = out.split("\n").map((l) => l.trim());
+  if (bare === "true" || insideGitDir === "true") return true;
+  if (!gitDir) return false;
+  const real = await canonical(gitDir) ?? gitDir;
+  const rel = relative(root, real);
+  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep2}`) && !isAbsolute8(rel);
+}
 async function folderFiles(root, input) {
   const { env, git, cache, limits, ctx, budget } = input;
   const unlisted = `folder ${quotedName(root)}: git could not list this repository's files, so none of them are used`;
@@ -34967,10 +34997,13 @@ async function folderFiles(root, input) {
     return { ...kept, notes: [] };
   }
   if (await underGitEntry(root)) return { error: unlisted };
+  if (await inGitDir(root, env, git)) {
+    return { error: `folder ${quotedName(root)} is not used: it is a git repository's own folder (a bare repository or a git directory), not a folder of files` };
+  }
   const w = await walk(root, limits);
   const walked = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
   const files = [...walked.files];
-  const notes = [];
+  const notes = w.gitDirs.map((d) => `folder ${quotedName(root)}: the git directory ${quotedName(d)} in it is not used`);
   let truncated = w.truncated || walked.truncated;
   for (const tree of w.trees) {
     const rel = await trackedFiles(tree, env, git, cache);
@@ -36665,7 +36698,7 @@ var AnswerHost = class {
   claudeBin() {
     const given = typeof this.o.claudeBin === "function" ? this.o.claudeBin() : this.o.claudeBin;
     const b = (given ?? this.env.TEAM_RELAY_CLAUDE_BIN ?? "").trim();
-    return b && isAbsolute8(b) ? b : "claude";
+    return b && isAbsolute9(b) ? b : "claude";
   }
   /** One answerer run for the job; false when it was declined without running one. */
   async answer(job) {
@@ -37143,7 +37176,7 @@ var AnswerHost = class {
 function patternTarget(pattern, base2, home2) {
   let p = pattern;
   if (p === "~" || p.startsWith("~/")) p = home2 + p.slice(1);
-  const whole = isAbsolute8(p) ? resolvePath(p) : resolvePath(base2, p);
+  const whole = isAbsolute9(p) ? resolvePath(p) : resolvePath(base2, p);
   const parts = whole.split("/");
   const fixed = [];
   for (const part of parts) {
@@ -37196,9 +37229,9 @@ function planRun(p) {
   }
   const denyDirs = [p.socket.dir, ...relayCredentialDirs(env)];
   const cloudsdk = env.CLOUDSDK_CONFIG?.trim();
-  if (p.connection.mode === "google" && cloudsdk && isAbsolute8(cloudsdk)) denyDirs.push(cloudsdk);
+  if (p.connection.mode === "google" && cloudsdk && isAbsolute9(cloudsdk)) denyDirs.push(cloudsdk);
   const claudeConfig = env.CLAUDE_CONFIG_DIR?.trim();
-  if (claudeConfig && isAbsolute8(claudeConfig)) denyDirs.push(claudeConfig);
+  if (claudeConfig && isAbsolute9(claudeConfig)) denyDirs.push(claudeConfig);
   let capabilities = null;
   if (p.capabilities !== false) {
     try {
@@ -37478,7 +37511,7 @@ var MAX_JWKS_BYTES = 64 * 1024;
 import { execFile as execFile7 } from "node:child_process";
 import { randomBytes as randomBytes12 } from "node:crypto";
 import { accessSync as accessSync2, chmodSync as chmodSync6, closeSync as closeSync4, constants as constants3, fsyncSync as fsyncSync3, lstatSync as lstatSync3, mkdirSync as mkdirSync7, openSync as openSync4, readFileSync as readFileSync9, renameSync as renameSync6, rmSync as rmSync9, statSync as statSync4, writeSync as writeSync4 } from "node:fs";
-import { basename as basename7, dirname as dirname7, isAbsolute as isAbsolute9, join as join12 } from "node:path";
+import { basename as basename7, dirname as dirname7, isAbsolute as isAbsolute10, join as join12 } from "node:path";
 var AGENT_LABEL = "com.team-relay.answerer";
 var LAUNCHER_FILE = "daemon-launch.mjs";
 var LAUNCHCTL = "/bin/launchctl";
@@ -37492,7 +37525,7 @@ function pickPluginEntry(json, key) {
   if (!PLUGIN_KEY_RE.test(key) || !isObj4(json) || !isObj4(json.plugins) || !Object.prototype.hasOwnProperty.call(json.plugins, key)) return null;
   const list = json.plugins[key];
   if (!Array.isArray(list)) return null;
-  const e = list.find((x) => isObj4(x) && x.scope === "user" && typeof x.installPath === "string" && isAbsolute9(x.installPath));
+  const e = list.find((x) => isObj4(x) && x.scope === "user" && typeof x.installPath === "string" && isAbsolute10(x.installPath));
   if (!e) return null;
   const path = e.installPath;
   const str2 = (v) => typeof v === "string" ? v : "";
@@ -37592,7 +37625,7 @@ var AgentError = class extends Error {
   }
 };
 function claudeProblem(path) {
-  if (!path || !isAbsolute9(path)) return "it is not an absolute path";
+  if (!path || !isAbsolute10(path)) return "it is not an absolute path";
   try {
     if (!statSync4(path).isFile()) return "it is not a file";
     accessSync2(path, constants3.X_OK);
@@ -37643,8 +37676,8 @@ var realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function installAgent(i) {
   const exec = i.exec ?? defaultExec;
   const sleep2 = i.sleep ?? realSleep;
-  if (!isAbsolute9(i.home)) throw new AgentError("HOME is not an absolute path");
-  if (!isAbsolute9(i.node)) throw new AgentError("the node path is not absolute");
+  if (!isAbsolute10(i.home)) throw new AgentError("HOME is not an absolute path");
+  if (!isAbsolute10(i.node)) throw new AgentError("the node path is not absolute");
   const bad2 = claudeProblem(i.claude);
   if (bad2) throw new AgentError(`--claude ${i.claude} cannot be used: ${bad2}`);
   if (!Number.isInteger(i.uid) || i.uid < 0) throw new AgentError("the user id is unknown");
@@ -37702,7 +37735,7 @@ import { existsSync as existsSync2 } from "node:fs";
 // src/locate.ts
 import { execFile as execFile8, execFileSync } from "node:child_process";
 import { accessSync as accessSync3, constants as constants4, readFileSync as readFileSync10, readdirSync as readdirSync2, statSync as statSync5 } from "node:fs";
-import { delimiter, isAbsolute as isAbsolute10, join as join13 } from "node:path";
+import { delimiter, isAbsolute as isAbsolute11, join as join13 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 function executableFile(path) {
   try {
@@ -37756,7 +37789,7 @@ function desktopClaude(home2) {
 }
 function findClaude(env) {
   for (const dir of (env.PATH ?? "").split(delimiter)) {
-    if (!isAbsolute10(dir)) continue;
+    if (!isAbsolute11(dir)) continue;
     const c = join13(dir, "claude");
     if (executableFile(c)) return c;
   }
@@ -37811,7 +37844,7 @@ function pinnedNode(o) {
 function stablePathNode(o) {
   const version2 = o.version ?? realNodeVersion;
   for (const dir of (o.env.PATH ?? "").split(delimiter)) {
-    if (!isAbsolute10(dir)) continue;
+    if (!isAbsolute11(dir)) continue;
     const n = join13(dir, "node");
     if (versionedNodePath(n)) continue;
     if (executableFile(n) && newEnoughNode(version2(n))) return n;
