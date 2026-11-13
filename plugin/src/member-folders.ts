@@ -6,12 +6,17 @@
 //   $XDG_CONFIG_HOME/team-relay/boundaries.local.json   (default ~/.config/team-relay/)
 //   {"teams": {"<team>": {"folders": ["~/code/example-org", "/Volumes/Work/notes"]}}}
 //
-// Earlier plugins wrote two lists per team, `repo_roots` (folders their clones were in) and
-// `extra_folders`, and an `accepted` entry. They are read on every read (pure, nothing written
-// then): one list made of `folders`, then `repo_roots`, then `extra_folders`, in order, a
-// duplicate (the same string, or the same path once ~ is expanded) dropped, the first 20 kept
-// and the rest returned as `dropped` for whoever shows the member their folders to name.
-// `accepted` is ignored. The next write stores `folders` alone, which makes that permanent.
+// Earlier plugins wrote two lists per team, `repo_roots` (folders searched only for clones of
+// the team's repositories) and `extra_folders` (folders of the member's own, often unused, as
+// the team had to allow them), and an `accepted` entry. Reading either as a folder to answer
+// from would silently widen what is read, so they never are: the answerer reads `folders` alone
+// (empty for a member who has not chosen folders since 13 Nov 2026). The old entries are a
+// read-only `previous` list, `repo_roots` then `extra_folders`, each with its kind, a duplicate
+// (the same string, or the same path once ~ is expanded) and one already in `folders` left out.
+// They are shown where folders are chosen (/team-relay:folders, the setup page, setup-cli) so the
+// member can add the ones they still want, and only by the usual ways (the Mac's chooser, or
+// /team-relay:folders add <path>, each checked again). They stay in the file until the member
+// saves folders: every write stores `folders` alone (the old keys and `accepted` gone).
 //
 // Accepting: a member has accepted their team's boundaries when the version the relay holds for
 // them (GET me/acceptance) is from 1 to the current version (hasAccepted). A greater one belongs
@@ -49,7 +54,9 @@ export const OLD_FOLDER_LISTS = ['repo_roots', 'extra_folders'] as const;
  * One team's folders: the one list (at most 20), and what reading an earlier plugin's lists left
  * out past 20 (in order; empty once the list was saved again).
  */
-export type TeamSettings = { folders: string[]; dropped: string[] };
+/** A folder an earlier plugin's file held: shown to the member, never read from. */
+export type PreviousFolder = { path: string; kind: 'repo_root' | 'own_folder' };
+export type TeamSettings = { folders: string[]; previous: PreviousFolder[] };
 export type MemberSettings = { teams: Record<string, TeamSettings> };
 
 export class MemberFoldersError extends Error {
@@ -118,21 +125,40 @@ function parseList(raw: unknown, key: string, env: NodeJS.ProcessEnv): string[] 
 }
 
 /**
- * One team's settings, checked strictly: `folders`, and an earlier plugin's `repo_roots` and
- * `extra_folders` read into it (in that order, duplicates dropped, the first 20 kept, the rest
- * `dropped`); `accepted` ignored.
+ * An earlier plugin's list: a list of at most 20 strings (else the file is refused). An entry
+ * that could not be added now (other than a folder that is gone) is left out of `previous`.
+ */
+function parseOldList(raw: unknown, key: string, env: NodeJS.ProcessEnv): string[] {
+  const list = raw ?? [];
+  if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
+  if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
+  if (list.some((e) => typeof e !== 'string')) throw new MemberFoldersError(`${key} must be a list of paths`);
+  return (list as string[]).filter((e) => {
+    const { reason } = memberFolderProblem(e, env);
+    return reason === null || reason === 'it does not exist';
+  });
+}
+
+/**
+ * One team's settings, checked strictly: `folders` (the only folders ever read), and an earlier
+ * plugin's `repo_roots` and `extra_folders` as `previous` (never read; duplicates and ones in
+ * `folders` left out); `accepted` ignored.
  */
 export function parseTeamSettings(raw: unknown, env: NodeJS.ProcessEnv, team = 'a team'): TeamSettings {
   if (!isObj(raw)) throw new MemberFoldersError(`the settings for ${team} are not a JSON object`);
   onlyKeys(raw, ['folders', ...OLD_FOLDER_LISTS, 'accepted'], `the settings for ${team}`);
-  const all = [parseList(raw.folders, 'folders', env), ...OLD_FOLDER_LISTS.map((k) => parseList(raw[k], k, env))].flat();
   const folders: string[] = [];
-  const dropped: string[] = [];
-  for (const entry of all) {
-    if (holds(folders, entry, env) || holds(dropped, entry, env)) continue;
-    (folders.length < MAX_FOLDERS ? folders : dropped).push(entry);
+  for (const entry of parseList(raw.folders, 'folders', env)) if (!holds(folders, entry, env)) folders.push(entry);
+  const previous: PreviousFolder[] = [];
+  const seen: string[] = [...folders];
+  for (const [key, kind] of [['repo_roots', 'repo_root'], ['extra_folders', 'own_folder']] as const) {
+    for (const entry of parseOldList(raw[key], key, env)) {
+      if (holds(seen, entry, env)) continue;
+      seen.push(entry);
+      previous.push({ path: entry, kind });
+    }
   }
-  return { folders, dropped };
+  return { folders, previous };
 }
 
 function emptyTeams(): Record<string, TeamSettings> {
@@ -160,15 +186,15 @@ export function parseMemberSettings(raw: unknown, env: NodeJS.ProcessEnv): Membe
 /** One team's settings (no folders when the team is not in the file). */
 export function teamSettings(settings: MemberSettings, team: string): TeamSettings {
   const t = Object.prototype.hasOwnProperty.call(settings.teams, team) ? settings.teams[team] : undefined;
-  return t ? { folders: [...t.folders], dropped: [...t.dropped] } : { folders: [], dropped: [] };
+  return t ? { folders: [...t.folders], previous: t.previous.map((x) => ({ ...x })) } : { folders: [], previous: [] };
 }
 
-/** The settings with one team's folders replaced (what was dropped stays dropped: it is not written). */
+/** The settings with one team's folders replaced (the previous list is gone: it is not written). */
 export function withTeam(settings: MemberSettings, team: string, value: { folders: string[] }): MemberSettings {
   if (!TEAM_RE.test(team)) throw new MemberFoldersError('not a team id');
   const teams = emptyTeams();
   for (const [k, v] of Object.entries(settings.teams)) teams[k] = v;
-  teams[team] = { folders: [...value.folders], dropped: [] };
+  teams[team] = { folders: [...value.folders], previous: [] };
   return { teams };
 }
 
@@ -280,17 +306,17 @@ export function changeMemberFolders(
   return { folders: [...current, raw], changed: true, resolved: path };
 }
 
+const KIND_TEXT: Record<PreviousFolder['kind'], string> = { repo_root: 'repository root', own_folder: 'folder of your own' };
+
 /**
- * The sentence that tells the member which folders reading an earlier plugin's lists left out
- * (null: none).
+ * The folders an earlier plugin's file held, for where folders are chosen (null: none). Paths
+ * are as the member wrote them, quoted when they hold anything but plain characters.
  */
-export function droppedSentence(dropped: readonly string[]): string | null {
-  if (dropped.length === 0) return null;
-  const names = dropped.map((d) => JSON.stringify(d.slice(0, 200))).join(', ');
-  return (
-    `Only ${MAX_FOLDERS} folders can be used: ${names} ${dropped.length === 1 ? 'was' : 'were'} dropped. ` +
-    'Save your folders (/team-relay:folders or /team-relay:setup) to make this permanent.'
-  );
+export function previousSentence(previous: readonly PreviousFolder[]): string | null {
+  if (previous.length === 0) return null;
+  const shown = (p: string) => (/^[\w~./ @+,-]+$/.test(p) ? p : JSON.stringify(p.slice(0, 200)));
+  const list = previous.map((x) => `${shown(x.path)} (${KIND_TEXT[x.kind]})`).join(', ');
+  return `Folders you chose before 13 Nov 2026 (not used now; add the ones you still want with /team-relay:folders add <path>): ${list}.`;
 }
 
 /**

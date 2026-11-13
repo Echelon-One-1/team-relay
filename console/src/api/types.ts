@@ -381,10 +381,10 @@ export interface LocalSetup {
   /** The folders the member's Claude answers from, ~/ for the home folder. */
   folders: string[]
   /**
-   * Folders an earlier setup held past the limit (its repo roots and extra folders merged into
-   * one list, the first 20 kept), until the list is next saved. Absent: none.
+   * What the member chose before one folder list (13 Nov 2026): their repository roots and own
+   * folders, never used now. Shown so they can add the ones they still want with the chooser.
    */
-  dropped?: string[]
+  previous: PreviousFolder[]
   /** Whether this computer has the Mac's folder chooser. */
   chooser: boolean
   /**
@@ -393,6 +393,12 @@ export interface LocalSetup {
    */
   background: { installed: boolean; available: boolean; reason?: string }
   limits: { max_folders: number }
+}
+
+/** A folder chosen before one folder list: a repository root, or one of the member's own folders. */
+export interface PreviousFolder {
+  path: string
+  kind: 'repo_root' | 'own_folder'
 }
 
 /** What the Mac's folder chooser added (POST /api/local/folders/choose). */

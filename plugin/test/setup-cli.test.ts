@@ -192,7 +192,7 @@ describe('folders: one list of the folders your Claude answers from', () => {
     expect(t.out).toContain(`  notes (${code2})`);
     expect(t.out).toContain('  org is already in the list.');
     expect(t.asked).toEqual([]);
-    expect(settings()).toEqual({ folders: [code1, code2], dropped: [] });
+    expect(settings()).toEqual({ folders: [code1, code2], previous: [] });
     expect(file()).toEqual({ teams: { demo: { folders: [code1, code2] } } });
     expect(t.out.at(-1)).toBe('Saved: 2 folders.');
     // No Drive, no orgs, no own-folder step.
@@ -204,7 +204,7 @@ describe('folders: one list of the folders your Claude answers from', () => {
     expect(await runSetup(['folders'], deps(first, { chooseFolders: chooser({ kind: 'cancelled' }).choose }))).toBe(0);
     expect(first.out).toContain('Nothing picked.');
     expect(first.asked).toEqual([]);
-    expect(settings()).toEqual({ folders: [], dropped: [] });
+    expect(settings()).toEqual({ folders: [], previous: [] });
     expect(first.out.at(-1)).toBe('Saved: no folders.');
     await runSetup(['folders'], deps(term(), { chooseFolders: chooser({ kind: 'chosen', paths: [code1] }).choose }));
     // Asked to replace, then Cancel, then not stopping: the list stays.
@@ -254,20 +254,21 @@ describe('folders: one list of the folders your Claude answers from', () => {
     expect(settings().folders).toEqual([code2]);
   });
 
-  it("an earlier plugin's lists are read as one, what was dropped past 20 is said, and saving makes it permanent", async () => {
-    const many = Array.from({ length: 22 }, (_, i) => {
-      const p = join(home, 'many', `f${String(i).padStart(2, '0')}`);
-      mkdirSync(p, { recursive: true });
-      return p;
-    });
+  it("an earlier plugin's lists are never used: they are named before the chooser, and saving keeps only what was chosen", async () => {
     mkdirSync(join(xdg, 'team-relay'), { recursive: true, mode: 0o700 });
-    writeFileSync(memberFoldersPath(env), JSON.stringify({ teams: { demo: { repo_roots: many.slice(0, 12), extra_folders: [...many.slice(12), many[0]], accepted: null } } }), { mode: 0o600 });
-    const t = term(['']);
-    expect(await runSetup(['folders'], deps(t))).toBe(0);
-    expect(t.out[0]).toBe(`Only 20 folders can be used: "${many[20]}", "${many[21]}" were dropped. Save your folders (/team-relay:folders or /team-relay:setup) to make this permanent.`);
-    expect(file()).toEqual({ teams: { demo: { folders: many.slice(0, 20) } } });
-    expect(settings()).toEqual({ folders: many.slice(0, 20), dropped: [] });
-    expect(t.out.at(-1)).toBe('Saved: 20 folders.');
+    writeFileSync(memberFoldersPath(env), JSON.stringify({ teams: { demo: { repo_roots: ['~/code/org', code1], extra_folders: ['~/work/notes'], accepted: null } } }), { mode: 0o600 });
+    expect(settings()).toEqual({ folders: [], previous: [{ path: '~/code/org', kind: 'repo_root' }, { path: '~/work/notes', kind: 'own_folder' }] });
+    const c = chooser({ kind: 'chosen', paths: [code2] });
+    const t = term();
+    expect(await runSetup(['folders'], deps(t, { chooseFolders: c.choose }))).toBe(0);
+    // Nothing to keep: the earlier folders are not the current list, so the chooser opens at once.
+    expect(t.asked).toEqual([]);
+    expect(t.out[1]).toBe(
+      'Folders you chose before 13 Nov 2026 (not used now; add the ones you still want with /team-relay:folders add <path>): ~/code/org (repository root), ~/work/notes (folder of your own).',
+    );
+    expect(file()).toEqual({ teams: { demo: { folders: [code2] } } });
+    expect(settings()).toEqual({ folders: [code2], previous: [] });
+    expect(t.out.at(-1)).toBe('Saved: 1 folder.');
   });
 
   it('a folder in Documents, Desktop, Downloads or iCloud Drive: it says macOS may ask to allow "node", once', async () => {

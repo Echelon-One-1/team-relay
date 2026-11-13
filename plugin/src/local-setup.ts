@@ -4,9 +4,10 @@
 // LOCAL_BODY_LIMIT bytes with only the route's fields, no query); this file answers them.
 //
 //   GET  /api/local/setup            what the page shows: who is signed in, the folders the
-//                                    member's Claude answers from (and `dropped`: those an
-//                                    earlier plugin's lists held past 20, with `dropped_note`
-//                                    saying so; saving the folders makes that permanent),
+//                                    member's Claude answers from, `previous` (the folders an
+//                                    earlier plugin's file held, each with its kind: never read
+//                                    from, shown so the member can pick again the ones they
+//                                    still want; saving the folders removes them from the file),
 //                                    whether the Mac's folder chooser
 //                                    is here, the background answerer (installed, and whether it
 //                                    can be turned on here: a Mac with Claude Code; else why not)
@@ -25,7 +26,7 @@
 
 import { homeDir } from './boundary-set.js';
 import { AgentError } from './daemon-launch.js';
-import { MAX_FOLDERS, MemberFoldersError, changeMemberFolders, droppedSentence, memberFoldersPath, readTeamSettings, type TeamSettings } from './member-folders.js';
+import { MAX_FOLDERS, MemberFoldersError, changeMemberFolders, memberFoldersPath, readTeamSettings, type TeamSettings } from './member-folders.js';
 import { addFolder, saveTeamFolders, type FolderChooser } from './setup-steps.js';
 import { describeError } from './tool-util.js';
 
@@ -109,8 +110,7 @@ export function createLocalSetup(d: LocalSetupDeps): LocalSetup {
       body: {
         signed_in: d.signedIn,
         folders: shown(mine.folders),
-        dropped: shown(mine.dropped),
-        ...(mine.dropped.length ? { dropped_note: droppedSentence(mine.dropped.map((p) => displayPath(p, env))) } : {}),
+        previous: mine.previous.map((x) => ({ path: displayPath(x.path, env), kind: x.kind })),
         chooser: d.chooser !== null,
         background: { installed: d.background.installed(), ...d.background.availability() },
         limits: { max_folders: MAX_FOLDERS },

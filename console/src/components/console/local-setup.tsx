@@ -4,7 +4,7 @@ import { useId, useState, useSyncExternalStore, type ReactNode } from 'react'
 
 import { api, type ApiError, type ChangeError } from '@/api/client'
 import { isHosted } from '@/api/key'
-import type { LocalChoice, LocalSetup } from '@/api/types'
+import type { LocalChoice, LocalSetup, PreviousFolder } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
@@ -29,11 +29,8 @@ export const localSetupKey = ['local-setup'] as const
 
 export const FOLDERS_HINT =
   'Add every folder you use for your team, up to 20. Inside a git project, only the files git tracks are read.'
-
-/** The folders an earlier, longer setup held past the limit, as the member is told. */
-export function droppedText(dropped: string[]): string {
-  return `Only 20 folders can be used: ${dropped.join(', ')} ${dropped.length === 1 ? 'was' : 'were'} dropped. Add or remove a folder here to make this permanent.`
-}
+export const PREVIOUS_TEXT = 'Folders you chose before this change — add the ones you still want with Add folder'
+export const PREVIOUS_KIND: Record<PreviousFolder['kind'], string> = { repo_root: 'repository root', own_folder: 'your own folder' }
 export const BACKGROUND_TEXT = "Answers teammates' questions from your folders even when Claude is closed."
 export const FINISHED_TEXT = 'All set. Go back to Claude.'
 export const BACKGROUND_FAILED_TEXT = 'Background answering could not be turned on. Press Done to try again, or finish without it.'
@@ -156,8 +153,6 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
   const bounds = useBoundaries()
   const acceptance = useAcceptance()
   const [folders, setFolders] = useState<string[]>(setup.folders)
-  // Folders past the limit when an earlier setup's lists were merged; gone once the list is saved.
-  const [dropped, setDropped] = useState<string[]>(setup.dropped ?? [])
   const [choosing, setChoosing] = useState(false)
   const [removing, setRemoving] = useState<string | null>(null)
   const [choice, setChoice] = useState<LocalChoice | null>(null)
@@ -175,16 +170,17 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
   const switchId = useId()
   const hintId = useId()
 
+  // What the member chose before one folder list, less what is in the list again.
+  const previous = (setup.previous ?? []).filter((p) => !folders.includes(p.path))
   const team = nav.teams?.teams.find((t) => t.team === setup.signed_in.team)?.name ?? setup.signed_in.team
   const who = setup.signed_in.email ?? setup.signed_in.member
   const accepted = acceptedVersion(null, acceptance.data)
   const acceptState: StepState = boundariesSet(bounds.data) ? (isAccepted(accepted, bounds.data.version) ? 'done' : 'todo') : bounds.data ? 'not_needed' : 'todo'
 
-  /** The list as the server now holds it; `saved`: it wrote the list (the dropped ones are gone for good). */
-  const keep = (next: string[], saved: boolean) => {
+  /** The list as the server now holds it. */
+  const keep = (next: string[]) => {
     setFolders(next)
-    if (saved) setDropped([])
-    qc.setQueryData<LocalSetup>(localSetupKey, (old) => (old ? { ...old, folders: next, ...(saved ? { dropped: [] } : {}) } : old))
+    qc.setQueryData<LocalSetup>(localSetupKey, (old) => (old ? { ...old, folders: next } : old))
   }
 
   const add = async () => {
@@ -193,7 +189,7 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
     setChoosing(true)
     try {
       const out = await api.localChoose()
-      keep(out.folders, out.added.length > 0)
+      keep(out.folders)
       setChoice(out)
     } catch (err) {
       setFolderError((err as ChangeError).message)
@@ -207,7 +203,7 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
     setChoice(null)
     setRemoving(path)
     try {
-      keep((await api.localRemove(path)).folders, true)
+      keep((await api.localRemove(path)).folders)
     } catch (err) {
       setFolderError((err as ChangeError).message)
     } finally {
@@ -278,11 +274,6 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
 
           <Step n={3} title="Folders your Claude answers from" state={folders.length > 0 ? 'done' : 'todo'}>
             <Note>{FOLDERS_HINT}</Note>
-            {dropped.length > 0 ? (
-              <p className="text-[12.5px] leading-relaxed text-warn [overflow-wrap:anywhere]" data-dropped={dropped.length}>
-                {droppedText(dropped)}
-              </p>
-            ) : null}
             {folders.length > 0 ? (
               <ul className="flex flex-col gap-1" aria-label="Your folders">
                 {folders.map((f) => (
@@ -305,6 +296,19 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
             ) : (
               <Note>No folders yet.</Note>
             )}
+            {previous.length > 0 ? (
+              <div className="flex flex-col gap-1" data-previous={previous.length}>
+                <p className="text-[12.5px] leading-relaxed text-subtle">{PREVIOUS_TEXT}</p>
+                {/* Plain text only: an old path is added again only through the Mac's chooser. */}
+                <ul className="flex flex-col gap-0.5 pl-2" aria-label="Folders you chose before">
+                  {previous.map((p) => (
+                    <li key={`${p.kind}:${p.path}`} className="text-[12px] text-subtle [overflow-wrap:anywhere]" data-previous-folder={p.path}>
+                      <span className="font-mono">{p.path}</span> ({PREVIOUS_KIND[p.kind]})
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             {setup.chooser ? (
               <div className="flex flex-wrap items-center gap-2">
                 <Button size="sm" variant="outline" onClick={() => void add()} disabled={choosing || removing !== null || folders.length >= setup.limits.max_folders}>

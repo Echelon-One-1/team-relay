@@ -27,7 +27,7 @@ import { CredentialFileError, credentialsPath, normaliseRelayUrl, readCredential
 import { AgentError, type Exec } from './daemon-launch.js';
 import type { FetchPinnedNode } from './locate.js';
 import { LoginError, connectedAs, identityChange, startLogin, type LoginFlow, type LoginOptions } from './login.js';
-import { MAX_FOLDERS, MemberFoldersError, droppedSentence, expandPath, hasAccepted, memberFolderProblem, memberFoldersPath, readMemberSettings, teamSettings } from './member-folders.js';
+import { MAX_FOLDERS, MemberFoldersError, expandPath, hasAccepted, memberFolderProblem, memberFoldersPath, readMemberSettings, previousSentence, teamSettings } from './member-folders.js';
 import { configValue, parseRelayUrl, type RelayClient } from './relay-client.js';
 import { defaultRelayUrl } from './relay-default.js';
 import { connectOnce } from './relay-connect.js';
@@ -267,14 +267,15 @@ async function folders(d: SetupDeps): Promise<number> {
     return 1;
   }
   const current = teamSettings(all, c.team);
-  const dropped = droppedSentence(current.dropped);
-  if (dropped) io.print(dropped);
   io.print('Your Claude answers your team from folders you choose on this Mac. In a folder that is a git repository, only the files git tracks are used.');
+  // An earlier plugin's folders are never used: named, so the member can pick again the ones they want.
+  const previous = previousSentence(current.previous);
+  if (previous) io.print(previous);
   const chosen = await chooseFolders(d, current.folders);
   let saved: string[];
   try {
     // Read again: the file may have changed while the questions were open. Saved as `folders`
-    // alone, so folders an earlier version kept apart are stored in the one list from now on.
+    // alone: an earlier plugin's lists leave the file.
     saved = saveTeamFolders(env, c.team, () => chosen);
   } catch (err) {
     io.print(`Nothing was saved (${err instanceof MemberFoldersError ? err.message : describeError(err)}).`);

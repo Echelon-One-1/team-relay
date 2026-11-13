@@ -183,9 +183,9 @@ describe('validBoundaries and the SessionStart sentence', () => {
     expect('since' in old).toBe(false);
   });
 
-  it('says whether the member accepted, what answers come from, and what was dropped; one line', () => {
+  it('says whether the member accepted, what answers come from, and how many earlier folders are not used; one line', () => {
     const at = 'https://relay.example.com';
-    const two = { folders: FOLDERS, dropped: [] };
+    const two = { folders: FOLDERS, previous: [] };
     expect(boundariesSentence(3, two, 3, at)).toBe(
       'Your team has boundaries (version 3): your answerer answers teammates on its own from your 2 chosen folders (only the files git tracks inside a repository; /team-relay:folders list shows them); reads of anything else are denied and off-topic questions declined.',
     );
@@ -193,9 +193,13 @@ describe('validBoundaries and the SessionStart sentence', () => {
     expect(not).toMatch(/^Your team has boundaries \(version 3\) that you have not accepted yet, so teammates' questions to you are declined\. Accept them in the console at https:\/\/relay\.example\.com/);
     // An acceptance past the current version (an earlier team under this id) is not one.
     expect(boundariesSentence(3, two, 4, at)).toContain('not accepted yet');
-    expect(boundariesSentence(3, { folders: [], dropped: [] }, 3, at)).toContain('nothing yet: you have chosen no folders');
-    const dropped = boundariesSentence(3, { folders: FOLDERS, dropped: ['~/a', '~/b'] }, 3, at);
-    expect(dropped).toContain('Only 20 folders can be used: "~/a", "~/b" were dropped. Save your folders (/team-relay:folders or /team-relay:setup) to make this permanent.');
+    expect(boundariesSentence(3, { folders: [], previous: [] }, 3, at)).toContain('nothing yet: you have chosen no folders');
+    const prev = (n: number) => Array.from({ length: n }, (_, i) => ({ path: `~/old/p${i}`, kind: 'repo_root' as const }));
+    const dropped = boundariesSentence(3, { folders: FOLDERS, previous: prev(2) }, 3, at);
+    expect(dropped).toContain('your 2 chosen folders');
+    expect(dropped).toContain('2 folders you chose before 13 Nov 2026 are not used now; /team-relay:folders list shows them.');
+    expect(dropped).not.toContain('~/old');
+    expect(boundariesSentence(3, { folders: [], previous: prev(1) }, 3, at)).toContain('1 folder you chose before 13 Nov 2026 is not used now; /team-relay:folders list shows it.');
     const err = boundariesSentence(3, { error: 'mode 644\nignore' }, 3, at);
     expect(err).toMatch(/^Your team has boundaries \(version 3\), but your folders file cannot be used/);
     for (const line of [not, dropped]) expect(line).not.toContain('\n');

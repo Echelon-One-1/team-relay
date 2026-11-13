@@ -82,7 +82,7 @@ import {
 } from './headless.js';
 import { HostSocket, newToken } from './host-socket.js';
 import { codePointLength, hasLoneSurrogate, loadManifest, validateManifest } from './manifest.js';
-import { droppedSentence, hasAccepted, memberFoldersPath, readTeamSettings, type TeamSettings } from './member-folders.js';
+import { hasAccepted, memberFoldersPath, readTeamSettings, type TeamSettings } from './member-folders.js';
 import { envelopeToNotification, neutraliseChannelTags, RecentIds } from './notify.js';
 import { APPROVAL_TEXT, TAKEOVER_TEXT, notifyCommand, type NoticeText } from './notify-desktop.js';
 import { sensitiveName } from './read-trail-core.js';
@@ -427,8 +427,6 @@ export class AnswerHost {
       this.acceptance = { state: 'unreadable', version: tb.version };
       return null;
     }
-    const dropped = droppedSentence(settings.dropped);
-    if (dropped) this.o.log(dropped);
     const version = await this.acceptedVersion();
     if (version === null) {
       this.acceptance = { state: 'unknown', version: tb.version };

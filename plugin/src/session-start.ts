@@ -50,7 +50,7 @@ async function relayStatusLine(env: NodeJS.ProcessEnv): Promise<string> {
     // silence when it cannot be read.
     // M10-SPEC: the team's boundaries, read beside /me within 3 s; silence when they cannot be read.
     // The sentence says whether the member accepted them (§7.1), how many folders they chose and
-    // which an earlier plugin's lists dropped.
+    // how many an earlier plugin's file held that are not used now.
     // M11-SPEC §2: what the member accepted is the relay's; silence about boundaries when it cannot be read.
     const [me, summary, invitations, boundaries, accepted] = await Promise.all([
       client.me(),

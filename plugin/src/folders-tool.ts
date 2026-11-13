@@ -1,6 +1,7 @@
 // /team-relay:folders, the `folders` tool of a working session's relay server (13 Nov 2026,
 // local folders only). It lists the folders the member chose for the team they are signed in to
-// (member-folders.ts: one list, at most 20), any an earlier plugin's lists dropped past 20, the
+// (member-folders.ts: one list, at most 20), the folders an earlier plugin's file held (never read
+// from; shown so the member can add again the ones they still want), the
 // team's boundaries version and whether the member accepted it (M11-SPEC §2: as the relay holds
 // it; accepting is done in the console, by the member only), and what the answerer would read.
 // It adds or removes one folder.
@@ -16,10 +17,10 @@ import { buildAllowedSet, quotedOwnerText, setSummary, type GitCache } from './b
 import {
   MAX_FOLDERS,
   changeMemberFolders,
-  droppedSentence,
   hasAccepted,
   memberFolderProblem,
   memberFoldersPath,
+  previousSentence,
   readMemberSettings,
   teamSettings,
   withTeam,
@@ -78,9 +79,10 @@ function describeFolders(folders: readonly string[], env: NodeJS.ProcessEnv) {
   };
 }
 
-function droppedPart(v: TeamSettings) {
-  const sentence = droppedSentence(v.dropped);
-  return sentence ? { dropped: v.dropped, dropped_note: sentence } : {};
+/** The folders an earlier plugin's file held: shown, never read from, added again only with add. */
+function previousPart(v: TeamSettings) {
+  const sentence = previousSentence(v.previous);
+  return sentence ? { previously_chosen: v.previous, previously_chosen_note: sentence } : {};
 }
 
 function teamPart(tb: TeamBoundaries | null, otherTeam = false) {
@@ -162,7 +164,7 @@ export async function foldersTool(args: Record<string, unknown>, deps: FoldersDe
       file,
       team,
       ...describeFolders(current.folders, deps.env),
-      ...droppedPart(current),
+      ...previousPart(current),
       ...teamPart(tb, otherTeam),
       ...(tb?.boundaries ? acceptancePart(tb, version, deps.console()) : {}),
       ...(gives ? { answers_come_from: gives } : {}),
@@ -180,7 +182,7 @@ export async function foldersTool(args: Record<string, unknown>, deps: FoldersDe
     return toolError(describeError(err));
   }
   if (!change.changed) {
-    return toolJson({ message: action === 'add' ? 'It is already there; nothing changed.' : 'It is not in the list; nothing changed.', ...describeFolders(current.folders, deps.env), ...droppedPart(current) });
+    return toolJson({ message: action === 'add' ? 'It is already there; nothing changed.' : 'It is not in the list; nothing changed.', ...describeFolders(current.folders, deps.env) });
   }
   if (!deps.elicit) {
     return toolError(

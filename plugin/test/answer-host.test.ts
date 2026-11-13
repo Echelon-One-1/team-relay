@@ -743,7 +743,7 @@ describe('boundary mode (13 Nov 2026: the topic, and the folders the member chos
     expect((await s.call('whoami')).json).toMatchObject({ approvals_pending: 0 });
   });
 
-  it('the SessionStart line says the team has boundaries, how many folders answers come from, what was dropped, and whether it is accepted', async () => {
+  it('the SessionStart line says the team has boundaries, how many folders answers come from, earlier folders not used, and whether it is accepted', async () => {
     relay.setBoundaries(BOUNDARIES);
     relay.acceptances.set('bob', 1);
     const env = { HOME: f.home, XDG_CONFIG_HOME: f.xdg };
@@ -755,17 +755,14 @@ describe('boundary mode (13 Nov 2026: the topic, and the folders the member chos
     expect(await sessionStart(env)).toContain('Your team has boundaries (version 2): your answerer answers teammates on its own');
     relay.acceptances.set('bob', 0);
     expect(await sessionStart(env)).toContain("Your team has boundaries (version 2) that you have not accepted yet, so teammates' questions to you are declined.");
-    // An earlier plugin's lists past 20: what was dropped is said.
-    const many = Array.from({ length: 21 }, (_, i) => {
-      mkdirSync(join(f.home, 'many', `f${String(i).padStart(2, '0')}`), { recursive: true });
-      return `~/many/f${String(i).padStart(2, '0')}`;
-    });
+    // An earlier plugin's lists: never read from; how many there are is said, never their paths.
     relay.acceptances.set('bob', 2);
-    writeFolders(f, [], { raw: { repo_roots: many.slice(0, 10), extra_folders: many.slice(10) } });
+    writeFolders(f, [], { raw: { repo_roots: [REPO_ROOT], extra_folders: [MY_FOLDER] } });
     try {
       const line = await sessionStart(env);
-      expect(line).toContain('your 20 chosen folders');
-      expect(line).toContain('Only 20 folders can be used: "~/many/f20" was dropped. Save your folders (/team-relay:folders or /team-relay:setup) to make this permanent.');
+      expect(line).toContain('nothing yet: you have chosen no folders');
+      expect(line).toContain('2 folders you chose before 13 Nov 2026 are not used now; /team-relay:folders list shows them.');
+      expect(line).not.toContain(REPO_ROOT);
     } finally {
       writeFolders(f, FOLDERS);
     }
@@ -834,7 +831,7 @@ describe('boundary mode (13 Nov 2026: the topic, and the folders the member chos
   });
 
   it('M11-SPEC §2: nothing accepted at the relay: the fixed decline, no run, one status line; accepting in the console lets the next question through', async () => {
-    // An earlier plugin's file that says version 1 was accepted: ignored.
+    // An earlier plugin's file (its lists and `accepted: 1`): the lists are never read, `accepted` ignored.
     writeFolders(f, [], { raw: { repo_roots: [REPO_ROOT], extra_folders: [MY_FOLDER], accepted: { version: 1 } } });
     try {
       const s = await bsession({ decide: () => 'change', accepted: 0 });
@@ -859,13 +856,20 @@ describe('boundary mode (13 Nov 2026: the topic, and the folders the member chos
       expect(listed.json.accepted).toBe(`nothing yet: teammates' questions to you are declined until you accept your team's boundaries in the console (${relay.url})`);
       expect((await s.call('folders', { action: 'accept' })).isError).toBe(true);
       expect(s.elicited).toHaveLength(0);
-      // Accepted in the console (the relay records it): the next question is answered.
+      // Accepted in the console (the relay records it): the next question is answered, and the
+      // earlier plugin's lists are read from not at all.
       relay.acceptances.set('bob', 1);
-      const c = ask(script([{ host: { tool: 'list_files', args: { area: 'example-org', glob: 'alpha/**/*.md' } } }, { reply: { text: 'three' } }]));
+      const c = ask(script([{ host: { tool: 'list_files', args: {} } }, { permission: { tool_name: 'Read', input: { file_path: alpha('README.md') } } }, { reply: { text: 'three' } }]));
       await until(() => replyTo(c));
       expect(replyTo(c)!.body.text).toBe('three');
-      expect(JSON.parse(callsOf(c, 'list_files')[0].text).files).toEqual([alpha('README.md'), alpha('docs', 'guide.md')]);
-      expect((await s.call('whoami')).json).toMatchObject({ boundaries_acceptance: 'accepted' });
+      expect(JSON.parse(callsOf(c, 'list_files')[0].text).files).toEqual([]);
+      expect(JSON.parse(callsOf(c, 'permission')[0].text)).toEqual({ behavior: 'deny', message: OUTSIDE_SET });
+      expect((await s.call('whoami')).json).toMatchObject({ boundaries_acceptance: 'accepted', answering_from: { your_folders: [], files: 0 } });
+      // Chosen again under the new scheme: read from the next question on.
+      writeFolders(f, FOLDERS);
+      const d = ask(script([{ host: { tool: 'list_files', args: { area: 'example-org', glob: 'alpha/**/*.md' } } }, { reply: { text: 'four' } }]));
+      await until(() => replyTo(d));
+      expect(JSON.parse(callsOf(d, 'list_files')[0].text).files).toEqual([alpha('README.md'), alpha('docs', 'guide.md')]);
       noFolderNames();
     } finally {
       writeFolders(f, FOLDERS);

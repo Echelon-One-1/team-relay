@@ -404,7 +404,7 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     relay.setBoundaries({ topic: 'T' });
     for (const d of ['Documents/code', 'work/repos', 'Desktop/notes']) mkdirSync(join(tmp, d), { recursive: true });
     const e = env();
-    writeMemberSettings(memberFoldersPath(e), { teams: { demo: { folders: ['~/Documents/code', '~/work/repos', '~/Desktop/notes'], dropped: [] } } }, e);
+    writeMemberSettings(memberFoldersPath(e), { teams: { demo: { folders: ['~/Documents/code', '~/work/repos', '~/Desktop/notes'], previous: [] } } }, e);
     const probed: string[] = [];
     const refuse = (code: string, p: string) => Object.assign(new Error(`${code}: operation not permitted, scandir '${p}'`), { code });
     const canRead = async (p: string) => {
@@ -430,7 +430,7 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     expect(JSON.stringify(relay.memberStatus.get('bob'))).not.toMatch(/code|repos|notes/);
   });
 
-  it('folder_count counts an earlier plugin\'s lists read as one (duplicates once, at most 20)', async () => {
+  it('folder_count is the length of `folders` alone: an earlier plugin\'s lists count 0 and are never probed', async () => {
     const e = env();
     const many = Array.from({ length: 22 }, (_, i) => `~/many/f${i}`);
     for (const m of many) mkdirSync(join(tmp, m.slice(2)), { recursive: true });
@@ -438,9 +438,11 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     writeFileSync(memberFoldersPath(e), JSON.stringify({ teams: { demo: { repo_roots: many.slice(0, 12), extra_folders: [...many.slice(12), many[0]], accepted: null } } }), { mode: 0o600 });
     const { make } = fakeHosts();
     const ac = new AbortController();
-    const done = runDaemon({ env: e, log: (l) => logs.push(l), dist: DIST, version: '1', signal: ac.signal, makeHost: make, selfTest: async () => PASSED, facts, intervals });
+    const probed: string[] = [];
+    const done = runDaemon({ env: e, log: (l) => logs.push(l), dist: DIST, version: '1', signal: ac.signal, makeHost: make, selfTest: async () => PASSED, facts: { ...facts, canRead: async (p: string) => void probed.push(p) }, intervals });
     await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the first status');
-    expect(relay.memberStatus.get('bob')).toMatchObject({ folder_count: 20 });
+    expect(relay.memberStatus.get('bob')).toMatchObject({ folder_count: 0 });
+    expect(probed).toEqual([]);
     ac.abort();
     await done;
   });

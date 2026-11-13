@@ -26,7 +26,7 @@ import { basename, join, normalize, relative, sep } from 'node:path';
 import type { TeamBoundaries } from './boundaries-types.js';
 import { readBoundaries, versionOk } from './boundaries-rule.js';
 import { ANY_DEPTH, credentialHit, globRe, within } from './deny-list.js';
-import { droppedSentence, hasAccepted, memberFolderProblem, type TeamSettings } from './member-folders.js';
+import { hasAccepted, memberFolderProblem, type TeamSettings } from './member-folders.js';
 import { neutraliseChannelTags } from './notify.js';
 import { sensitiveName } from './read-trail-core.js';
 import { relayCredentialDirs } from './scope.js';
@@ -440,8 +440,8 @@ export function foldersText(count: number): string {
 /**
  * The SessionStart sentence for a team with boundaries: whether the member accepted them (the
  * relay's version, `acceptedVersion`; accepting happens in the console at `consoleAt`), what
- * answers come from (how many folders the member chose), and which folders reading an earlier
- * plugin's lists dropped.
+ * answers come from (how many folders the member chose), and how many folders an earlier
+ * plugin's file held that are not used now (never their paths).
  */
 export function boundariesSentence(version: number, settings: TeamSettings | { error: string }, acceptedVersion: number, consoleAt: string): string {
   if ('error' in settings) {
@@ -450,8 +450,10 @@ export function boundariesSentence(version: number, settings: TeamSettings | { e
       "so teammates' questions to you are declined until you fix it: run /team-relay:folders."
     );
   }
-  const dropped = droppedSentence(settings.dropped);
-  const tail = dropped ? ` ${dropped}` : '';
+  const n = settings.previous.length;
+  const tail = n
+    ? ` ${n === 1 ? '1 folder' : `${n} folders`} you chose before 13 Nov 2026 ${n === 1 ? 'is' : 'are'} not used now; /team-relay:folders list shows ${n === 1 ? 'it' : 'them'}.`
+    : '';
   if (!hasAccepted(acceptedVersion, version)) {
     return (
       `Your team has boundaries (version ${version}) that you have not accepted yet, so teammates' questions to you are declined. ` +

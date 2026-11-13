@@ -16,7 +16,8 @@ Call the `folders` tool of this plugin's `relay` server once:
 
 A change opens a dialog where I decide; you do not decide it and do not answer the dialog
 for me. When the tool returns, tell me its message in a line or two. For `list`, list my folders (and any
-that are not used, with why), any that were dropped (and how to keep the list as it is now), whether I
+that are not used, with why), any I chose before 13 Nov 2026 (not used now; I add again the ones I want with
+`add <path>`, never you), whether I
 accepted my team's boundaries, and in one line what my automatic answers come from. I choose at most 20
 folders on this Mac; inside a git repository only the files git tracks are read, and elsewhere every
 file except credentials and other secrets. Until I accept my team's boundaries, teammates' questions to

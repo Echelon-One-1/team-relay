@@ -1,7 +1,8 @@
 // The member's settings file (13 Nov 2026, local folders only): per team, one `folders` list of
-// at most 20. An earlier plugin's `repo_roots` and `extra_folders` are read into it (in that
-// order, duplicates dropped, the first 20 kept, the rest dropped and said), `accepted` ignored;
-// writing keeps `folders` alone. The accepted version is the relay's (hasAccepted), and the
+// at most 20, the only folders ever read. An earlier plugin's `repo_roots` and `extra_folders`
+// are never read from: they are a read-only `previous` list (each with its kind, duplicates and
+// ones in `folders` left out), shown where folders are chosen; `accepted` is ignored; writing
+// keeps `folders` alone. The accepted version is the relay's (hasAccepted), and the
 // folders tool lists, adds and removes, each change in a dialog the member answers.
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -9,17 +10,17 @@ import { chmodSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSyn
 import { join } from 'node:path';
 import type { Elicit } from '../src/approvals-review.js';
 import type { TeamBoundaries } from '../src/boundaries-types.js';
+import { buildAllowedSet } from '../src/boundary-set.js';
 import { FOLDERS_TOOL, foldersTool } from '../src/folders-tool.js';
 import {
-  MAX_FOLDERS,
   MemberFoldersError,
   changeMemberFolders,
-  droppedSentence,
   hasAccepted,
   memberFolderProblem,
   memberFoldersPath,
   parseMemberSettings,
   parseTeamSettings,
+  previousSentence,
   readMemberSettings,
   readTeamSettings,
   teamSettings,
@@ -61,49 +62,51 @@ describe('the folder rules', () => {
   });
 });
 
-describe('one team\'s settings: one folders list, an earlier plugin\'s lists read into it', () => {
+describe('one team\'s settings: `folders` is read; an earlier plugin\'s lists are only `previous`', () => {
   it('folders alone', () => {
-    expect(parseTeamSettings({ folders: FOLDERS }, f.env)).toEqual({ folders: FOLDERS, dropped: [] });
-    expect(parseTeamSettings({}, f.env)).toEqual({ folders: [], dropped: [] });
+    expect(parseTeamSettings({ folders: FOLDERS }, f.env)).toEqual({ folders: FOLDERS, previous: [] });
+    expect(parseTeamSettings({}, f.env)).toEqual({ folders: [], previous: [] });
+    // A duplicate in `folders` is kept once.
+    expect(parseTeamSettings({ folders: [REPO_ROOT, f.repoRoot] }, f.env).folders).toEqual([REPO_ROOT]);
   });
 
-  it('both earlier lists: repo_roots first, then extra_folders', () => {
-    expect(parseTeamSettings({ repo_roots: [REPO_ROOT], extra_folders: [MY_FOLDER] }, f.env)).toEqual({ folders: [REPO_ROOT, MY_FOLDER], dropped: [] });
-    expect(parseTeamSettings({ extra_folders: [MY_FOLDER], repo_roots: [REPO_ROOT] }, f.env)).toEqual({ folders: [REPO_ROOT, MY_FOLDER], dropped: [] });
+  it('both earlier lists give an EMPTY active list and the previous list, repo_roots then extra_folders, with kinds', () => {
+    const v = parseTeamSettings({ extra_folders: [MY_FOLDER], repo_roots: [REPO_ROOT], accepted: { version: 1 } }, f.env);
+    expect(v).toEqual({
+      folders: [],
+      previous: [
+        { path: REPO_ROOT, kind: 'repo_root' },
+        { path: MY_FOLDER, kind: 'own_folder' },
+      ],
+    });
   });
 
-  it('duplicates are dropped, the same string or the same path once expanded (first kept as written)', () => {
-    const v = parseTeamSettings({ repo_roots: [REPO_ROOT, REPO_ROOT], extra_folders: [f.repoRoot, `${f.home}/notes/team`, MY_FOLDER] }, f.env);
-    expect(v).toEqual({ folders: [REPO_ROOT, `${f.home}/notes/team`], dropped: [] });
+  it('previous leaves out duplicates (the same string or the same path once expanded) and folders already chosen', () => {
+    const v = parseTeamSettings({ folders: [MY_FOLDER], repo_roots: [REPO_ROOT, REPO_ROOT, MY_FOLDER], extra_folders: [f.repoRoot, `${f.home}/notes/team`, '~/code/gone'] }, f.env);
+    expect(v).toEqual({ folders: [MY_FOLDER], previous: [{ path: REPO_ROOT, kind: 'repo_root' }, { path: '~/code/gone', kind: 'own_folder' }] });
   });
 
-  it('more than 20 together: the first 20 kept, the rest dropped in order', () => {
-    const v = parseTeamSettings({ repo_roots: MANY.slice(0, 15), extra_folders: [...MANY.slice(15), MANY[3]!] }, f.env);
-    expect(v.folders).toEqual(MANY.slice(0, MAX_FOLDERS));
-    expect(v.dropped).toEqual(MANY.slice(MAX_FOLDERS));
-    // A duplicate of a dropped one is not dropped twice.
-    expect(parseTeamSettings({ repo_roots: MANY.slice(0, 20), extra_folders: [MANY[20]!, MANY[20]!] }, f.env).dropped).toEqual([MANY[20]]);
+  it('nothing is capped or dropped: 25 earlier entries are 25 previous ones, none read', () => {
+    const v = parseTeamSettings({ repo_roots: MANY.slice(0, 20), extra_folders: [...MANY.slice(20), ...MANY.slice(0, 5)] }, f.env);
+    expect(v.folders).toEqual([]);
+    expect(v.previous.map((x) => x.path)).toEqual(MANY);
+    expect(v).not.toHaveProperty('dropped');
   });
 
-  it('folders and the earlier keys together: folders first, then repo_roots, then extra_folders', () => {
-    const v = parseTeamSettings({ folders: [MY_FOLDER], repo_roots: [REPO_ROOT, MY_FOLDER], extra_folders: MANY.slice(0, 20) }, f.env);
-    expect(v.folders).toEqual([MY_FOLDER, REPO_ROOT, ...MANY.slice(0, 18)]);
-    expect(v.dropped).toEqual(MANY.slice(18, 20));
+  it('an earlier entry that could not be added now is left out of previous; a wrong type still refuses the file', () => {
+    mkdirSync(join(f.home, 'Library', 'Mail'), { recursive: true });
+    expect(parseTeamSettings({ repo_roots: ['~/Library/Mail', '~', REPO_ROOT] }, f.env).previous).toEqual([{ path: REPO_ROOT, kind: 'repo_root' }]);
+    expect(() => parseTeamSettings({ repo_roots: REPO_ROOT }, f.env)).toThrow(/must be a list/);
+    expect(() => parseTeamSettings({ extra_folders: [3] }, f.env)).toThrow(/must be a list/);
+    expect(() => parseTeamSettings({ repo_roots: MANY.slice(0, 21) }, f.env)).toThrow(/repo_roots has more than 20/);
   });
 
-  it('`accepted` (an earlier plugin\'s, even a malformed one) is ignored', () => {
-    expect(parseTeamSettings({ repo_roots: [REPO_ROOT], accepted: { version: 'x' } }, f.env)).toEqual({ folders: [REPO_ROOT], dropped: [] });
-    expect(parseTeamSettings({ folders: [], accepted: null }, f.env)).toEqual({ folders: [], dropped: [] });
-  });
-
-  it('strict: wrong types, unknown fields, unsafe folders, and more than 20 in one list are refused; a gone folder is kept', () => {
+  it('strict: wrong types, unknown fields, unsafe folders, and more than 20 folders are refused; a gone folder is kept', () => {
     const cases: Array<[unknown, RegExp]> = [
       [[], /not a JSON object/],
       [{ folders: REPO_ROOT }, /must be a list/],
       [{ folders: ['~'] }, /home directory/],
-      [{ repo_roots: ['~/Library/Mail'] }, /inside ~\/Library/],
       [{ folders: MANY.slice(0, 21) }, /folders has more than 20/],
-      [{ repo_roots: MANY.slice(0, 21) }, /repo_roots has more than 20/],
       [{ folders: [], drives: [] }, /unknown field/],
     ];
     for (const [raw, why] of cases) expect(() => parseTeamSettings(raw, f.env), JSON.stringify(raw)).toThrow(why);
@@ -112,9 +115,9 @@ describe('one team\'s settings: one folders list, an earlier plugin\'s lists rea
 
   it('the file: per team, strict; the older format without teams is refused', () => {
     const s = parseMemberSettings({ teams: { demo: { folders: [REPO_ROOT] }, other: { repo_roots: [MY_FOLDER], extra_folders: [] } } }, f.env);
-    expect(teamSettings(s, 'demo')).toEqual({ folders: [REPO_ROOT], dropped: [] });
-    expect(teamSettings(s, 'other')).toEqual({ folders: [MY_FOLDER], dropped: [] });
-    expect(teamSettings(s, 'missing')).toEqual({ folders: [], dropped: [] });
+    expect(teamSettings(s, 'demo')).toEqual({ folders: [REPO_ROOT], previous: [] });
+    expect(teamSettings(s, 'other')).toEqual({ folders: [], previous: [{ path: MY_FOLDER, kind: 'repo_root' }] });
+    expect(teamSettings(s, 'missing')).toEqual({ folders: [], previous: [] });
     expect(() => parseMemberSettings({ repo_roots: [REPO_ROOT], extra_folders: [] }, f.env)).toThrow(/older format/);
     expect(() => parseMemberSettings({ folders: [REPO_ROOT] }, f.env)).toThrow(/older format/);
     expect(() => parseMemberSettings({ teams: { 'Not A Team': { folders: [] } } }, f.env)).toThrow(/not a team id/);
@@ -122,10 +125,20 @@ describe('one team\'s settings: one folders list, an earlier plugin\'s lists rea
     expect(() => parseMemberSettings({ teams: [] }, f.env)).toThrow(/"teams", an object/);
   });
 
-  it('the dropped sentence names each dropped folder, and none when nothing was dropped', () => {
-    expect(droppedSentence([])).toBeNull();
-    expect(droppedSentence(['~/a'])).toBe('Only 20 folders can be used: "~/a" was dropped. Save your folders (/team-relay:folders or /team-relay:setup) to make this permanent.');
-    expect(droppedSentence(['~/a', '~/b'])).toBe('Only 20 folders can be used: "~/a", "~/b" were dropped. Save your folders (/team-relay:folders or /team-relay:setup) to make this permanent.');
+  it('the previous sentence names each folder with its kind, and nothing when there is none', () => {
+    expect(previousSentence([])).toBeNull();
+    expect(previousSentence([{ path: '~/code', kind: 'repo_root' }, { path: '~/notes', kind: 'own_folder' }])).toBe(
+      'Folders you chose before 13 Nov 2026 (not used now; add the ones you still want with /team-relay:folders add <path>): ~/code (repository root), ~/notes (folder of your own).',
+    );
+    // An odd path is quoted (one line, nothing taken as text around it).
+    expect(previousSentence([{ path: '~/a\nb', kind: 'own_folder' }])).toContain('"~/a\\nb" (folder of your own)');
+  });
+
+  it('the answerer reads nothing from an earlier plugin\'s lists', async () => {
+    const v = parseTeamSettings({ repo_roots: [REPO_ROOT], extra_folders: [MY_FOLDER] }, f.env);
+    const set = await buildAllowedSet({ version: 1, member: v, env: f.env });
+    expect(set.files.size).toBe(0);
+    expect(set.areas).toEqual([]);
   });
 });
 
@@ -134,11 +147,11 @@ describe('the file on disk', () => {
     const env = { ...f.env, XDG_CONFIG_HOME: join(f.root, 'xdg2') };
     const path = memberFoldersPath(env);
     expect(path).toBe(join(f.root, 'xdg2', 'team-relay', 'boundaries.local.json'));
-    expect(readTeamSettings(path, env, TEAM)).toEqual({ folders: [], dropped: [] });
+    expect(readTeamSettings(path, env, TEAM)).toEqual({ folders: [], previous: [] });
     writeMemberSettings(path, withTeam({ teams: {} }, TEAM, { folders: [REPO_ROOT] }), env);
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(statSync(join(f.root, 'xdg2', 'team-relay')).mode & 0o777).toBe(0o700);
-    expect(readTeamSettings(path, env, TEAM)).toEqual({ folders: [REPO_ROOT], dropped: [] });
+    expect(readTeamSettings(path, env, TEAM)).toEqual({ folders: [REPO_ROOT], previous: [] });
     chmodSync(path, 0o644);
     expect(() => readMemberSettings(path, env)).toThrow(MemberFoldersError);
     expect(() => readMemberSettings(path, env)).toThrow(/mode 644/);
@@ -151,18 +164,20 @@ describe('the file on disk', () => {
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ teams: { [TEAM]: { folders: [REPO_ROOT] } } });
   });
 
-  it('writing back keeps `folders` alone: the earlier lists, `accepted` and what was dropped are gone; other teams kept', () => {
+  it('after one save the active list is exactly what was chosen; the earlier lists and `accepted` are gone from the file', () => {
     writeFolders(f, [], { raw: { repo_roots: MANY.slice(0, 15), extra_folders: MANY.slice(15), accepted: { version: 2 } } });
     const file = memberFoldersPath(f.env);
     const before = readMemberSettings(file, f.env);
-    expect(teamSettings(before, TEAM).dropped).toEqual(MANY.slice(20));
-    writeMemberSettings(file, withTeam(before, TEAM, { folders: teamSettings(before, TEAM).folders }), f.env);
-    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ teams: { [TEAM]: { folders: MANY.slice(0, 20) } } });
-    expect(readTeamSettings(file, f.env, TEAM)).toEqual({ folders: MANY.slice(0, 20), dropped: [] });
-    // Another team's earlier lists are written as its folders too.
+    expect(teamSettings(before, TEAM).folders).toEqual([]);
+    expect(teamSettings(before, TEAM).previous).toHaveLength(25);
+    writeMemberSettings(file, withTeam(before, TEAM, { folders: [MY_FOLDER] }), f.env);
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ teams: { [TEAM]: { folders: [MY_FOLDER] } } });
+    expect(readTeamSettings(file, f.env, TEAM)).toEqual({ folders: [MY_FOLDER], previous: [] });
+    // Any write stores `folders` alone for every team: another team's earlier lists leave the file
+    // too, and that team reads no folders.
     writeFileSync(file, JSON.stringify({ teams: { [TEAM]: { folders: [REPO_ROOT] }, other: { repo_roots: [MY_FOLDER], extra_folders: [] } } }));
     writeMemberSettings(file, withTeam(readMemberSettings(file, f.env), TEAM, { folders: [] }), f.env);
-    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ teams: { [TEAM]: { folders: [] }, other: { folders: [MY_FOLDER] } } });
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ teams: { [TEAM]: { folders: [] }, other: { folders: [] } } });
     writeFolders(f, FOLDERS);
   });
 
@@ -224,7 +239,7 @@ describe('/team-relay:folders', () => {
     expect(one.team_boundaries).toEqual({ version: 1, topic: JSON.stringify(BOUNDARIES.topic) });
     expect(one.accepted).toEqual({ version: 1 });
     expect(one.answers_come_from).toBe(`2 of your folders (example-org, team); ${f.allowed.length} files`);
-    expect(one).not.toHaveProperty('dropped');
+    expect(one).not.toHaveProperty('previously_chosen');
     expect(dialogs).toEqual([]);
     const none = json(await foldersTool({ action: 'list' }, deps(tb(1, BOUNDARIES), 0)));
     expect(none.accepted).toBe(`nothing yet: teammates' questions to you are declined until you accept your team's boundaries in the console (${URL_})`);
@@ -249,12 +264,18 @@ describe('/team-relay:folders', () => {
     writeFolders(f, FOLDERS);
   });
 
-  it('list: what reading an earlier plugin\'s lists dropped, and how to keep the list as it is now', async () => {
-    writeFolders(f, [], { raw: { repo_roots: MANY.slice(0, 15), extra_folders: MANY.slice(15) } });
+  it('list: the folders chosen before 13 Nov 2026, never read from, and how to add them again', async () => {
+    writeFolders(f, [], { raw: { repo_roots: [REPO_ROOT], extra_folders: [MY_FOLDER] } });
     const r = json(await foldersTool({}, deps(tb(1, BOUNDARIES), 1)));
-    expect((r.folders as unknown[]).length).toBe(20);
-    expect(r.dropped).toEqual(MANY.slice(20));
-    expect(r.dropped_note).toBe(droppedSentence(MANY.slice(20)));
+    expect(r.folders).toEqual([]);
+    expect(r.previously_chosen).toEqual([
+      { path: REPO_ROOT, kind: 'repo_root' },
+      { path: MY_FOLDER, kind: 'own_folder' },
+    ]);
+    expect(r.previously_chosen_note).toBe(
+      'Folders you chose before 13 Nov 2026 (not used now; add the ones you still want with /team-relay:folders add <path>): ~/code/example-org (repository root), ~/notes/team (folder of your own).',
+    );
+    expect(r.answers_come_from).toBe('none of your folders; 0 files');
     writeFolders(f, FOLDERS);
   });
 
@@ -288,10 +309,10 @@ describe('/team-relay:folders', () => {
     writeFolders(f, FOLDERS);
   });
 
-  it('saving a migrated list makes it permanent: the earlier lists become `folders`', async () => {
+  it('adding one folder saves exactly the chosen list: the earlier lists leave the file and are never read', async () => {
     writeFolders(f, [], { raw: { repo_roots: [REPO_ROOT], extra_folders: [], accepted: null } });
     await foldersTool({ action: 'add', path: MY_FOLDER }, deps(tb(1, BOUNDARIES), 1));
-    expect(JSON.parse(readFileSync(memberFoldersPath(f.env), 'utf8'))).toEqual({ teams: { [TEAM]: { folders: [REPO_ROOT, MY_FOLDER] } } });
+    expect(JSON.parse(readFileSync(memberFoldersPath(f.env), 'utf8'))).toEqual({ teams: { [TEAM]: { folders: [MY_FOLDER] } } });
     writeFolders(f, FOLDERS);
   });
 
@@ -317,8 +338,8 @@ describe('/team-relay:folders', () => {
     chmodSync(file, 0o600);
     await foldersTool({ action: 'add', path: MY_FOLDER }, deps(tb(1, BOUNDARIES), 1));
     const all = readMemberSettings(file, f.env);
-    expect(teamSettings(all, 'other')).toEqual({ folders: [MY_FOLDER], dropped: [] });
-    expect(teamSettings(all, TEAM)).toEqual({ folders: [REPO_ROOT, MY_FOLDER], dropped: [] });
+    expect(teamSettings(all, 'other')).toEqual({ folders: [MY_FOLDER], previous: [] });
+    expect(teamSettings(all, TEAM)).toEqual({ folders: [REPO_ROOT, MY_FOLDER], previous: [] });
     writeFolders(f, FOLDERS);
   });
 });

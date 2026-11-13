@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setConsoleKey } from '@/api/key'
 import { setTransport } from '@/api/client'
 import { App } from '@/App'
-import { BACKGROUND_FAILED_TEXT, BACKGROUND_TEXT, droppedText, FINISHED_TEXT, FOLDERS_HINT, NO_CHOOSER_TEXT, resetSetupFinished } from '@/components/console/local-setup'
+import { BACKGROUND_FAILED_TEXT, BACKGROUND_TEXT, FINISHED_TEXT, FOLDERS_HINT, NO_CHOOSER_TEXT, PREVIOUS_TEXT, resetSetupFinished } from '@/components/console/local-setup'
 import { FOLDERS_TODO, inviteMessage } from '@/lib/setup'
 import { MockRelay, mockStatus } from '@/mock/relay'
 import { renderWithClient, setHidden } from './render'
@@ -384,7 +384,7 @@ describe('the Members panel and the invite message (M11 §6)', () => {
 // /api/local/*: the Setup view then shows the local steps (signed in, accept, folders, background
 // answering, Done). Folders are added only through the Mac's folder chooser (the server opens it).
 describe('the local Setup page of /team-relay:setup', () => {
-  type Local = { folders: string[]; dropped?: string[]; chooser: boolean; installed: boolean; choice?: unknown; available?: boolean; reason?: string; failInstall?: boolean }
+  type Local = { folders: string[]; previous?: Array<{ path: string; kind: 'repo_root' | 'own_folder' }>; chooser: boolean; installed: boolean; choice?: unknown; available?: boolean; reason?: string; failInstall?: boolean }
   function localServer(local: Local) {
     return server({
       override: (c) => {
@@ -393,7 +393,7 @@ describe('the local Setup page of /team-relay:setup', () => {
           return json({
             signed_in: { member: 'alice', team: 'demo', email: 'alice@example.com' },
             folders: local.folders,
-            ...(local.dropped ? { dropped: local.dropped } : {}),
+            previous: local.previous ?? [],
             chooser: local.chooser,
             background: { installed: local.installed, available: local.available ?? true, ...(local.reason ? { reason: local.reason } : {}) },
             limits: { max_folders: 20 },
@@ -472,25 +472,51 @@ describe('the local Setup page of /team-relay:setup', () => {
     expect(s.calls.filter((c) => c.path === '/api/local/folders/choose').every((c) => JSON.stringify(c.body) === '{}')).toBe(true)
   })
 
-  it('folders an earlier setup held past 20 are named as dropped, until the list is saved', async () => {
+  it('folders chosen before one folder list are listed as plain text, until added again with the chooser', async () => {
     window.history.replaceState(null, '', '/join')
-    const folders = Array.from({ length: 20 }, (_, i) => `~/code/project-${i}`)
-    localServer({ folders, dropped: ['~/code/extra-a', '~/notes/extra-b'], chooser: true, installed: true })
+    const local: Local = {
+      folders: ['~/code/example-org'],
+      previous: [
+        { path: '~/code', kind: 'repo_root' },
+        { path: '~/notes', kind: 'own_folder' },
+        // Already in the list: not shown.
+        { path: '~/code/example-org', kind: 'own_folder' },
+      ],
+      chooser: true,
+      installed: true,
+      choice: { added: ['~/notes'], refused: [], cancelled: false, folders: ['~/code/example-org', '~/notes'] },
+    }
+    const s = localServer(local)
     const user = userEvent.setup()
     renderWithClient(<App />)
     const panel = await localPanel()
-    const note = await waitFor(() => {
-      const el = panel.querySelector('[data-dropped]')
+    const block = await waitFor(() => {
+      const el = panel.querySelector('[data-previous]')
       expect(el).not.toBeNull()
       return el as HTMLElement
     })
-    expect(note).toHaveTextContent(droppedText(['~/code/extra-a', '~/notes/extra-b']))
-    expect(note).toHaveTextContent('Only 20 folders can be used: ~/code/extra-a, ~/notes/extra-b were dropped.')
-    // At the limit: no more can be added.
-    expect(within(panel).getByRole('button', { name: 'Add folder' })).toBeDisabled()
-    await user.click(within(panel).getByRole('button', { name: 'Remove ~/code/project-0' }))
-    await waitFor(() => expect(panel.querySelector('[data-dropped]')).toBeNull())
-    expect(droppedText(['~/a'])).toMatch(/~\/a was dropped\./)
+    expect(PREVIOUS_TEXT).toBe('Folders you chose before this change — add the ones you still want with Add folder')
+    expect(within(block).getByText(PREVIOUS_TEXT)).toBeInTheDocument()
+    const items = within(block).getByRole('list', { name: 'Folders you chose before' })
+    expect([...items.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['~/code (repository root)', '~/notes (your own folder)'])
+    // No way to add an old path directly: no button or link in the list.
+    expect(within(items).queryByRole('button')).toBeNull()
+    expect(within(items).queryByRole('link')).toBeNull()
+    // Added again through the Mac's chooser (which sends no path): it leaves the old list.
+    await user.click(within(panel).getByRole('button', { name: 'Add folder' }))
+    await waitFor(() => expect(panel.querySelector('[data-previous-folder="~/notes"]')).toBeNull())
+    expect(panel.querySelector('[data-previous-folder="~/code"]')).not.toBeNull()
+    expect(s.calls.filter((c) => c.path === '/api/local/folders/choose').map((c) => c.body)).toEqual([{}])
+  })
+
+  it('nothing chosen before: no list of earlier folders', async () => {
+    window.history.replaceState(null, '', '/join')
+    localServer({ folders: ['~/code/example-org'], chooser: true, installed: true })
+    renderWithClient(<App />)
+    const panel = await localPanel()
+    await within(panel).findByText('~/code/example-org')
+    expect(panel.querySelector('[data-previous]')).toBeNull()
+    expect(panel.textContent).not.toContain(PREVIOUS_TEXT)
   })
 
   it('turning background answering off applies at once, and Done then changes nothing more', async () => {
@@ -590,7 +616,7 @@ describe('the local Setup page of /team-relay:setup', () => {
   it('a failed load says so and tries again', async () => {
     window.history.replaceState(null, '', '/join')
     let fail = true
-    server({ override: (c) => (c.path === '/api/local/setup' ? (fail ? json({ error: 'internal' }, 500) : json({ signed_in: { member: 'alice', team: 'demo', email: null }, folders: [], chooser: true, background: { installed: false, available: true }, limits: { max_folders: 20 } })) : null) })
+    server({ override: (c) => (c.path === '/api/local/setup' ? (fail ? json({ error: 'internal' }, 500) : json({ signed_in: { member: 'alice', team: 'demo', email: null }, folders: [], previous: [], chooser: true, background: { installed: false, available: true }, limits: { max_folders: 20 } })) : null) })
     const user = userEvent.setup()
     renderWithClient(<App />)
     const alert = await screen.findByText(/Your setup didn't load/)
