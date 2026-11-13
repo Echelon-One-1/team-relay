@@ -405,21 +405,6 @@ var RelayClient = class _RelayClient {
   setBoundaries(body, opts) {
     return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
   }
-  /**
-   * PICKERS-SPEC §3.5 (owners): the GitHub App's install link and the Google Picker's public
-   * settings. Never a key or a token.
-   */
-  sourcesConfig(opts) {
-    return this.call("GET", this.teamPath("sources", "config"), void 0, opts);
-  }
-  /**
-   * PICKERS-SPEC §3.6 (owners): the repositories of the allowed orgs where the relay's GitHub App
-   * is installed. Not configured: 404 github_not_configured; GitHub's rate limit: 503
-   * github_rate_limited with a Retry-After (RelayError.retryAfter).
-   */
-  sourcesGithub(opts) {
-    return this.call("GET", this.teamPath("sources", "github"), void 0, opts);
-  }
   /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
   acceptance(opts) {
     return this.call("GET", this.teamPath("me", "acceptance"), void 0, opts);
@@ -439,14 +424,6 @@ var RelayClient = class _RelayClient {
   /** M11-SPEC §4: this member's recent requests, newest first. */
   myRequests(limit = 20, opts) {
     return this.call("GET", this.teamPath("me", "requests") + `?limit=${limit}`, void 0, opts);
-  }
-  /**
-   * M10-SPEC §2a: the Desktop OAuth client members use to connect Google Drive (read-only).
-   * An installed-app client is not confidential (Google's rule); it is served to members so it
-   * stays out of git. Not configured: 404 drive_not_configured.
-   */
-  driveClient(opts) {
-    return this.call("GET", this.teamPath("drive-client"), void 0, opts);
   }
   /** M6-SPEC §2: the team's roster (owners see every email; members only their own). */
   roster(opts) {

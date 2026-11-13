@@ -11,24 +11,12 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
   if (typeof require !== "undefined") return require.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
-var __esm = (fn, res, err) => function __init() {
-  if (err) throw err[0];
-  try {
-    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
-  } catch (e) {
-    throw err = [e], e;
-  }
-};
 var __commonJS = (cb, mod) => function __require2() {
   try {
     return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
   } catch (e) {
     throw mod = 0, e;
   }
-};
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
 };
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
@@ -6361,15 +6349,15 @@ var require_parser = __commonJS({
     var node_process = __require("process");
     var cst = require_cst();
     var lexer = require_lexer();
-    function includesToken(list2, type) {
-      for (let i = 0; i < list2.length; ++i)
-        if (list2[i].type === type)
+    function includesToken(list, type) {
+      for (let i = 0; i < list.length; ++i)
+        if (list[i].type === type)
           return true;
       return false;
     }
-    function findNonEmptyIndex(list2) {
-      for (let i = 0; i < list2.length; ++i) {
-        switch (list2[i].type) {
+    function findNonEmptyIndex(list) {
+      for (let i = 0; i < list.length; ++i) {
+        switch (list[i].type) {
           case "space":
           case "comment":
           case "newline":
@@ -14801,1009 +14789,47 @@ var require__ = __commonJS({
   }
 });
 
-// src/relay-client-core.ts
-function parseRelayUrl(raw) {
-  if (!raw) throw new Error("RELAY_URL must be set");
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error("RELAY_URL is not a valid URL");
-  }
-  if (url.username || url.password) throw new Error("RELAY_URL must not carry credentials");
-  if (url.search || url.hash) throw new Error("RELAY_URL must not carry a query or fragment");
-  if (url.protocol === "https:") return url;
-  if (url.protocol === "http:" && LOOPBACK.has(url.hostname)) return url;
-  throw new Error("RELAY_URL must be https (plain http is allowed only to localhost)");
-}
-var TEAM_RE, MEMBER_RE, LOOPBACK;
-var init_relay_client_core = __esm({
-  "src/relay-client-core.ts"() {
-    "use strict";
-    TEAM_RE = /^[a-z][a-z0-9_-]{1,31}$/;
-    MEMBER_RE = /^[a-z][a-z0-9_]{1,31}$/;
-    LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
-  }
-});
-
-// src/credentials.ts
-import {
-  chmodSync,
-  closeSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync as readFileSync2,
-  renameSync,
-  rmSync,
-  unlinkSync,
-  writeSync
-} from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { basename, dirname, isAbsolute as isAbsolute2, join as join2 } from "node:path";
-function credentialsPath(env = process.env) {
-  const explicit = env.RELAY_CREDENTIALS_FILE?.trim();
-  if (explicit) {
-    if (!isAbsolute2(explicit)) throw new CredentialFileError("RELAY_CREDENTIALS_FILE must be an absolute path");
-    return explicit;
-  }
-  const xdg = env.XDG_CONFIG_HOME?.trim();
-  const base = xdg && isAbsolute2(xdg) ? xdg : join2(env.HOME?.trim() || homedir2(), ".config");
-  return join2(base, CREDENTIALS_DIR, CREDENTIALS_FILE);
-}
-function uid() {
-  return typeof process.getuid === "function" ? process.getuid() : null;
-}
-function checkOwnedPrivate(st, what, kind) {
-  if (st.isSymbolicLink()) throw new CredentialFileError(`${what} is a symbolic link; refusing to use it`);
-  if (kind === "file" ? !st.isFile() : !st.isDirectory()) throw new CredentialFileError(`${what} is not a ${kind}; refusing to use it`);
-  const me = uid();
-  if (me !== null && st.uid !== me) throw new CredentialFileError(`${what} is owned by another user; refusing to use it`);
-  if ((st.mode & 63) !== 0) {
-    const mode = (st.mode & 511).toString(8).padStart(3, "0");
-    throw new CredentialFileError(
-      `${what} has mode ${mode}, readable or writable by others; refusing to use it (run /team-relay:logout and /team-relay:login again, or chmod ${kind === "file" ? "600" : "700"} it)`
-    );
-  }
-}
-function normaliseRelayUrl(raw) {
-  const url = parseRelayUrl(raw);
-  const path = url.pathname.replace(/\/+$/, "");
-  return `${url.protocol}//${url.host}${path}`;
-}
-function parseStoredCredential(raw) {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new CredentialFileError("the credential file is not a JSON object");
-  const c = raw;
-  const { relay_url, team, member, credential, expires_at, email: email2 } = c;
-  if (typeof relay_url !== "string") throw new CredentialFileError("the credential file has no relay_url");
-  let url;
-  try {
-    url = normaliseRelayUrl(relay_url);
-  } catch {
-    throw new CredentialFileError("the credential file has an invalid relay_url");
-  }
-  if (typeof team !== "string" || !TEAM_RE.test(team)) throw new CredentialFileError("the credential file has an invalid team");
-  if (typeof member !== "string" || !MEMBER_RE.test(member)) throw new CredentialFileError("the credential file has an invalid member");
-  if (typeof credential !== "string" || !CREDENTIAL_RE.test(credential)) throw new CredentialFileError("the credential file has an invalid credential");
-  if (expires_at !== void 0 && expires_at !== null && (typeof expires_at !== "string" || !RFC3339.test(expires_at))) {
-    throw new CredentialFileError("the credential file has an invalid expires_at");
-  }
-  if (email2 !== void 0 && email2 !== null && (typeof email2 !== "string" || email2.length > 254 || !EMAIL_RE2.test(email2))) {
-    throw new CredentialFileError("the credential file has an invalid email");
-  }
-  return {
-    relay_url: url,
-    team,
-    member,
-    credential,
-    expires_at: typeof expires_at === "string" ? expires_at : null,
-    ...typeof email2 === "string" ? { email: email2 } : {}
-  };
-}
-function readCredential(path) {
-  let st;
-  try {
-    st = lstatSync(path);
-  } catch (err) {
-    if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
-    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
-  }
-  checkOwnedPrivate(lstatSync(dirname(path)), "the credential directory", "directory");
-  checkOwnedPrivate(st, "the credential file", "file");
-  if (st.size > MAX_FILE_BYTES) throw new CredentialFileError("the credential file is too large");
-  let text;
-  try {
-    text = readFileSync2(path, "utf8");
-  } catch (err) {
-    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
-  }
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new CredentialFileError("the credential file is not valid JSON");
-  }
-  return parseStoredCredential(json);
-}
-function credentialFileExists(path) {
-  try {
-    lstatSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-var CREDENTIAL_RE, EMAIL_RE2, CREDENTIALS_DIR, CREDENTIALS_FILE, MAX_FILE_BYTES, CredentialFileError, RFC3339;
-var init_credentials = __esm({
-  "src/credentials.ts"() {
-    "use strict";
-    init_relay_client_core();
-    CREDENTIAL_RE = /^trc_[A-Za-z0-9_-]{43}$/;
-    EMAIL_RE2 = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})+$/;
-    CREDENTIALS_DIR = "team-relay";
-    CREDENTIALS_FILE = "credentials.json";
-    MAX_FILE_BYTES = 16 * 1024;
-    CredentialFileError = class extends Error {
-      constructor(message2) {
-        super(message2);
-        this.name = "CredentialFileError";
-      }
-    };
-    RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
-  }
-});
-
-// src/relay-default.ts
-import { readFileSync as readFileSync3 } from "node:fs";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
-function defaultRelayFile() {
-  return fileURLToPath2(new URL("../relay.default.json", import.meta.url));
-}
-function defaultRelayUrl(file = defaultRelayFile()) {
-  try {
-    const raw = JSON.parse(readFileSync3(file, "utf8"));
-    if (typeof raw.relay_url !== "string") return null;
-    parseRelayUrl(raw.relay_url);
-    return raw.relay_url;
-  } catch {
-    return null;
-  }
-}
-var init_relay_default = __esm({
-  "src/relay-default.ts"() {
-    "use strict";
-    init_relay_client_core();
-  }
-});
-
-// src/relay-client.ts
-var relay_client_exports = {};
-__export(relay_client_exports, {
-  CLIENT_IP_HASH_RE: () => CLIENT_IP_HASH_RE,
-  DEFAULT_BACKOFF: () => DEFAULT_BACKOFF,
-  GCLOUD_AUDIENCE: () => GCLOUD_AUDIENCE,
-  MEMBER_RE: () => MEMBER_RE,
-  MESSAGE_ID_RE: () => MESSAGE_ID_RE,
-  METADATA_BASE: () => METADATA_BASE,
-  NotConnected: () => NotConnected,
-  REQUEST_ID_RE: () => REQUEST_ID_RE,
-  RETRY_AFTER_MAX_S: () => RETRY_AFTER_MAX_S,
-  RelayClient: () => RelayClient,
-  RelayError: () => RelayError,
-  RelayNetworkError: () => RelayNetworkError,
-  SIGN_IN_AGAIN: () => SIGN_IN_AGAIN,
-  TEAM_RE: () => TEAM_RE,
-  TOKEN_REFRESH_MARGIN_MS: () => TOKEN_REFRESH_MARGIN_MS,
-  authModeFromEnv: () => authModeFromEnv,
-  backoffDelay: () => backoffDelay,
-  checkGcloudAccount: () => checkGcloudAccount,
-  configValue: () => configValue,
-  connectionFromEnv: () => connectionFromEnv,
-  credentialTokenProvider: () => credentialTokenProvider,
-  credentialsFromEnv: () => credentialsFromEnv,
-  gcloudTokenProvider: () => gcloudTokenProvider,
-  isCredentialProvider: () => isCredentialProvider,
-  isRetryable: () => isRetryable,
-  jwtExpiryMs: () => jwtExpiryMs,
-  metadataTokenProvider: () => metadataTokenProvider,
-  parseRelayUrl: () => parseRelayUrl,
-  parseRetryAfter: () => parseRetryAfter,
-  relayClientFromEnv: () => relayClientFromEnv,
-  staticTokenProvider: () => staticTokenProvider,
-  tokenProviderFromEnv: () => tokenProviderFromEnv
-});
-import { execFile } from "node:child_process";
-import { readFileSync as readFileSync4 } from "node:fs";
-function parseRetryAfter(v) {
-  const t = v?.trim();
-  if (!t || !/^[0-9]{1,10}$/.test(t)) return void 0;
-  return Math.min(RETRY_AFTER_MAX_S, Number(t));
-}
-function isRetryable(err) {
-  if (err instanceof RelayNetworkError) return true;
-  if (err instanceof RelayError) return err.status >= 500 || err.status === 429;
-  return false;
-}
-function backoffDelay(attempt, b = DEFAULT_BACKOFF, random = Math.random) {
-  const exp = Math.min(b.maxMs, b.baseMs * 2 ** Math.min(attempt, 30));
-  return Math.round(exp / 2 + random() * (exp / 2));
-}
-function configValue(v) {
-  if (v === void 0) return void 0;
-  const t = v.trim();
-  if (!t || /^\$\{user_config\.[A-Za-z0-9_]+\}$/.test(t)) return void 0;
-  return t;
-}
-function staticTokenProvider(read) {
-  return Object.assign(typeof read === "string" ? () => read : read, { kind: "static" });
-}
-function tokenProviderFromEnv(env) {
-  const file = configValue(env.RELAY_TOKEN_FILE);
-  if (file) {
-    return staticTokenProvider(() => {
-      let raw;
-      try {
-        raw = readFileSync4(file, "utf8");
-      } catch (err) {
-        throw new Error(`cannot read RELAY_TOKEN_FILE (${err.code ?? "error"})`);
-      }
-      const token2 = raw.replace(/[\r\n]+$/, "");
-      if (!token2) throw new Error("RELAY_TOKEN_FILE is empty");
-      return token2;
-    });
-  }
-  const token = configValue(env.RELAY_TOKEN);
-  if (!token) throw new Error('RELAY_AUTH is "token", so RELAY_TOKEN or RELAY_TOKEN_FILE must be set');
-  return staticTokenProvider(token);
-}
-function checkGcloudAccount(account) {
-  if (account.length > 254 || !ACCOUNT_RE.test(account)) {
-    throw new Error("RELAY_GCLOUD_ACCOUNT must be an account email address");
-  }
-  return account;
-}
-function jwtExpiryMs(token) {
-  const payload = token.split(".")[1];
-  if (!payload) return null;
-  try {
-    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return typeof claims.exp === "number" && Number.isFinite(claims.exp) ? claims.exp * 1e3 : null;
-  } catch {
-    return null;
-  }
-}
-function scrub(text) {
-  return text.replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/ya29\.[A-Za-z0-9_.-]+/g, "[redacted]").replace(/[\x00-\x1f\x7f]+/g, " ").trim().slice(0, 200);
-}
-function gcloudTokenProvider(opts = {}) {
-  const now = opts.now ?? Date.now;
-  const env = opts.env ?? process.env;
-  const timeoutMs = opts.timeoutMs ?? 3e4;
-  const args = ["auth", "print-identity-token"];
-  if (opts.account !== void 0) args.push(`--account=${checkGcloudAccount(opts.account)}`);
-  let cached = null;
-  let inflight = null;
-  const mint = () => new Promise((resolve, reject) => {
-    execFile(
-      "gcloud",
-      args,
-      { env, timeout: timeoutMs, maxBuffer: GCLOUD_OUTPUT_LIMIT, shell: false, windowsHide: true, encoding: "utf8" },
-      (err, stdout, stderr) => {
-        if (err) {
-          const e = err;
-          if (e.code === "ENOENT") return reject(new Error("gcloud was not found on PATH (RELAY_AUTH=google needs the Google Cloud CLI)"));
-          if (e.killed) return reject(new Error("gcloud auth print-identity-token timed out"));
-          const why = scrub(String(stderr ?? "").split("\n").find((l) => l.trim()) ?? "");
-          return reject(new Error(`gcloud auth print-identity-token failed${why ? `: ${why}` : ""}`));
-        }
-        const token = String(stdout).trim();
-        if (!JWT_RE.test(token)) return reject(new Error("gcloud auth print-identity-token did not print an ID token"));
-        resolve(token);
-      }
-    );
-  });
-  const provider = Object.assign(async () => {
-    if (cached && now() < cached.until) return cached.token;
-    inflight ??= mint().then((token) => {
-      const exp = jwtExpiryMs(token);
-      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
-      return token;
-    }).finally(() => {
-      inflight = null;
-    });
-    return inflight;
-  }, {
-    invalidate: () => {
-      cached = null;
-    }
-  });
-  return provider;
-}
-function metadataTokenProvider(opts) {
-  const now = opts.now ?? Date.now;
-  const doFetch = opts.fetch ?? ((u, i) => fetch(u, i));
-  const timeoutMs = opts.timeoutMs ?? 5e3;
-  if (!opts.audience) throw new Error("RELAY_AUTH=metadata needs RELAY_URL as the token audience");
-  const url = new URL(METADATA_IDENTITY_PATH, opts.base ?? METADATA_BASE);
-  url.searchParams.set("audience", opts.audience);
-  url.searchParams.set("format", "full");
-  const target = url.toString();
-  let cached = null;
-  let inflight = null;
-  const mint = async () => {
-    let res;
-    try {
-      res = await doFetch(target, {
-        method: "GET",
-        headers: { "Metadata-Flavor": "Google" },
-        redirect: "error",
-        signal: AbortSignal.timeout(timeoutMs)
-      });
-    } catch {
-      throw new Error("the metadata server did not answer (RELAY_AUTH=metadata runs only on Google Cloud)");
-    }
-    const text = await res.text().catch(() => "");
-    if (!res.ok) throw new Error(`the metadata server refused an identity token (${res.status})`);
-    const token = text.trim();
-    if (token.length > METADATA_OUTPUT_LIMIT || !JWT_RE.test(token)) throw new Error("the metadata server did not return an ID token");
-    return token;
-  };
-  return Object.assign(async () => {
-    if (cached && now() < cached.until) return cached.token;
-    inflight ??= mint().then((token) => {
-      const exp = jwtExpiryMs(token);
-      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
-      return token;
-    }).finally(() => {
-      inflight = null;
-    });
-    return inflight;
-  }, {
-    invalidate: () => {
-      cached = null;
-    }
-  });
-}
-function authModeFromEnv(env) {
-  const explicit = configValue(env.RELAY_AUTH);
-  if (explicit === void 0) return credentialFileExists(credentialsPath(env)) ? "credential" : "google";
-  if (explicit !== "credential" && explicit !== "google" && explicit !== "token" && explicit !== "metadata") {
-    throw new Error('RELAY_AUTH must be "credential", "google" or "token" (or "metadata" on Google Cloud)');
-  }
-  return explicit;
-}
-function credentialTokenProvider(path, bound) {
-  const relay = normaliseRelayUrl(bound.relay_url);
-  return Object.assign(
-    () => {
-      const stored = readCredential(path);
-      if (!stored) throw new NotConnected();
-      if (stored.relay_url !== relay || stored.team !== bound.team) {
-        throw new NotConnected("you signed in to another relay or team since this started: restart it");
-      }
-      return stored.credential;
-    },
-    { kind: "credential", path }
-  );
-}
-function isCredentialProvider(p) {
-  return p.kind === "credential";
-}
-function connectionFromEnv(env, gcloud = {}) {
-  const explicitMode = configValue(env.RELAY_AUTH) !== void 0;
-  const mode = authModeFromEnv(env);
-  if (mode === "credential") {
-    const path = credentialsPath(env);
-    const stored = readCredential(path);
-    if (!stored) throw new NotConnected();
-    const envUrl = configValue(env.RELAY_URL);
-    if (envUrl !== void 0) {
-      let same = false;
-      try {
-        same = normaliseRelayUrl(envUrl) === stored.relay_url;
-      } catch {
-        same = false;
-      }
-      if (!same) {
-        throw new Error("RELAY_URL is not the relay you signed in to: unset it, or run /team-relay:logout and then /team-relay:login to sign in to it");
-      }
-    }
-    const envTeam = configValue(env.RELAY_TEAM);
-    if (envTeam !== void 0 && envTeam !== stored.team) {
-      throw new Error("RELAY_TEAM is not the team you signed in to: unset it, or run /team-relay:login again");
-    }
-    return { mode, url: stored.relay_url, team: stored.team, member: stored.member, token: credentialTokenProvider(path, stored) };
-  }
-  const team = configValue(env.RELAY_TEAM);
-  if (!team) {
-    if (!explicitMode) throw new NotConnected();
-    throw new Error("RELAY_TEAM must be set");
-  }
-  const url = configValue(env.RELAY_URL) ?? (mode === "google" ? defaultRelayUrl() : null) ?? "";
-  let token;
-  if (mode === "token") token = tokenProviderFromEnv(env);
-  else if (mode === "metadata") token = metadataTokenProvider({ audience: configValue(env.RELAY_URL) ?? "" });
-  else {
-    const account = configValue(env.RELAY_GCLOUD_ACCOUNT);
-    token = gcloudTokenProvider({ env, ...gcloud, ...account !== void 0 ? { account } : {} });
-  }
-  return { mode, url, team, token };
-}
-function credentialsFromEnv(env, gcloud = {}) {
-  const mode = authModeFromEnv(env);
-  if (mode === "credential") return connectionFromEnv(env, gcloud).token;
-  if (mode === "token") return tokenProviderFromEnv(env);
-  if (mode === "metadata") return metadataTokenProvider({ audience: configValue(env.RELAY_URL) ?? "" });
-  const account = configValue(env.RELAY_GCLOUD_ACCOUNT);
-  return gcloudTokenProvider({ env, ...gcloud, ...account !== void 0 ? { account } : {} });
-}
-function relayClientFromEnv(env, extra = {}) {
-  const c = connectionFromEnv(env);
-  return new RelayClient({ url: c.url, team: c.team, token: c.token, ...extra });
-}
-var REQUEST_ID_RE, MESSAGE_ID_RE, RelayError, RETRY_AFTER_MAX_S, RelayNetworkError, DEFAULT_BACKOFF, GCLOUD_AUDIENCE, TOKEN_REFRESH_MARGIN_MS, JWT_RE, ACCOUNT_RE, GCLOUD_OUTPUT_LIMIT, METADATA_BASE, METADATA_IDENTITY_PATH, METADATA_OUTPUT_LIMIT, NotConnected, SIGN_IN_AGAIN, CLIENT_IP_HASH_RE, ON_BEHALF_OF_RE, defaultSleep, RelayClient;
-var init_relay_client = __esm({
-  "src/relay-client.ts"() {
-    "use strict";
-    init_credentials();
-    init_relay_client_core();
-    init_relay_default();
-    REQUEST_ID_RE = /^rq_[0-9a-f]{32}$/;
-    MESSAGE_ID_RE = /^msg_[0-9a-f]{32}$/;
-    RelayError = class extends Error {
-      status;
-      code;
-      detail;
-      /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
-      retryAfter;
-      constructor(status, code, detail, retryAfter) {
-        super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
-        this.name = "RelayError";
-        this.status = status;
-        this.code = code;
-        this.detail = detail;
-        this.retryAfter = retryAfter;
-      }
-    };
-    RETRY_AFTER_MAX_S = 3600;
-    RelayNetworkError = class extends Error {
-      constructor(message2) {
-        super(message2);
-        this.name = "RelayNetworkError";
-      }
-    };
-    DEFAULT_BACKOFF = { baseMs: 1e3, maxMs: 3e4 };
-    GCLOUD_AUDIENCE = "32555940559.apps.googleusercontent.com";
-    TOKEN_REFRESH_MARGIN_MS = 5 * 6e4;
-    JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
-    ACCOUNT_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
-    GCLOUD_OUTPUT_LIMIT = 64 * 1024;
-    METADATA_BASE = "http://metadata.google.internal";
-    METADATA_IDENTITY_PATH = "/computeMetadata/v1/instance/service-accounts/default/identity";
-    METADATA_OUTPUT_LIMIT = 16 * 1024;
-    NotConnected = class extends Error {
-      constructor(message2 = "Not connected: run /team-relay:login") {
-        super(message2);
-        this.name = "NotConnected";
-      }
-    };
-    SIGN_IN_AGAIN = "the relay refused your sign-in (signed out, expired, or no longer on the team): run /team-relay:login again";
-    CLIENT_IP_HASH_RE = /^[0-9a-f]{64}$/;
-    ON_BEHALF_OF_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,253}$/;
-    defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    RelayClient = class _RelayClient {
-      team;
-      opts;
-      base;
-      token;
-      backoff;
-      attempts;
-      timeoutMs;
-      sleep;
-      random;
-      userAgent;
-      constructor(opts) {
-        if (!TEAM_RE.test(opts.team)) throw new Error("RELAY_TEAM is not a valid team id");
-        this.opts = opts;
-        this.team = opts.team;
-        const base = parseRelayUrl(opts.url);
-        if (!base.pathname.endsWith("/")) base.pathname += "/";
-        this.base = base;
-        this.token = opts.token;
-        this.backoff = opts.backoff ?? DEFAULT_BACKOFF;
-        this.attempts = Math.max(1, opts.attempts ?? 4);
-        this.timeoutMs = opts.timeoutMs ?? 3e4;
-        this.sleep = opts.sleep ?? defaultSleep;
-        this.random = opts.random ?? Math.random;
-        this.userAgent = opts.userAgent ?? "team-relay-plugin/0.1.0";
-      }
-      /**
-       * The same relay, sign-in and settings for another team (M9-SPEC §5: the hosted console's
-       * delegate reads any team its viewer is on). The team id is checked like RELAY_TEAM.
-       */
-      withTeam(team) {
-        if (team === this.team) return this;
-        return new _RelayClient({ ...this.opts, team });
-      }
-      /**
-       * True when this client signs in with a stored device credential or a static token, which
-       * are bound to one team (no Google identity for the account routes).
-       */
-      get boundToTeam() {
-        return isCredentialProvider(this.token) || this.token.kind === "static";
-      }
-      /** The relay's base URL (without a trailing slash). */
-      get url() {
-        return this.base.toString().replace(/\/$/, "");
-      }
-      teamPath(...parts) {
-        return ["v1", "teams", this.team, ...parts].map(encodeURIComponent).join("/");
-      }
-      async once(method, path, body, timeoutMs, signal, onBehalfOf, clientIpHash2) {
-        const url = new URL(path, this.base);
-        const headers = {
-          Accept: "application/json",
-          Authorization: `Bearer ${await this.token()}`,
-          "User-Agent": this.userAgent
-        };
-        if (onBehalfOf !== void 0) {
-          if (!ON_BEHALF_OF_RE.test(onBehalfOf)) throw new Error("X-Relay-On-Behalf-Of must be a lower-case email address");
-          headers["X-Relay-On-Behalf-Of"] = onBehalfOf;
-        }
-        if (clientIpHash2 !== void 0) {
-          if (!CLIENT_IP_HASH_RE.test(clientIpHash2)) throw new Error("X-Relay-Client-IP-Hash must be 64 lower-case hex characters");
-          headers["X-Relay-Client-IP-Hash"] = clientIpHash2;
-        }
-        let payload;
-        if (body !== void 0) {
-          headers["Content-Type"] = "application/json";
-          payload = JSON.stringify(body);
-        }
-        const timeout = AbortSignal.timeout(timeoutMs);
-        const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-        let res;
-        try {
-          res = await fetch(url, { method, headers, body: payload, signal: combined, redirect: "error" });
-        } catch (err) {
-          if (signal?.aborted) throw err;
-          const e = err;
-          const why = e.cause?.code ?? e.cause?.message ?? (e.name === "TimeoutError" ? "timed out" : e.name);
-          throw new RelayNetworkError(`relay unreachable (${String(why).slice(0, 120)})`);
-        }
-        let text;
-        try {
-          text = await res.text();
-        } catch {
-          throw new RelayNetworkError("relay response was cut off");
-        }
-        let json = void 0;
-        if (text) {
-          try {
-            json = JSON.parse(text);
-          } catch {
-            if (res.ok) throw new RelayNetworkError(`relay answered ${res.status} with a body that is not JSON`);
-          }
-        }
-        if (!res.ok) {
-          const obj = json && typeof json === "object" ? json : {};
-          const code = typeof obj.error === "string" ? obj.error : `http_${res.status}`;
-          const detail = typeof obj.detail === "string" ? obj.detail.slice(0, 500) : "";
-          throw new RelayError(res.status, code, detail, parseRetryAfter(res.headers.get("retry-after")));
-        }
-        return json;
-      }
-      /**
-       * One call with retry and exponential backoff on network errors, 5xx and 429. A 401 with
-       * a refreshable identity drops the cached token and retries once at once (M2-SPEC §2).
-       */
-      async call(method, path, body, opts = {}) {
-        const attempts = Math.max(1, opts.attempts ?? this.attempts);
-        const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
-        let refreshed = false;
-        for (let attempt = 0; ; ) {
-          try {
-            return await this.once(method, path, body, timeoutMs, opts.signal, opts.onBehalfOf, opts.clientIpHash);
-          } catch (err) {
-            if (opts.signal?.aborted) throw err;
-            if (err instanceof RelayError && err.status === 401 && !refreshed && this.token.invalidate) {
-              refreshed = true;
-              this.token.invalidate();
-              continue;
-            }
-            if (err instanceof RelayError && err.status === 401 && isCredentialProvider(this.token)) {
-              throw new RelayError(401, err.code, SIGN_IN_AGAIN);
-            }
-            if (attempt + 1 >= attempts || !isRetryable(err)) throw err;
-            await this.sleep(backoffDelay(attempt, this.backoff, this.random));
-            attempt++;
-          }
-        }
-      }
-      me(opts) {
-        return this.call("GET", this.teamPath("me"), void 0, opts);
-      }
-      publishManifest(member, manifest, opts) {
-        if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
-        return this.call(
-          "PUT",
-          this.teamPath("members", member, "manifest"),
-          manifest,
-          opts
-        );
-      }
-      directory(opts) {
-        return this.call("GET", this.teamPath("directory"), void 0, opts);
-      }
-      /**
-       * M7-SPEC §1: what waits in this member's inbox for their answering session. A peek: it moves
-       * no cursor and writes no presence, so a session without the channel may read it too.
-       */
-      inboxSummary(opts) {
-        return this.call("GET", this.teamPath("inbox", "summary"), void 0, opts);
-      }
-      /** Safe to retry: the idempotency key makes a repeated POST return the original request. */
-      createRequest(body, opts) {
-        return this.call("POST", this.teamPath("requests"), body, opts);
-      }
-      readStream(stream, q = {}, opts) {
-        const params = new URLSearchParams();
-        if (q.after !== void 0) params.set("after", String(q.after));
-        if (q.wait !== void 0) params.set("wait", String(q.wait));
-        if (q.limit !== void 0) params.set("limit", String(q.limit));
-        const qs = params.toString();
-        const timeoutMs = opts?.timeoutMs ?? (q.wait ?? 0) * 1e3 + 2e4;
-        return this.call("GET", this.teamPath("streams", stream) + (qs ? `?${qs}` : ""), void 0, {
-          ...opts,
-          timeoutMs
-        });
-      }
-      ackCursor(stream, ackedSeq, opts) {
-        return this.call("POST", this.teamPath("streams", stream, "cursor"), { acked_seq: ackedSeq }, opts);
-      }
-      checkRequestId(id) {
-        if (!REQUEST_ID_RE.test(id)) throw new Error("request_id must look like rq_ followed by 32 lowercase hex characters");
-      }
-      ackRequest(requestId2, opts) {
-        this.checkRequestId(requestId2);
-        return this.call("POST", this.teamPath("requests", requestId2, "ack"), {}, opts);
-      }
-      reply(requestId2, body, opts) {
-        this.checkRequestId(requestId2);
-        return this.call(
-          "POST",
-          this.teamPath("requests", requestId2, "reply"),
-          body,
-          opts
-        );
-      }
-      /** Not idempotent (it appends), so it is sent once unless the caller asks otherwise. */
-      progress(requestId2, body, opts) {
-        this.checkRequestId(requestId2);
-        return this.call("POST", this.teamPath("requests", requestId2, "progress"), body, {
-          attempts: 1,
-          ...opts
-        });
-      }
-      getRequest(requestId2, opts) {
-        this.checkRequestId(requestId2);
-        return this.call("GET", this.teamPath("requests", requestId2), void 0, opts);
-      }
-      /** M2-SPEC §3.3: a tool's name, outcome and duration only. Appends, so it is sent once. */
-      toolEvent(requestId2, body, opts) {
-        this.checkRequestId(requestId2);
-        return this.call("POST", this.teamPath("requests", requestId2, "events"), body, {
-          attempts: 1,
-          ...opts
-        });
-      }
-      /** M10-SPEC §1: the team's boundaries (any member). Never set: version 0, boundaries null. */
-      boundaries(opts) {
-        return this.call("GET", this.teamPath("boundaries"), void 0, opts);
-      }
-      /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
-      setBoundaries(body, opts) {
-        return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
-      }
-      /**
-       * PICKERS-SPEC §3.5 (owners): the GitHub App's install link and the Google Picker's public
-       * settings. Never a key or a token.
-       */
-      sourcesConfig(opts) {
-        return this.call("GET", this.teamPath("sources", "config"), void 0, opts);
-      }
-      /**
-       * PICKERS-SPEC §3.6 (owners): the repositories of the allowed orgs where the relay's GitHub App
-       * is installed. Not configured: 404 github_not_configured; GitHub's rate limit: 503
-       * github_rate_limited with a Retry-After (RelayError.retryAfter).
-       */
-      sourcesGithub(opts) {
-        return this.call("GET", this.teamPath("sources", "github"), void 0, opts);
-      }
-      /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
-      acceptance(opts) {
-        return this.call("GET", this.teamPath("me", "acceptance"), void 0, opts);
-      }
-      /** M11-SPEC §2: accept the current boundaries version (only for oneself). Sent once. */
-      setAcceptance(version, opts) {
-        return this.call("PUT", this.teamPath("me", "acceptance"), { version }, { attempts: 1, ...opts });
-      }
-      /** M11-SPEC §3: the background answerer's status (the member itself only). Sent once. */
-      putStatus(body, opts) {
-        return this.call("PUT", this.teamPath("me", "status"), body, { attempts: 1, ...opts });
-      }
-      /** M11-SPEC §3: every member's setup progress and whether they are answering now. */
-      membersStatus(opts) {
-        return this.call("GET", this.teamPath("members", "status"), void 0, opts);
-      }
-      /** M11-SPEC §4: this member's recent requests, newest first. */
-      myRequests(limit = 20, opts) {
-        return this.call("GET", this.teamPath("me", "requests") + `?limit=${limit}`, void 0, opts);
-      }
-      /**
-       * M10-SPEC §2a: the Desktop OAuth client members use to connect Google Drive (read-only).
-       * An installed-app client is not confidential (Google's rule); it is served to members so it
-       * stays out of git. Not configured: 404 drive_not_configured.
-       */
-      driveClient(opts) {
-        return this.call("GET", this.teamPath("drive-client"), void 0, opts);
-      }
-      /** M6-SPEC §2: the team's roster (owners see every email; members only their own). */
-      roster(opts) {
-        return this.call("GET", this.teamPath("roster"), void 0, opts);
-      }
-      /** M6-SPEC §2 (owners): add a member. Not idempotent, so sent once. */
-      addMember(body, opts) {
-        return this.call("POST", this.teamPath("roster"), body, { attempts: 1, ...opts });
-      }
-      /** M6-SPEC §2 (owners): add or remove one email, or change the role. Sent once. */
-      updateMember(member, body, opts) {
-        if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
-        return this.call("PATCH", this.teamPath("roster", member), body, { attempts: 1, ...opts });
-      }
-      /** M6-SPEC §2 (owners): remove a member (their device credentials are revoked). Sent once. */
-      removeMember(member, opts) {
-        if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
-        return this.call("DELETE", this.teamPath("roster", member), void 0, { attempts: 1, ...opts });
-      }
-      /** M5-SPEC §3: revoke the credential this client signs in with (logout). */
-      revokeSelf(opts) {
-        return this.call("DELETE", this.teamPath("credentials", "self"), void 0, { attempts: 1, ...opts });
-      }
-      // M9-SPEC §2, §4, §7: the account routes. They take a Google identity (a Google ID token,
-      // or a delegate on behalf of an email); a device credential or a static token is refused
-      // with 403 google_identity_required. The mutations are sent once.
-      /** The teams (and invitations) of the signed-in Google account. */
-      myTeams(opts) {
-        return this.call("GET", "v1/me/teams", void 0, opts);
-      }
-      /** Create a team; the caller becomes its first owner. */
-      createTeam(body, opts) {
-        return this.call("POST", "v1/teams", body, { attempts: 1, ...opts });
-      }
-      /** Accept or decline an invitation to `team`. */
-      answerInvitation(team, accept, opts) {
-        if (!TEAM_RE.test(team)) throw new Error("invalid team id");
-        return this.call("POST", ["v1", "me", "invitations", team].map(encodeURIComponent).join("/"), { accept }, {
-          attempts: 1,
-          ...opts
-        });
-      }
-      /** An owner deletes this client's team (M9-SPEC §7.7); `confirm` is the team id typed again. */
-      deleteTeam(confirm, opts) {
-        return this.call("DELETE", ["v1", "teams", this.team].map(encodeURIComponent).join("/"), { confirm }, {
-          attempts: 1,
-          ...opts
-        });
-      }
-      /** Relay admins (M9-SPEC §4): every team, a page at a time. */
-      adminTeams(q = {}, opts) {
-        const params = new URLSearchParams();
-        if (q.after !== void 0) params.set("after", q.after);
-        if (q.limit !== void 0) params.set("limit", String(q.limit));
-        const qs = params.toString();
-        return this.call("GET", "v1/admin/teams" + (qs ? `?${qs}` : ""), void 0, opts);
-      }
-      /** Relay admins (M9-SPEC §4): delete a team; `confirm` is its id typed again. */
-      adminDeleteTeam(team, confirm, opts) {
-        if (!TEAM_RE.test(team)) throw new Error("invalid team id");
-        return this.call("DELETE", ["v1", "admin", "teams", team].map(encodeURIComponent).join("/"), { confirm }, {
-          attempts: 1,
-          ...opts
-        });
-      }
-      /** M2-SPEC §3.5: the team's activity feed. */
-      activity(q = {}, opts) {
-        const params = new URLSearchParams();
-        if (q.since !== void 0) params.set("since", q.since);
-        if (q.limit !== void 0) params.set("limit", String(q.limit));
-        const qs = params.toString();
-        return this.call("GET", this.teamPath("activity") + (qs ? `?${qs}` : ""), void 0, opts);
-      }
-    };
-  }
-});
-
 // src/console-server.ts
-import { randomBytes as randomBytes3 } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // src/console-app.ts
-import { createHash as createHash4, randomUUID, timingSafeEqual as timingSafeEqual3 } from "node:crypto";
+import { createHash as createHash2, randomUUID, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 import { existsSync, readFileSync as readFileSync5, realpathSync, statSync } from "node:fs";
-import { createServer as createServer2 } from "node:http";
-import { extname, join as join4, sep } from "node:path";
+import { createServer } from "node:http";
+import { extname, join as join3, sep } from "node:path";
 
 // src/console-demo.ts
 import { createHash } from "node:crypto";
 
 // src/boundaries-rule.ts
 var TOPIC_MAX = 500;
-var SHARED_DRIVE_MAX = 100;
-var DOMAIN_MAX = 253;
-var BOUNDARIES_MAX_ORGS = 10;
-var BOUNDARIES_MAX_DRIVES = 10;
-var BOUNDARIES_MAX_REPOS = 100;
-var BOUNDARIES_MAX_FOLDERS = 20;
-var REPO_NAME_MAX = 100;
-var REPO_ID_MAX = Number.MAX_SAFE_INTEGER;
-var FOLDER_NAME_MAX = 255;
-var DRIVE_NAME_MAX = SHARED_DRIVE_MAX;
 var BOUNDARIES_VERSION_MAX = 2 ** 31 - 1;
-var GITHUB_ORG_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
-var GITHUB_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
-var DRIVE_ITEM_ID_RE = /^[A-Za-z0-9_-]{10,200}$/;
-var DRIVE_DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+var BOUNDARIES_FIELDS = ["topic"];
+var REMOVED_BOUNDARIES_FIELDS = ["github_orgs", "github_repos", "drive_folders", "drives", "member_folders"];
+var removedFieldDetail = (field) => `boundaries.${field}: no longer part of a team's boundaries (only the topic is, since 13 Nov 2026)`;
 var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
-var DRIVE_NAME_FORBIDDEN_RE = /[/\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/u;
-var FOLDER_NAME_FORBIDDEN_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/u;
 var EDGE_SPACE_RE = /^[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
-var BOUNDARIES_FIELDS = ["topic", "github_orgs", "github_repos", "drive_folders", "drives", "member_folders"];
-var M10_BOUNDARIES_FIELDS = ["topic", "github_orgs", "drives", "member_folders"];
 var chars = (s) => [...s].length;
 var trimText = (s) => s.replace(EDGE_SPACE_RE, "");
 var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var exactKeys = (o, keys) => Object.keys(o).length === keys.length && keys.every((k) => Object.prototype.hasOwnProperty.call(o, k));
-var own = (o, key) => o && Object.prototype.hasOwnProperty.call(o, key) ? o[key] : void 0;
+var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 function topicOk(topic) {
   if (typeof topic !== "string") return false;
   const t = trimText(topic);
   return chars(t) >= 1 && chars(t) <= TOPIC_MAX && !TOPIC_FORBIDDEN_RE.test(topic);
 }
-var orgOk = (org) => typeof org === "string" && GITHUB_ORG_RE.test(org);
-function domainOk(domain) {
-  if (typeof domain !== "string" || domain.length > DOMAIN_MAX || !DRIVE_DOMAIN_RE.test(domain)) return false;
-  return !/^[0-9]+$/.test(domain.slice(domain.lastIndexOf(".") + 1));
-}
-function driveNameOk(name) {
-  return typeof name === "string" && chars(name) >= 1 && chars(name) <= SHARED_DRIVE_MAX && !DRIVE_NAME_FORBIDDEN_RE.test(name) && name === trimText(name) && name !== "." && name !== "..";
-}
 var versionOk = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= BOUNDARIES_VERSION_MAX;
-var repoNameOk = (name) => typeof name === "string" && GITHUB_REPO_RE.test(name) && !/^\.+$/.test(name);
-var repoIdOk = (id) => id === null || typeof id === "number" && Number.isSafeInteger(id) && id >= 1;
-var driveItemIdOk = (id) => typeof id === "string" && DRIVE_ITEM_ID_RE.test(id);
-function folderNameOk(name, max = FOLDER_NAME_MAX) {
-  return typeof name === "string" && chars(name) >= 1 && chars(name) <= max && !FOLDER_NAME_FORBIDDEN_RE.test(name) && name === trimText(name);
-}
-var pickedDriveNameOk = (name) => name === null || folderNameOk(name, DRIVE_NAME_MAX);
-function repoOk(r) {
-  return isObj(r) && exactKeys(r, ["org", "repo", "id"]) && orgOk(r.org) && repoNameOk(r.repo) && repoIdOk(r.id);
-}
-function folderOk(f) {
-  return isObj(f) && exactKeys(f, ["domain", "drive_id", "folder_id", "folder_name", "drive_name"]) && domainOk(f.domain) && (f.drive_id === null || driveItemIdOk(f.drive_id)) && driveItemIdOk(f.folder_id) && folderNameOk(f.folder_name) && pickedDriveNameOk(f.drive_name);
-}
-var legacyDriveOk = (d) => isObj(d) && exactKeys(d, ["domain", "shared_drive"]) && domainOk(d.domain) && driveNameOk(d.shared_drive);
-var listOk = (v, max, ok) => Array.isArray(v) && v.length <= max && v.every(ok);
-function commonValid(raw) {
-  return topicOk(raw.topic) && listOk(raw.github_orgs, BOUNDARIES_MAX_ORGS, orgOk) && listOk(raw.drives, BOUNDARIES_MAX_DRIVES, legacyDriveOk) && typeof raw.member_folders === "boolean";
+function removedField(raw) {
+  if (!isObj(raw)) return null;
+  return REMOVED_BOUNDARIES_FIELDS.find((f) => has(raw, f)) ?? null;
 }
 function boundariesValid(raw) {
-  if (!isObj(raw) || !exactKeys(raw, BOUNDARIES_FIELDS)) return false;
-  return commonValid(raw) && listOk(raw.github_repos, BOUNDARIES_MAX_REPOS, repoOk) && listOk(raw.drive_folders, BOUNDARIES_MAX_FOLDERS, folderOk);
+  return isObj(raw) && Object.keys(raw).length === 1 && has(raw, "topic") && topicOk(raw.topic);
 }
-function readBoundaries(raw) {
-  if (boundariesValid(raw)) return raw;
-  if (!isObj(raw) || !exactKeys(raw, M10_BOUNDARIES_FIELDS) || !commonValid(raw)) return null;
-  const m10 = raw;
-  return { topic: m10.topic, github_orgs: m10.github_orgs, github_repos: [], drive_folders: [], drives: m10.drives, member_folders: m10.member_folders };
-}
-var lowerRepo = (r) => `${r.org.toLowerCase()}/${r.repo.toLowerCase()}`;
-var sameDrive = (a, b) => a.domain === b.domain && a.shared_drive === b.shared_drive;
 function normaliseBoundaries(b) {
-  const orgSeen = /* @__PURE__ */ new Set();
-  const github_orgs = b.github_orgs.filter((o) => !orgSeen.has(o.toLowerCase()) && orgSeen.add(o.toLowerCase()));
-  const repoSeen = /* @__PURE__ */ new Set();
-  const github_repos = b.github_repos.filter((r) => !orgSeen.has(r.org.toLowerCase()) && !repoSeen.has(lowerRepo(r)) && repoSeen.add(lowerRepo(r)));
-  const folderSeen = /* @__PURE__ */ new Set();
-  const drive_folders = b.drive_folders.filter((f) => !folderSeen.has(f.folder_id) && folderSeen.add(f.folder_id));
-  const drives = b.drives.filter((d, i) => b.drives.findIndex((x) => sameDrive(x, d)) === i);
-  return {
-    topic: trimText(b.topic),
-    github_orgs,
-    github_repos: github_repos.map((r) => ({ org: r.org, repo: r.repo, id: r.id })),
-    drive_folders: drive_folders.map((f) => ({ domain: f.domain, drive_id: f.drive_id, folder_id: f.folder_id, folder_name: f.folder_name, drive_name: f.drive_name })),
-    drives: drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive })),
-    member_folders: b.member_folders
-  };
-}
-function legacyDrivesOk(stored, sent) {
-  return sent.every((d) => (stored ?? []).some((s) => sameDrive(s, d)));
-}
-var orgKey = (org) => `org:${org.toLowerCase()}`;
-var repoKey = (r) => `repo:${lowerRepo(r)}`;
-var folderKey = (f) => `folder:${f.folder_id}`;
-var driveKey = (d) => `drive:${d.domain}/${d.shared_drive}`;
-function itemKey(item) {
-  switch (item.kind) {
-    case "org":
-      return orgKey(item.org);
-    case "repo":
-      return repoKey(item);
-    case "folder":
-      return folderKey(item);
-    case "drive":
-      return driveKey(item);
-  }
-}
-function boundaryItems(b) {
-  const n = normaliseBoundaries(b);
-  return [
-    ...n.github_orgs.map((org) => ({ kind: "org", org })),
-    ...n.github_repos.map((r) => ({ kind: "repo", ...r })),
-    ...n.drive_folders.map((f) => ({ kind: "folder", ...f })),
-    ...n.drives.map((d) => ({ kind: "drive", ...d }))
-  ];
-}
-function itemKeys(b) {
-  return boundaryItems(b).map(itemKey);
-}
-function knownItemKeys(b, keys) {
-  const known = new Set(itemKeys(b));
-  const out = [];
-  for (const k of keys) {
-    if (known.has(k)) {
-      known.delete(k);
-      out.push(k);
-    }
-  }
-  return out;
-}
-function sinceByKey(b, since, version) {
-  const out = /* @__PURE__ */ new Map();
-  for (const item of boundaryItems(b)) {
-    let n;
-    if (since) {
-      if (item.kind === "org") n = own(since.github_orgs, item.org.toLowerCase());
-      else if (item.kind === "repo") n = own(since.github_repos, lowerRepo(item));
-      else if (item.kind === "folder") n = own(since.drive_folders, item.folder_id);
-      else n = since.drives.find((x) => sameDrive(x, item))?.since;
-    }
-    out.set(itemKey(item), n ?? version);
-  }
-  return out;
-}
-function nextSince(prev, version, next) {
-  const pb = prev?.boundaries ? { github_repos: [], drive_folders: [], ...prev.boundaries } : null;
-  const ps = pb ? prev?.since ?? null : null;
-  const held = pb ? sinceByKey(pb, ps, prev?.version ?? version) : /* @__PURE__ */ new Map();
-  const n = normaliseBoundaries({ github_repos: [], drive_folders: [], ...next });
-  const github_orgs = {};
-  const github_repos = {};
-  const drive_folders = {};
-  for (const o of n.github_orgs) github_orgs[o.toLowerCase()] = held.get(orgKey(o)) ?? version;
-  for (const r of n.github_repos) github_repos[lowerRepo(r)] = held.get(repoKey(r)) ?? held.get(orgKey(r.org)) ?? version;
-  for (const f of n.drive_folders) {
-    const whole = f.drive_id !== null && pb?.drive_folders.some((x) => x.folder_id === f.drive_id && x.drive_id === f.drive_id) ? held.get(folderKey({ folder_id: f.drive_id })) : void 0;
-    drive_folders[f.folder_id] = held.get(folderKey(f)) ?? whole ?? version;
-  }
-  return {
-    github_orgs,
-    github_repos,
-    drive_folders,
-    drives: n.drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive, since: held.get(driveKey(d)) ?? version })),
-    member_folders: !n.member_folders ? null : pb?.member_folders ? ps?.member_folders ?? prev?.version ?? version : version
-  };
+  return { topic: trimText(b.topic) };
 }
 
 // src/exposed.ts
@@ -22773,56 +21799,10 @@ var RosterRefusal = class extends Error {
   code;
   detail;
 };
-var DEMO_DRIVE_ID = "0AExampleDriveId0PVA";
-var DEMO_DELIVERY_DRIVE_ID = "0AExampleDeliveryPVA";
-var DEMO_FOLDER_ID = "1ExampleFolderIdxxxxxxxxxxxxxxxxx";
 var DEMO_BOUNDARIES = {
-  topic: "Example Co: the orders and payments services, their runbooks, deploys and incidents, and how the team works.",
-  github_orgs: ["example-org"],
-  github_repos: [{ org: "example-labs", repo: "api", id: 123456 }],
-  drive_folders: [
-    { domain: "example.com", drive_id: DEMO_DRIVE_ID, folder_id: DEMO_DRIVE_ID, folder_name: "Example Team Drive", drive_name: "Example Team Drive" },
-    { domain: "example.com", drive_id: DEMO_DELIVERY_DRIVE_ID, folder_id: DEMO_FOLDER_ID, folder_name: "Clients", drive_name: "Example Delivery Drive" }
-  ],
-  drives: [{ domain: "example.com", shared_drive: "Example Archive" }],
-  member_folders: true
+  topic: "Example Co: the orders and payments services, their runbooks, deploys and incidents, and how the team works."
 };
-var DEMO_SOURCES_CONFIG = {
-  github: { configured: true, install_url: "https://github.com/apps/example-relay-sources/installations/new" },
-  google_picker: null
-};
-var DEMO_GITHUB = {
-  installations: [
-    {
-      account: "example-labs",
-      state: "ok",
-      repository_selection: "selected",
-      repos: [
-        { name: "api", id: 123456, private: true, archived: false },
-        { name: "ml-notebooks", id: 123457, private: false, archived: false }
-      ],
-      truncated: false
-    },
-    {
-      account: "example-org",
-      state: "ok",
-      repository_selection: "all",
-      repos: [
-        { name: "old-site", id: 100104, private: false, archived: true },
-        { name: "orders-service", id: 100101, private: true, archived: false },
-        { name: "payments", id: 100102, private: true, archived: false },
-        { name: "runbooks", id: 100103, private: true, archived: false }
-      ],
-      truncated: false
-    },
-    { account: "example-sandbox", state: "suspended", repository_selection: "all", repos: [], truncated: false }
-  ]
-};
-var DEMO_MISSING = {
-  alice: [`folder:${DEMO_FOLDER_ID}`],
-  bob: [],
-  carol: ["org:example-org", "repo:example-labs/api"]
-};
+var DEMO_FOLDER_COUNTS = { alice: 2, bob: 5, carol: 0 };
 var ROSTER_MAX = 50;
 var DEMO_REPLIES = {
   bob: {
@@ -22879,10 +21859,9 @@ var DemoTeam = class {
       team: this.team,
       version: set.version,
       boundaries: structuredClone(set.boundaries),
-      since: nextSince(null, 1, set.boundaries),
       updated_at: iso(this.epoch - 2 * DAY_MS),
       updated_by: set.updated_by
-    } : { team: this.team, version: 0, boundaries: null, since: null, updated_at: null, updated_by: null };
+    } : { team: this.team, version: 0, boundaries: null, updated_at: null, updated_by: null };
     this.accepted = options.roster === void 0 ? { version: 1, accepted_at: iso(this.epoch - 3 * DAY_MS) } : { version: 0, accepted_at: null };
   }
   now;
@@ -22921,7 +21900,8 @@ var DemoTeam = class {
   }
   /**
    * GET /v1/teams/{team}/members/status (M11-SPEC §3): each active member's last status (counts
-   * and booleans only), whether they answered within 180 s, and the version they accepted.
+   * and booleans only), whether they answered within 180 s, the version they accepted, and how
+   * many folders they chose: an owner sees every member's, anyone else only their own.
    */
   membersStatus() {
     const now = this.now();
@@ -22929,24 +21909,17 @@ var DemoTeam = class {
     const status = (o) => ({
       daemon: { version: "0.11.0", started_at: iso(now - 5 * 36e5) },
       claude: { found: true, signed_in: o.signedIn ?? true },
-      folders: { repo_roots: o.roots ?? 1, clones: o.clones ?? 7, extra_folders: 0 },
-      drive: { connected: o.drive ?? true },
       self_test: { ok: o.selfOk ?? true, at: iso(now - 2 * 36e5), reason: o.reason ?? null },
       seen_at: iso(now - o.seenAgo)
     });
     const owner = this.viewerRole() === "owner";
-    const sources = (member, version) => {
-      if (!owner && member !== this.viewer) return null;
-      const b = this.bounds.boundaries;
-      return { boundaries_version: version, missing: b ? knownItemKeys(b, DEMO_MISSING[member] ?? []) : [] };
-    };
+    const folderCount = (member) => owner || member === this.viewer ? DEMO_FOLDER_COUNTS[member] ?? 0 : null;
     const entry = (member) => {
       const accepted = member === this.viewer ? this.accepted.version : 0;
-      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted, sources: null };
-      const s = member === "bob" ? status({ seenAgo: 25e3 }) : member === "carol" ? status({ signedIn: false, roots: 0, clones: 0, selfOk: false, reason: "Claude Code is not signed in.", seenAgo: 9 * 6e4 }) : status({ drive: false, seenAgo: 4e4 });
+      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted, folder_count: null };
+      const s = member === "bob" ? status({ seenAgo: 25e3 }) : member === "carol" ? status({ signedIn: false, selfOk: false, reason: "Claude Code is not signed in.", seenAgo: 9 * 6e4 }) : status({ seenAgo: 4e4 });
       const version = member === "bob" ? this.bounds.version : accepted;
-      const looked = member === "carol" ? Math.max(0, this.bounds.version - 1) : this.bounds.version;
-      return { member, status: s, answering: now - Date.parse(s.seen_at) < 18e4, accepted_version: version, sources: sources(member, looked) };
+      return { member, status: s, answering: now - Date.parse(s.seen_at) < 18e4, accepted_version: version, folder_count: folderCount(member) };
     };
     return { members: active.map(entry), boundaries_version: this.bounds.version };
   }
@@ -23007,16 +21980,14 @@ var DemoTeam = class {
     return structuredClone(this.bounds);
   }
   /**
-   * PUT /v1/teams/{team}/boundaries (M10-SPEC §1, PICKERS-SPEC §3.2): owners, at the current
-   * version; a legacy drive the stored document does not hold is 400 legacy_drive. Stored as the
-   * relay stores it (normaliseBoundaries), with `since` by PICKERS-SPEC §2.3.
+   * PUT /v1/teams/{team}/boundaries (M10-SPEC §1): owners, at the current version; a field of the
+   * earlier schemas is refused naming it. Stored as the relay stores it (normaliseBoundaries).
    */
   setBoundaries(body) {
     if (this.viewerRole() !== "owner") throw new RosterRefusal(403, "forbidden", "Only team owners can set the boundaries.");
+    const removed = removedField(body.boundaries);
+    if (removed) throw new RosterRefusal(400, "invalid_body", removedFieldDetail(removed));
     if (!boundariesValid(body.boundaries)) throw new RosterRefusal(400, "invalid_body", "The boundaries do not pass the rule.");
-    if (!legacyDrivesOk(this.bounds.boundaries?.drives ?? null, body.boundaries.drives)) {
-      throw new RosterRefusal(400, "legacy_drive", "Pick shared-drive folders instead of typing drive names.");
-    }
     if (body.version !== this.bounds.version) {
       throw new RosterRefusal(409, "version_conflict", "The boundaries changed since you read them. Read them again.");
     }
@@ -23026,21 +21997,10 @@ var DemoTeam = class {
       team: this.team,
       version,
       boundaries: stored,
-      since: nextSince(this.bounds, version, stored),
       updated_at: iso(this.now()),
       updated_by: this.viewer
     };
     return this.boundaries();
-  }
-  /** GET /v1/teams/{team}/sources/config (PICKERS-SPEC §3.5): owners only. */
-  sourcesConfig() {
-    if (this.viewerRole() !== "owner") throw new RosterRefusal(403, "forbidden", "Only team owners can choose the sources.");
-    return structuredClone(DEMO_SOURCES_CONFIG);
-  }
-  /** GET /v1/teams/{team}/sources/github (PICKERS-SPEC §3.6): owners only; a fake listing. */
-  sourcesGithub() {
-    if (this.viewerRole() !== "owner") throw new RosterRefusal(403, "forbidden", "Only team owners can choose the sources.");
-    return { ...structuredClone(DEMO_GITHUB), fetched_at: iso(this.now()) };
   }
   /** The viewer's role here, by the roster's active entries. */
   viewerRole() {
@@ -23230,15 +22190,15 @@ var DemoTeam = class {
     const limit = q.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new BadRequest("limit must be 1..200");
     const read = this.all(now, true).map((m) => m.doc).filter((d) => Date.parse(d.updated_at) > since).sort((a, b) => Date.parse(a.updated_at) - Date.parse(b.updated_at) || a.request_id.localeCompare(b.request_id));
-    let page2 = read.slice(0, limit);
-    if (read.length > limit && read[limit].updated_at === page2.at(-1).updated_at) {
-      const boundary = page2.at(-1).updated_at;
-      const before = page2.filter((d) => d.updated_at !== boundary);
-      page2 = before.length > 0 ? before : read.filter((d) => d.updated_at === boundary).slice(0, ACTIVITY_MAX_GROUP);
+    let page = read.slice(0, limit);
+    if (read.length > limit && read[limit].updated_at === page.at(-1).updated_at) {
+      const boundary = page.at(-1).updated_at;
+      const before = page.filter((d) => d.updated_at !== boundary);
+      page = before.length > 0 ? before : read.filter((d) => d.updated_at === boundary).slice(0, ACTIVITY_MAX_GROUP);
     }
     return {
-      requests: page2.filter((d) => Date.parse(d.expire_at) > now).map((d) => viewFor(d, DEMO_ME)),
-      next_since: page2.length > 0 ? page2.at(-1).updated_at : iso(since),
+      requests: page.filter((d) => Date.parse(d.expire_at) > now).map((d) => viewFor(d, DEMO_ME)),
+      next_since: page.length > 0 ? page.at(-1).updated_at : iso(since),
       server_time: iso(now)
     };
   }
@@ -23323,12 +22283,7 @@ var DemoAccount = class {
         roster: [entry("olga", "owner", "active", "olga", 12), entry("pat", "member", "active", "olga", 9), entry("alice", "member", "active", "olga", 0)],
         boundaries: {
           boundaries: {
-            topic: "Operations at Example Co: on-call, incidents, infrastructure and the runbooks behind them.",
-            github_orgs: ["example-ops"],
-            github_repos: [],
-            drive_folders: [{ domain: "example.com", drive_id: "0AExampleOpsDrive0PVA", folder_id: "0AExampleOpsDrive0PVA", folder_name: "Operations", drive_name: "Operations" }],
-            drives: [],
-            member_folders: false
+            topic: "Operations at Example Co: on-call, incidents, infrastructure and the runbooks behind them."
           },
           version: 1,
           updated_by: "olga"
@@ -23470,8 +22425,8 @@ var DemoAccount = class {
     const all = [...this.world.values()];
     const seeds = q.after === void 0 ? all.filter((w) => w.seed) : [];
     const rest = all.filter((w) => !w.seed && (q.after === void 0 || w.id > q.after)).filter((w) => w.status === "active" || Date.parse(w.reserved_until ?? "") > this.now()).sort((a, b) => a.id.localeCompare(b.id));
-    const page2 = rest.slice(0, limit);
-    return { teams: [...seeds, ...page2].map(row), next: rest.length > limit ? page2.at(-1).id : null };
+    const page = rest.slice(0, limit);
+    return { teams: [...seeds, ...page].map(row), next: rest.length > limit ? page.at(-1).id : null };
   }
   /** DELETE /v1/admin/teams/{team} (M9-SPEC §4). */
   adminDeleteTeam(team, confirm) {
@@ -24237,10 +23192,10 @@ var IapKeySet = class {
     } catch {
       throw new Error("IAP key set is not JSON");
     }
-    const list2 = body?.keys;
-    if (!Array.isArray(list2)) throw new Error("IAP key set has no keys");
+    const list = body?.keys;
+    if (!Array.isArray(list)) throw new Error("IAP key set has no keys");
     const next = /* @__PURE__ */ new Map();
-    for (const jwk of list2) {
+    for (const jwk of list) {
       if (!jwk || typeof jwk !== "object") continue;
       const k = jwk;
       if (typeof k.kid !== "string" || !k.kid || k.kty !== "EC" || k.crv !== "P-256") continue;
@@ -24381,17 +23336,6 @@ function globRe(glob) {
   return new RegExp(`^${re}$`);
 }
 
-// src/drive-locate.ts
-var DEFAULT_LOCATE_LIMITS = {
-  rootsPerMount: 50,
-  depth: 8,
-  hintDirs: 5e3,
-  blindReads: 300,
-  blindMs: 1e4,
-  verifyMs: 6e4,
-  notFoundMs: 10 * 6e4
-};
-
 // src/answering-lock.ts
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -24410,696 +23354,744 @@ function pidAlive(pid) {
   }
 }
 
-// src/member-folders.ts
-init_relay_client_core();
+// src/relay-client-core.ts
+var TEAM_RE = /^[a-z][a-z0-9_-]{1,31}$/;
+var MEMBER_RE = /^[a-z][a-z0-9_]{1,31}$/;
+var LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+function parseRelayUrl(raw) {
+  if (!raw) throw new Error("RELAY_URL must be set");
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("RELAY_URL is not a valid URL");
+  }
+  if (url.username || url.password) throw new Error("RELAY_URL must not carry credentials");
+  if (url.search || url.hash) throw new Error("RELAY_URL must not carry a query or fragment");
+  if (url.protocol === "https:") return url;
+  if (url.protocol === "http:" && LOOPBACK.has(url.hostname)) return url;
+  throw new Error("RELAY_URL must be https (plain http is allowed only to localhost)");
+}
 
-// src/scope.ts
-init_credentials();
+// src/credentials.ts
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync as readFileSync2,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeSync
+} from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { basename, dirname, isAbsolute as isAbsolute2, join as join2 } from "node:path";
+var CREDENTIAL_RE = /^trc_[A-Za-z0-9_-]{43}$/;
+var EMAIL_RE2 = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})+$/;
+var CREDENTIALS_DIR = "team-relay";
+var CREDENTIALS_FILE = "credentials.json";
+var MAX_FILE_BYTES = 16 * 1024;
+var CredentialFileError = class extends Error {
+  constructor(message2) {
+    super(message2);
+    this.name = "CredentialFileError";
+  }
+};
+function credentialsPath(env = process.env) {
+  const explicit = env.RELAY_CREDENTIALS_FILE?.trim();
+  if (explicit) {
+    if (!isAbsolute2(explicit)) throw new CredentialFileError("RELAY_CREDENTIALS_FILE must be an absolute path");
+    return explicit;
+  }
+  const xdg = env.XDG_CONFIG_HOME?.trim();
+  const base = xdg && isAbsolute2(xdg) ? xdg : join2(env.HOME?.trim() || homedir2(), ".config");
+  return join2(base, CREDENTIALS_DIR, CREDENTIALS_FILE);
+}
+function uid() {
+  return typeof process.getuid === "function" ? process.getuid() : null;
+}
+function checkOwnedPrivate(st, what, kind) {
+  if (st.isSymbolicLink()) throw new CredentialFileError(`${what} is a symbolic link; refusing to use it`);
+  if (kind === "file" ? !st.isFile() : !st.isDirectory()) throw new CredentialFileError(`${what} is not a ${kind}; refusing to use it`);
+  const me = uid();
+  if (me !== null && st.uid !== me) throw new CredentialFileError(`${what} is owned by another user; refusing to use it`);
+  if ((st.mode & 63) !== 0) {
+    const mode = (st.mode & 511).toString(8).padStart(3, "0");
+    throw new CredentialFileError(
+      `${what} has mode ${mode}, readable or writable by others; refusing to use it (run /team-relay:logout and /team-relay:login again, or chmod ${kind === "file" ? "600" : "700"} it)`
+    );
+  }
+}
+var RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+function normaliseRelayUrl(raw) {
+  const url = parseRelayUrl(raw);
+  const path = url.pathname.replace(/\/+$/, "");
+  return `${url.protocol}//${url.host}${path}`;
+}
+function parseStoredCredential(raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new CredentialFileError("the credential file is not a JSON object");
+  const c = raw;
+  const { relay_url, team, member, credential, expires_at, email: email2 } = c;
+  if (typeof relay_url !== "string") throw new CredentialFileError("the credential file has no relay_url");
+  let url;
+  try {
+    url = normaliseRelayUrl(relay_url);
+  } catch {
+    throw new CredentialFileError("the credential file has an invalid relay_url");
+  }
+  if (typeof team !== "string" || !TEAM_RE.test(team)) throw new CredentialFileError("the credential file has an invalid team");
+  if (typeof member !== "string" || !MEMBER_RE.test(member)) throw new CredentialFileError("the credential file has an invalid member");
+  if (typeof credential !== "string" || !CREDENTIAL_RE.test(credential)) throw new CredentialFileError("the credential file has an invalid credential");
+  if (expires_at !== void 0 && expires_at !== null && (typeof expires_at !== "string" || !RFC3339.test(expires_at))) {
+    throw new CredentialFileError("the credential file has an invalid expires_at");
+  }
+  if (email2 !== void 0 && email2 !== null && (typeof email2 !== "string" || email2.length > 254 || !EMAIL_RE2.test(email2))) {
+    throw new CredentialFileError("the credential file has an invalid email");
+  }
+  return {
+    relay_url: url,
+    team,
+    member,
+    credential,
+    expires_at: typeof expires_at === "string" ? expires_at : null,
+    ...typeof email2 === "string" ? { email: email2 } : {}
+  };
+}
+function readCredential(path) {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (err) {
+    if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
+    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
+  }
+  checkOwnedPrivate(lstatSync(dirname(path)), "the credential directory", "directory");
+  checkOwnedPrivate(st, "the credential file", "file");
+  if (st.size > MAX_FILE_BYTES) throw new CredentialFileError("the credential file is too large");
+  let text;
+  try {
+    text = readFileSync2(path, "utf8");
+  } catch (err) {
+    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new CredentialFileError("the credential file is not valid JSON");
+  }
+  return parseStoredCredential(json);
+}
+function credentialFileExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // src/member-folders.ts
 var MAX_FILE_BYTES2 = 256 * 1024;
 
+// src/relay-client.ts
+import { execFile } from "node:child_process";
+import { readFileSync as readFileSync4 } from "node:fs";
+
+// src/relay-default.ts
+import { readFileSync as readFileSync3 } from "node:fs";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+function defaultRelayFile() {
+  return fileURLToPath2(new URL("../relay.default.json", import.meta.url));
+}
+function defaultRelayUrl(file = defaultRelayFile()) {
+  try {
+    const raw = JSON.parse(readFileSync3(file, "utf8"));
+    if (typeof raw.relay_url !== "string") return null;
+    parseRelayUrl(raw.relay_url);
+    return raw.relay_url;
+  } catch {
+    return null;
+  }
+}
+
+// src/relay-client.ts
+var REQUEST_ID_RE = /^rq_[0-9a-f]{32}$/;
+var RelayError = class extends Error {
+  status;
+  code;
+  detail;
+  /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
+  retryAfter;
+  constructor(status, code, detail, retryAfter) {
+    super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
+    this.name = "RelayError";
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+    this.retryAfter = retryAfter;
+  }
+};
+var RETRY_AFTER_MAX_S = 3600;
+function parseRetryAfter(v) {
+  const t = v?.trim();
+  if (!t || !/^[0-9]{1,10}$/.test(t)) return void 0;
+  return Math.min(RETRY_AFTER_MAX_S, Number(t));
+}
+var RelayNetworkError = class extends Error {
+  constructor(message2) {
+    super(message2);
+    this.name = "RelayNetworkError";
+  }
+};
+function isRetryable(err) {
+  if (err instanceof RelayNetworkError) return true;
+  if (err instanceof RelayError) return err.status >= 500 || err.status === 429;
+  return false;
+}
+var DEFAULT_BACKOFF = { baseMs: 1e3, maxMs: 3e4 };
+function backoffDelay(attempt, b = DEFAULT_BACKOFF, random = Math.random) {
+  const exp = Math.min(b.maxMs, b.baseMs * 2 ** Math.min(attempt, 30));
+  return Math.round(exp / 2 + random() * (exp / 2));
+}
+function configValue(v) {
+  if (v === void 0) return void 0;
+  const t = v.trim();
+  if (!t || /^\$\{user_config\.[A-Za-z0-9_]+\}$/.test(t)) return void 0;
+  return t;
+}
+function staticTokenProvider(read) {
+  return Object.assign(typeof read === "string" ? () => read : read, { kind: "static" });
+}
+function tokenProviderFromEnv(env) {
+  const file = configValue(env.RELAY_TOKEN_FILE);
+  if (file) {
+    return staticTokenProvider(() => {
+      let raw;
+      try {
+        raw = readFileSync4(file, "utf8");
+      } catch (err) {
+        throw new Error(`cannot read RELAY_TOKEN_FILE (${err.code ?? "error"})`);
+      }
+      const token2 = raw.replace(/[\r\n]+$/, "");
+      if (!token2) throw new Error("RELAY_TOKEN_FILE is empty");
+      return token2;
+    });
+  }
+  const token = configValue(env.RELAY_TOKEN);
+  if (!token) throw new Error('RELAY_AUTH is "token", so RELAY_TOKEN or RELAY_TOKEN_FILE must be set');
+  return staticTokenProvider(token);
+}
+var TOKEN_REFRESH_MARGIN_MS = 5 * 6e4;
+var JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+var ACCOUNT_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
+var GCLOUD_OUTPUT_LIMIT = 64 * 1024;
+function checkGcloudAccount(account) {
+  if (account.length > 254 || !ACCOUNT_RE.test(account)) {
+    throw new Error("RELAY_GCLOUD_ACCOUNT must be an account email address");
+  }
+  return account;
+}
+function jwtExpiryMs(token) {
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof claims.exp === "number" && Number.isFinite(claims.exp) ? claims.exp * 1e3 : null;
+  } catch {
+    return null;
+  }
+}
+function scrub(text) {
+  return text.replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/ya29\.[A-Za-z0-9_.-]+/g, "[redacted]").replace(/[\x00-\x1f\x7f]+/g, " ").trim().slice(0, 200);
+}
+function gcloudTokenProvider(opts = {}) {
+  const now = opts.now ?? Date.now;
+  const env = opts.env ?? process.env;
+  const timeoutMs = opts.timeoutMs ?? 3e4;
+  const args = ["auth", "print-identity-token"];
+  if (opts.account !== void 0) args.push(`--account=${checkGcloudAccount(opts.account)}`);
+  let cached = null;
+  let inflight = null;
+  const mint = () => new Promise((resolve, reject) => {
+    execFile(
+      "gcloud",
+      args,
+      { env, timeout: timeoutMs, maxBuffer: GCLOUD_OUTPUT_LIMIT, shell: false, windowsHide: true, encoding: "utf8" },
+      (err, stdout, stderr) => {
+        if (err) {
+          const e = err;
+          if (e.code === "ENOENT") return reject(new Error("gcloud was not found on PATH (RELAY_AUTH=google needs the Google Cloud CLI)"));
+          if (e.killed) return reject(new Error("gcloud auth print-identity-token timed out"));
+          const why = scrub(String(stderr ?? "").split("\n").find((l) => l.trim()) ?? "");
+          return reject(new Error(`gcloud auth print-identity-token failed${why ? `: ${why}` : ""}`));
+        }
+        const token = String(stdout).trim();
+        if (!JWT_RE.test(token)) return reject(new Error("gcloud auth print-identity-token did not print an ID token"));
+        resolve(token);
+      }
+    );
+  });
+  const provider = Object.assign(async () => {
+    if (cached && now() < cached.until) return cached.token;
+    inflight ??= mint().then((token) => {
+      const exp = jwtExpiryMs(token);
+      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
+      return token;
+    }).finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  }, {
+    invalidate: () => {
+      cached = null;
+    }
+  });
+  return provider;
+}
+var METADATA_BASE = "http://metadata.google.internal";
+var METADATA_IDENTITY_PATH = "/computeMetadata/v1/instance/service-accounts/default/identity";
+var METADATA_OUTPUT_LIMIT = 16 * 1024;
+function metadataTokenProvider(opts) {
+  const now = opts.now ?? Date.now;
+  const doFetch = opts.fetch ?? ((u, i) => fetch(u, i));
+  const timeoutMs = opts.timeoutMs ?? 5e3;
+  if (!opts.audience) throw new Error("RELAY_AUTH=metadata needs RELAY_URL as the token audience");
+  const url = new URL(METADATA_IDENTITY_PATH, opts.base ?? METADATA_BASE);
+  url.searchParams.set("audience", opts.audience);
+  url.searchParams.set("format", "full");
+  const target = url.toString();
+  let cached = null;
+  let inflight = null;
+  const mint = async () => {
+    let res;
+    try {
+      res = await doFetch(target, {
+        method: "GET",
+        headers: { "Metadata-Flavor": "Google" },
+        redirect: "error",
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch {
+      throw new Error("the metadata server did not answer (RELAY_AUTH=metadata runs only on Google Cloud)");
+    }
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new Error(`the metadata server refused an identity token (${res.status})`);
+    const token = text.trim();
+    if (token.length > METADATA_OUTPUT_LIMIT || !JWT_RE.test(token)) throw new Error("the metadata server did not return an ID token");
+    return token;
+  };
+  return Object.assign(async () => {
+    if (cached && now() < cached.until) return cached.token;
+    inflight ??= mint().then((token) => {
+      const exp = jwtExpiryMs(token);
+      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
+      return token;
+    }).finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  }, {
+    invalidate: () => {
+      cached = null;
+    }
+  });
+}
+function authModeFromEnv(env) {
+  const explicit = configValue(env.RELAY_AUTH);
+  if (explicit === void 0) return credentialFileExists(credentialsPath(env)) ? "credential" : "google";
+  if (explicit !== "credential" && explicit !== "google" && explicit !== "token" && explicit !== "metadata") {
+    throw new Error('RELAY_AUTH must be "credential", "google" or "token" (or "metadata" on Google Cloud)');
+  }
+  return explicit;
+}
+var NotConnected = class extends Error {
+  constructor(message2 = "Not connected: run /team-relay:login") {
+    super(message2);
+    this.name = "NotConnected";
+  }
+};
+var SIGN_IN_AGAIN = "the relay refused your sign-in (signed out, expired, or no longer on the team): run /team-relay:login again";
+function credentialTokenProvider(path, bound) {
+  const relay = normaliseRelayUrl(bound.relay_url);
+  return Object.assign(
+    () => {
+      const stored = readCredential(path);
+      if (!stored) throw new NotConnected();
+      if (stored.relay_url !== relay || stored.team !== bound.team) {
+        throw new NotConnected("you signed in to another relay or team since this started: restart it");
+      }
+      return stored.credential;
+    },
+    { kind: "credential", path }
+  );
+}
+function isCredentialProvider(p) {
+  return p.kind === "credential";
+}
+function connectionFromEnv(env, gcloud = {}) {
+  const explicitMode = configValue(env.RELAY_AUTH) !== void 0;
+  const mode = authModeFromEnv(env);
+  if (mode === "credential") {
+    const path = credentialsPath(env);
+    const stored = readCredential(path);
+    if (!stored) throw new NotConnected();
+    const envUrl = configValue(env.RELAY_URL);
+    if (envUrl !== void 0) {
+      let same = false;
+      try {
+        same = normaliseRelayUrl(envUrl) === stored.relay_url;
+      } catch {
+        same = false;
+      }
+      if (!same) {
+        throw new Error("RELAY_URL is not the relay you signed in to: unset it, or run /team-relay:logout and then /team-relay:login to sign in to it");
+      }
+    }
+    const envTeam = configValue(env.RELAY_TEAM);
+    if (envTeam !== void 0 && envTeam !== stored.team) {
+      throw new Error("RELAY_TEAM is not the team you signed in to: unset it, or run /team-relay:login again");
+    }
+    return { mode, url: stored.relay_url, team: stored.team, member: stored.member, token: credentialTokenProvider(path, stored) };
+  }
+  const team = configValue(env.RELAY_TEAM);
+  if (!team) {
+    if (!explicitMode) throw new NotConnected();
+    throw new Error("RELAY_TEAM must be set");
+  }
+  const url = configValue(env.RELAY_URL) ?? (mode === "google" ? defaultRelayUrl() : null) ?? "";
+  let token;
+  if (mode === "token") token = tokenProviderFromEnv(env);
+  else if (mode === "metadata") token = metadataTokenProvider({ audience: configValue(env.RELAY_URL) ?? "" });
+  else {
+    const account = configValue(env.RELAY_GCLOUD_ACCOUNT);
+    token = gcloudTokenProvider({ env, ...gcloud, ...account !== void 0 ? { account } : {} });
+  }
+  return { mode, url, team, token };
+}
+var CLIENT_IP_HASH_RE = /^[0-9a-f]{64}$/;
+var ON_BEHALF_OF_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,253}$/;
+var defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+var RelayClient = class _RelayClient {
+  team;
+  opts;
+  base;
+  token;
+  backoff;
+  attempts;
+  timeoutMs;
+  sleep;
+  random;
+  userAgent;
+  constructor(opts) {
+    if (!TEAM_RE.test(opts.team)) throw new Error("RELAY_TEAM is not a valid team id");
+    this.opts = opts;
+    this.team = opts.team;
+    const base = parseRelayUrl(opts.url);
+    if (!base.pathname.endsWith("/")) base.pathname += "/";
+    this.base = base;
+    this.token = opts.token;
+    this.backoff = opts.backoff ?? DEFAULT_BACKOFF;
+    this.attempts = Math.max(1, opts.attempts ?? 4);
+    this.timeoutMs = opts.timeoutMs ?? 3e4;
+    this.sleep = opts.sleep ?? defaultSleep;
+    this.random = opts.random ?? Math.random;
+    this.userAgent = opts.userAgent ?? "team-relay-plugin/0.1.0";
+  }
+  /**
+   * The same relay, sign-in and settings for another team (M9-SPEC §5: the hosted console's
+   * delegate reads any team its viewer is on). The team id is checked like RELAY_TEAM.
+   */
+  withTeam(team) {
+    if (team === this.team) return this;
+    return new _RelayClient({ ...this.opts, team });
+  }
+  /**
+   * True when this client signs in with a stored device credential or a static token, which
+   * are bound to one team (no Google identity for the account routes).
+   */
+  get boundToTeam() {
+    return isCredentialProvider(this.token) || this.token.kind === "static";
+  }
+  /** The relay's base URL (without a trailing slash). */
+  get url() {
+    return this.base.toString().replace(/\/$/, "");
+  }
+  teamPath(...parts) {
+    return ["v1", "teams", this.team, ...parts].map(encodeURIComponent).join("/");
+  }
+  async once(method, path, body, timeoutMs, signal, onBehalfOf, clientIpHash2) {
+    const url = new URL(path, this.base);
+    const headers = {
+      Accept: "application/json",
+      Authorization: `Bearer ${await this.token()}`,
+      "User-Agent": this.userAgent
+    };
+    if (onBehalfOf !== void 0) {
+      if (!ON_BEHALF_OF_RE.test(onBehalfOf)) throw new Error("X-Relay-On-Behalf-Of must be a lower-case email address");
+      headers["X-Relay-On-Behalf-Of"] = onBehalfOf;
+    }
+    if (clientIpHash2 !== void 0) {
+      if (!CLIENT_IP_HASH_RE.test(clientIpHash2)) throw new Error("X-Relay-Client-IP-Hash must be 64 lower-case hex characters");
+      headers["X-Relay-Client-IP-Hash"] = clientIpHash2;
+    }
+    let payload;
+    if (body !== void 0) {
+      headers["Content-Type"] = "application/json";
+      payload = JSON.stringify(body);
+    }
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    let res;
+    try {
+      res = await fetch(url, { method, headers, body: payload, signal: combined, redirect: "error" });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      const e = err;
+      const why = e.cause?.code ?? e.cause?.message ?? (e.name === "TimeoutError" ? "timed out" : e.name);
+      throw new RelayNetworkError(`relay unreachable (${String(why).slice(0, 120)})`);
+    }
+    let text;
+    try {
+      text = await res.text();
+    } catch {
+      throw new RelayNetworkError("relay response was cut off");
+    }
+    let json = void 0;
+    if (text) {
+      try {
+        json = JSON.parse(text);
+      } catch {
+        if (res.ok) throw new RelayNetworkError(`relay answered ${res.status} with a body that is not JSON`);
+      }
+    }
+    if (!res.ok) {
+      const obj = json && typeof json === "object" ? json : {};
+      const code = typeof obj.error === "string" ? obj.error : `http_${res.status}`;
+      const detail = typeof obj.detail === "string" ? obj.detail.slice(0, 500) : "";
+      throw new RelayError(res.status, code, detail, parseRetryAfter(res.headers.get("retry-after")));
+    }
+    return json;
+  }
+  /**
+   * One call with retry and exponential backoff on network errors, 5xx and 429. A 401 with
+   * a refreshable identity drops the cached token and retries once at once (M2-SPEC §2).
+   */
+  async call(method, path, body, opts = {}) {
+    const attempts = Math.max(1, opts.attempts ?? this.attempts);
+    const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
+    let refreshed = false;
+    for (let attempt = 0; ; ) {
+      try {
+        return await this.once(method, path, body, timeoutMs, opts.signal, opts.onBehalfOf, opts.clientIpHash);
+      } catch (err) {
+        if (opts.signal?.aborted) throw err;
+        if (err instanceof RelayError && err.status === 401 && !refreshed && this.token.invalidate) {
+          refreshed = true;
+          this.token.invalidate();
+          continue;
+        }
+        if (err instanceof RelayError && err.status === 401 && isCredentialProvider(this.token)) {
+          throw new RelayError(401, err.code, SIGN_IN_AGAIN);
+        }
+        if (attempt + 1 >= attempts || !isRetryable(err)) throw err;
+        await this.sleep(backoffDelay(attempt, this.backoff, this.random));
+        attempt++;
+      }
+    }
+  }
+  me(opts) {
+    return this.call("GET", this.teamPath("me"), void 0, opts);
+  }
+  publishManifest(member, manifest, opts) {
+    if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
+    return this.call(
+      "PUT",
+      this.teamPath("members", member, "manifest"),
+      manifest,
+      opts
+    );
+  }
+  directory(opts) {
+    return this.call("GET", this.teamPath("directory"), void 0, opts);
+  }
+  /**
+   * M7-SPEC §1: what waits in this member's inbox for their answering session. A peek: it moves
+   * no cursor and writes no presence, so a session without the channel may read it too.
+   */
+  inboxSummary(opts) {
+    return this.call("GET", this.teamPath("inbox", "summary"), void 0, opts);
+  }
+  /** Safe to retry: the idempotency key makes a repeated POST return the original request. */
+  createRequest(body, opts) {
+    return this.call("POST", this.teamPath("requests"), body, opts);
+  }
+  readStream(stream, q = {}, opts) {
+    const params = new URLSearchParams();
+    if (q.after !== void 0) params.set("after", String(q.after));
+    if (q.wait !== void 0) params.set("wait", String(q.wait));
+    if (q.limit !== void 0) params.set("limit", String(q.limit));
+    const qs = params.toString();
+    const timeoutMs = opts?.timeoutMs ?? (q.wait ?? 0) * 1e3 + 2e4;
+    return this.call("GET", this.teamPath("streams", stream) + (qs ? `?${qs}` : ""), void 0, {
+      ...opts,
+      timeoutMs
+    });
+  }
+  ackCursor(stream, ackedSeq, opts) {
+    return this.call("POST", this.teamPath("streams", stream, "cursor"), { acked_seq: ackedSeq }, opts);
+  }
+  checkRequestId(id) {
+    if (!REQUEST_ID_RE.test(id)) throw new Error("request_id must look like rq_ followed by 32 lowercase hex characters");
+  }
+  ackRequest(requestId2, opts) {
+    this.checkRequestId(requestId2);
+    return this.call("POST", this.teamPath("requests", requestId2, "ack"), {}, opts);
+  }
+  reply(requestId2, body, opts) {
+    this.checkRequestId(requestId2);
+    return this.call(
+      "POST",
+      this.teamPath("requests", requestId2, "reply"),
+      body,
+      opts
+    );
+  }
+  /** Not idempotent (it appends), so it is sent once unless the caller asks otherwise. */
+  progress(requestId2, body, opts) {
+    this.checkRequestId(requestId2);
+    return this.call("POST", this.teamPath("requests", requestId2, "progress"), body, {
+      attempts: 1,
+      ...opts
+    });
+  }
+  getRequest(requestId2, opts) {
+    this.checkRequestId(requestId2);
+    return this.call("GET", this.teamPath("requests", requestId2), void 0, opts);
+  }
+  /** M2-SPEC §3.3: a tool's name, outcome and duration only. Appends, so it is sent once. */
+  toolEvent(requestId2, body, opts) {
+    this.checkRequestId(requestId2);
+    return this.call("POST", this.teamPath("requests", requestId2, "events"), body, {
+      attempts: 1,
+      ...opts
+    });
+  }
+  /** M10-SPEC §1: the team's boundaries (any member). Never set: version 0, boundaries null. */
+  boundaries(opts) {
+    return this.call("GET", this.teamPath("boundaries"), void 0, opts);
+  }
+  /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
+  setBoundaries(body, opts) {
+    return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
+  acceptance(opts) {
+    return this.call("GET", this.teamPath("me", "acceptance"), void 0, opts);
+  }
+  /** M11-SPEC §2: accept the current boundaries version (only for oneself). Sent once. */
+  setAcceptance(version, opts) {
+    return this.call("PUT", this.teamPath("me", "acceptance"), { version }, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §3: the background answerer's status (the member itself only). Sent once. */
+  putStatus(body, opts) {
+    return this.call("PUT", this.teamPath("me", "status"), body, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §3: every member's setup progress and whether they are answering now. */
+  membersStatus(opts) {
+    return this.call("GET", this.teamPath("members", "status"), void 0, opts);
+  }
+  /** M11-SPEC §4: this member's recent requests, newest first. */
+  myRequests(limit = 20, opts) {
+    return this.call("GET", this.teamPath("me", "requests") + `?limit=${limit}`, void 0, opts);
+  }
+  /** M6-SPEC §2: the team's roster (owners see every email; members only their own). */
+  roster(opts) {
+    return this.call("GET", this.teamPath("roster"), void 0, opts);
+  }
+  /** M6-SPEC §2 (owners): add a member. Not idempotent, so sent once. */
+  addMember(body, opts) {
+    return this.call("POST", this.teamPath("roster"), body, { attempts: 1, ...opts });
+  }
+  /** M6-SPEC §2 (owners): add or remove one email, or change the role. Sent once. */
+  updateMember(member, body, opts) {
+    if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
+    return this.call("PATCH", this.teamPath("roster", member), body, { attempts: 1, ...opts });
+  }
+  /** M6-SPEC §2 (owners): remove a member (their device credentials are revoked). Sent once. */
+  removeMember(member, opts) {
+    if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
+    return this.call("DELETE", this.teamPath("roster", member), void 0, { attempts: 1, ...opts });
+  }
+  /** M5-SPEC §3: revoke the credential this client signs in with (logout). */
+  revokeSelf(opts) {
+    return this.call("DELETE", this.teamPath("credentials", "self"), void 0, { attempts: 1, ...opts });
+  }
+  // M9-SPEC §2, §4, §7: the account routes. They take a Google identity (a Google ID token,
+  // or a delegate on behalf of an email); a device credential or a static token is refused
+  // with 403 google_identity_required. The mutations are sent once.
+  /** The teams (and invitations) of the signed-in Google account. */
+  myTeams(opts) {
+    return this.call("GET", "v1/me/teams", void 0, opts);
+  }
+  /** Create a team; the caller becomes its first owner. */
+  createTeam(body, opts) {
+    return this.call("POST", "v1/teams", body, { attempts: 1, ...opts });
+  }
+  /** Accept or decline an invitation to `team`. */
+  answerInvitation(team, accept, opts) {
+    if (!TEAM_RE.test(team)) throw new Error("invalid team id");
+    return this.call("POST", ["v1", "me", "invitations", team].map(encodeURIComponent).join("/"), { accept }, {
+      attempts: 1,
+      ...opts
+    });
+  }
+  /** An owner deletes this client's team (M9-SPEC §7.7); `confirm` is the team id typed again. */
+  deleteTeam(confirm, opts) {
+    return this.call("DELETE", ["v1", "teams", this.team].map(encodeURIComponent).join("/"), { confirm }, {
+      attempts: 1,
+      ...opts
+    });
+  }
+  /** Relay admins (M9-SPEC §4): every team, a page at a time. */
+  adminTeams(q = {}, opts) {
+    const params = new URLSearchParams();
+    if (q.after !== void 0) params.set("after", q.after);
+    if (q.limit !== void 0) params.set("limit", String(q.limit));
+    const qs = params.toString();
+    return this.call("GET", "v1/admin/teams" + (qs ? `?${qs}` : ""), void 0, opts);
+  }
+  /** Relay admins (M9-SPEC §4): delete a team; `confirm` is its id typed again. */
+  adminDeleteTeam(team, confirm, opts) {
+    if (!TEAM_RE.test(team)) throw new Error("invalid team id");
+    return this.call("DELETE", ["v1", "admin", "teams", team].map(encodeURIComponent).join("/"), { confirm }, {
+      attempts: 1,
+      ...opts
+    });
+  }
+  /** M2-SPEC §3.5: the team's activity feed. */
+  activity(q = {}, opts) {
+    const params = new URLSearchParams();
+    if (q.since !== void 0) params.set("since", q.since);
+    if (q.limit !== void 0) params.set("limit", String(q.limit));
+    const qs = params.toString();
+    return this.call("GET", this.teamPath("activity") + (qs ? `?${qs}` : ""), void 0, opts);
+  }
+};
+function relayClientFromEnv(env, extra = {}) {
+  const c = connectionFromEnv(env);
+  return new RelayClient({ url: c.url, team: c.team, token: c.token, ...extra });
+}
+
 // src/notify.ts
-init_relay_client();
 var DATA_JSON_LIMIT = 16 * 1024;
 
 // src/boundary-set.ts
 var MAX_WALK_FILE_BYTES = 5 * 1024 * 1024;
 var ANY_DEPTH_RES = ANY_DEPTH.map((rule) => globRe(rule.replace(/^\*\*\//, "").replace(/\/\*\*$/, "")));
-var isObj2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-function validBoundaries(v) {
-  if (!isObj2(v) || !versionOk(v.version)) return false;
-  if (v.boundaries === null) return v.since === void 0 || v.since === null;
-  const b = readBoundaries(v.boundaries);
-  if (!b || !sinceValid(v.since, v.version)) return false;
-  v.boundaries = b;
-  if (isObj2(v.since)) v.since = { github_orgs: v.since.github_orgs, github_repos: v.since.github_repos ?? {}, drive_folders: v.since.drive_folders ?? {}, drives: v.since.drives, member_folders: v.since.member_folders };
-  return true;
-}
-function sinceValid(v, version) {
-  if (v === void 0 || v === null) return true;
-  const inRange = (n) => versionOk(n) && n >= 1 && n <= version;
-  const keys = (o, want) => Object.keys(o).length === want.length && want.every((k) => Object.prototype.hasOwnProperty.call(o, k));
-  if (!isObj2(v) || !(keys(v, ["github_orgs", "drives", "member_folders"]) || keys(v, ["github_orgs", "github_repos", "drive_folders", "drives", "member_folders"]))) return false;
-  const orgs = v.github_orgs;
-  if (!isObj2(orgs) || Object.keys(orgs).length > BOUNDARIES_MAX_ORGS) return false;
-  if (!Object.entries(orgs).every(([o, n]) => orgOk(o) && o === o.toLowerCase() && inRange(n))) return false;
-  if (v.github_repos !== void 0) {
-    const repos = v.github_repos;
-    if (!isObj2(repos) || Object.keys(repos).length > BOUNDARIES_MAX_REPOS) return false;
-    const repoKeyOk = (k) => {
-      const at = k.indexOf("/");
-      return at > 0 && k === k.toLowerCase() && orgOk(k.slice(0, at)) && repoNameOk(k.slice(at + 1));
-    };
-    if (!Object.entries(repos).every(([k, n]) => repoKeyOk(k) && inRange(n))) return false;
-  }
-  if (v.drive_folders !== void 0) {
-    const folders = v.drive_folders;
-    if (!isObj2(folders) || Object.keys(folders).length > BOUNDARIES_MAX_FOLDERS) return false;
-    if (!Object.entries(folders).every(([k, n]) => driveItemIdOk(k) && inRange(n))) return false;
-  }
-  if (!Array.isArray(v.drives) || v.drives.length > BOUNDARIES_MAX_DRIVES) return false;
-  if (!v.drives.every((d) => isObj2(d) && keys(d, ["domain", "shared_drive", "since"]) && domainOk(d.domain) && driveNameOk(d.shared_drive) && inRange(d.since))) return false;
-  return v.member_folders === null || inRange(v.member_folders);
-}
-
-// src/drive-cli.ts
-init_credentials();
-
-// src/drive-login.ts
-import { createHash as createHash3, randomBytes as randomBytes2, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
-import { createServer } from "node:http";
-
-// src/console-open.ts
-import { execFile as execFile2 } from "node:child_process";
-import { chmodSync as chmodSync2, mkdtempSync, rmSync as rmSync2, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { isAbsolute as isAbsolute3, join as join3 } from "node:path";
-var REDIRECT_TTL_MS = 1e4;
-var REDIRECT_FILE = "console.html";
-var defaultRun = (command, args, done) => {
-  execFile2(command, args, { shell: false, timeout: 1e4 }, (err) => done(err));
-};
-function escapeHtml(text) {
-  return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-}
-function redirectHtml(url, title = "Team console") {
-  const u = escapeHtml(url);
-  const t = escapeHtml(title);
-  return [
-    "<!doctype html>",
-    '<html lang="en"><head><meta charset="utf-8">',
-    '<meta name="referrer" content="no-referrer">',
-    `<meta http-equiv="refresh" content="0;url=${u}">`,
-    `<title>${t}</title></head>`,
-    `<body><p><a href="${u}">${t}</a></p></body></html>`,
-    ""
-  ].join("\n");
-}
-function openerFor(platform, env = process.env) {
-  const custom = env.TEAM_RELAY_OPEN_COMMAND?.trim();
-  if (custom) return isAbsolute3(custom) ? custom : null;
-  if (platform === "darwin") return "open";
-  if (platform === "linux") return "xdg-open";
-  return null;
-}
-function openInBrowser(url, opts) {
-  const what = opts.what ?? "the URL above";
-  const told = (opened) => opts.onResult?.(opened);
-  const opener = opts.opener ?? openerFor(opts.platform ?? process.platform);
-  if (!opener) {
-    opts.log(`no browser opener on this platform; open ${what} yourself`);
-    told(false);
-    return null;
-  }
-  let dir;
-  try {
-    dir = mkdtempSync(join3(opts.tmpRoot ?? tmpdir(), "team-relay-console-"));
-    chmodSync2(dir, 448);
-  } catch {
-    opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
-    told(false);
-    return null;
-  }
-  const cleanup = () => rmSync2(dir, { recursive: true, force: true });
-  const file = join3(dir, REDIRECT_FILE);
-  try {
-    writeFileSync(file, redirectHtml(url, opts.title), { mode: 384, flag: "wx" });
-  } catch {
-    cleanup();
-    opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
-    told(false);
-    return null;
-  }
-  process.once("exit", cleanup);
-  setTimeout(() => {
-    process.removeListener("exit", cleanup);
-    cleanup();
-  }, opts.deleteAfterMs ?? REDIRECT_TTL_MS).unref();
-  (opts.run ?? defaultRun)(opener, [file], (err) => {
-    if (err) opts.log(`could not open a browser (${opener}); open ${what} yourself`);
-    told(!err);
-  });
-  return file;
-}
-
-// src/drive-login.ts
-init_credentials();
-
-// src/google-drive.ts
-import { execFile as execFile3 } from "node:child_process";
-init_credentials();
-var DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
-var KEYCHAIN_SERVICE = "team-relay-drive";
-var GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
-var GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-var GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
-var GOOGLE_HOSTS = /* @__PURE__ */ new Set(["accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com", "sheets.googleapis.com"]);
-var REFRESH_TOKEN_RE = /^[A-Za-z0-9._~+/-]{10,2048}$/;
-var DOMAIN_RE = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
-var CLIENT_ID_RE = /^[A-Za-z0-9.-]{1,200}\.apps\.googleusercontent\.com$/;
-var CLIENT_SECRET_RE = /^[A-Za-z0-9_-]{1,200}$/;
-var MAX_LINK_FILE_BYTES = 4 * 1024;
-var MAX_TEXT_BYTES = 200 * 1024;
-var MAX_JSON_BYTES = 1024 * 1024;
-var MAX_SHEET_JSON_BYTES = 8 * 1024 * 1024;
-var GOOGLE_TIMEOUT_MS = 2e4;
-var USER_AGENT = "team-relay-plugin/0.1.0";
-var KeychainError = class extends Error {
-  constructor(message2) {
-    super(message2);
-    this.name = "KeychainError";
-  }
-};
-var SECURITY = "/usr/bin/security";
-var ITEM_NOT_FOUND = 44;
-var execSecurity = (args, stdin) => new Promise((resolve) => {
-  const child = execFile3(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8" }, (err, stdout) => {
-    const code = err ? typeof err.code === "number" ? err.code : 1 : 0;
-    resolve({ code, stdout: String(stdout ?? "") });
-  });
-  if (stdin !== void 0) child.stdin?.end(stdin);
-  else child.stdin?.end();
-});
-function macKeychain(exec = execSecurity) {
-  const checkAccount = (account) => {
-    if (typeof account !== "string" || account.length > 254 || !EMAIL_RE2.test(account)) throw new KeychainError("invalid account");
-  };
-  return {
-    async account() {
-      const r = await exec(["find-generic-password", "-s", KEYCHAIN_SERVICE]);
-      if (r.code === ITEM_NOT_FOUND) return null;
-      if (r.code !== 0) throw new KeychainError(`the Keychain could not be read (security exit ${r.code})`);
-      const m = /"acct"<blob>="([^"\n]*)"/.exec(r.stdout);
-      const acct = m?.[1];
-      return acct && EMAIL_RE2.test(acct) ? acct : null;
-    },
-    async read(account) {
-      checkAccount(account);
-      const r = await exec(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"]);
-      if (r.code === ITEM_NOT_FOUND) return null;
-      if (r.code !== 0) throw new KeychainError(`the Keychain could not be read (security exit ${r.code})`);
-      const token = r.stdout.replace(/\n$/, "");
-      return REFRESH_TOKEN_RE.test(token) ? token : null;
-    },
-    async write(account, token) {
-      checkAccount(account);
-      if (!REFRESH_TOKEN_RE.test(token)) throw new KeychainError("the token has an unexpected form; nothing was stored");
-      const line = `add-generic-password -U -s "${KEYCHAIN_SERVICE}" -a "${account}" -l "${KEYCHAIN_SERVICE}" -w "${token}"
-`;
-      const r = await exec(["-i"], line);
-      if (r.code !== 0) throw new KeychainError(`the Keychain could not be written (security exit ${r.code})`);
-      const back = await this.read(account);
-      if (back !== token) throw new KeychainError("the Keychain did not keep the token");
-    },
-    async removeAll() {
-      let n = 0;
-      for (let i = 0; i < 20; i++) {
-        const r = await exec(["delete-generic-password", "-s", KEYCHAIN_SERVICE]);
-        if (r.code === ITEM_NOT_FOUND) return n;
-        if (r.code !== 0) throw new KeychainError(`the Keychain item could not be deleted (security exit ${r.code})`);
-        n++;
-      }
-      throw new KeychainError("too many Keychain items to delete");
-    }
-  };
-}
-function defaultKeychain(platform = process.platform) {
-  return platform === "darwin" ? macKeychain() : null;
-}
-function assertGoogleUrl(url) {
-  const u = new URL(url);
-  if (u.protocol !== "https:" || !GOOGLE_HOSTS.has(u.hostname) || u.port !== "" || u.username || u.password) {
-    throw new Error("not a Google endpoint");
-  }
-  return u;
-}
-async function readCapped(res, max) {
-  if (!res.body) return { buf: Buffer.alloc(0), over: false };
-  const reader = res.body.getReader();
-  const chunks = [];
-  let n = 0;
-  for (; ; ) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (n + value.byteLength > max) {
-      chunks.push(Buffer.from(value.subarray(0, max - n)));
-      n = max;
-      await reader.cancel().catch(() => {
-      });
-      return { buf: Buffer.concat(chunks), over: true };
-    }
-    chunks.push(Buffer.from(value));
-    n += value.byteLength;
-  }
-  return { buf: Buffer.concat(chunks), over: false };
-}
-async function googleRequest(doFetch, url, init = {}) {
-  assertGoogleUrl(url);
-  const signal = AbortSignal.timeout(init.timeoutMs ?? GOOGLE_TIMEOUT_MS);
-  try {
-    const res = await doFetch(url, {
-      method: init.method ?? "GET",
-      headers: { "User-Agent": USER_AGENT, ...init.headers ?? {} },
-      ...init.body !== void 0 ? { body: init.body } : {},
-      redirect: "error",
-      signal
-    });
-    const { buf, over } = await readCapped(res, init.maxBytes ?? MAX_JSON_BYTES);
-    return { status: res.status, body: buf, over };
-  } catch {
-    return { status: 0, body: Buffer.alloc(0), over: false };
-  }
-}
-function jsonOf(r) {
-  if (r.over) return null;
-  try {
-    const v = JSON.parse(r.body.toString("utf8"));
-    return typeof v === "object" && v !== null && !Array.isArray(v) ? v : null;
-  } catch {
-    return null;
-  }
-}
-function googleForm(doFetch, url, form, maxBytes = 16 * 1024) {
-  return googleRequest(doFetch, url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: new URLSearchParams(form).toString(),
-    maxBytes
-  });
-}
-function oauthError(r) {
-  const j = jsonOf(r);
-  const e = j?.error;
-  return typeof e === "string" && /^[a-z_]{1,40}$/.test(e) ? e : null;
-}
-async function revokeToken(doFetch, token) {
-  const r = await googleForm(doFetch, GOOGLE_REVOKE_URL, { token });
-  return r.status === 200 || r.status === 400 && oauthError(r) === "invalid_token";
-}
-async function fetchDriveClient(relay) {
-  let c;
-  try {
-    c = await relay.driveClient();
-  } catch (err) {
-    const status = err.status;
-    const code = err.code;
-    if (status === 404 && code === "drive_not_configured") throw new DriveReadError("Google Drive is not set up for this team (ask the relay admin)");
-    throw new DriveReadError("the team relay did not give the Google Drive client; try again later");
-  }
-  if (!c || typeof c.client_id !== "string" || !CLIENT_ID_RE.test(c.client_id) || typeof c.client_secret !== "string" || !CLIENT_SECRET_RE.test(c.client_secret)) {
-    throw new DriveReadError("the team relay gave an invalid Google Drive client");
-  }
-  return { client_id: c.client_id, client_secret: c.client_secret };
-}
-function isDomain(d) {
-  return typeof d === "string" && DOMAIN_RE.test(d);
-}
-function emailInDomain(email2, domain) {
-  if (!EMAIL_RE2.test(email2)) return false;
-  const at = email2.lastIndexOf("@");
-  return email2.slice(at + 1).toLowerCase() === domain.toLowerCase();
-}
-var DriveReadError = class extends Error {
-  constructor(message2) {
-    super(message2);
-    this.name = "DriveReadError";
-  }
-};
-var tokenCache = /* @__PURE__ */ new Map();
-function clearDriveTokenCache() {
-  tokenCache.clear();
-}
-
-// src/login.ts
-import { createHash as createHash2, randomBytes, timingSafeEqual } from "node:crypto";
-init_credentials();
-init_relay_client_core();
-var LOGIN_TIMEOUT_MS = 5 * 6e4;
-var TOKEN_RESPONSE_LIMIT = 16 * 1024;
-function base64url(buf) {
-  return buf.toString("base64url");
-}
-function codeChallenge(verifier) {
-  return base64url(createHash2("sha256").update(verifier, "ascii").digest());
-}
-
-// src/drive-login.ts
-var DRIVE_CONNECT_TIMEOUT_MS = 11e4;
-var DRIVE_CONNECT_SCOPE = `openid email ${DRIVE_SCOPE}`;
-var STATE_RE = /^[A-Za-z0-9_-]{43}$/;
-var GOOGLE_CODE_RE = /^[A-Za-z0-9._~/+-]{10,1024}$/;
-var GOOGLE_ISSUERS = /* @__PURE__ */ new Set(["https://accounts.google.com", "accounts.google.com"]);
-var MAC_ONLY = "Google Drive can only be connected on macOS: the connection is kept in the macOS Keychain, never in a file.";
-var DriveConnectError = class extends Error {
-  constructor(message2) {
-    super(message2);
-    this.name = "DriveConnectError";
-  }
-};
-function sameSecret(a, b) {
-  const ha = createHash3("sha256").update(a, "utf8").digest();
-  const hb = createHash3("sha256").update(b, "utf8").digest();
-  return timingSafeEqual2(ha, hb);
-}
-var PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-function page(title, text) {
-  return [
-    "<!doctype html>",
-    '<html lang="en"><head><meta charset="utf-8">',
-    '<meta name="viewport" content="width=device-width, initial-scale=1">',
-    '<meta name="referrer" content="no-referrer">',
-    `<title>${title}</title>`,
-    "<style>body{font:15px/1.5 system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#f7f7f5;color:#1c1c1a}",
-    "main{max-width:26rem;padding:1.5rem 1.75rem;border:1px solid #e3e2de;border-radius:12px;background:#fff}",
-    "h1{font-size:16px;margin:0 0 .4rem}p{margin:0;color:#5c5b57}",
-    "@media (prefers-color-scheme:dark){body{background:#151514;color:#ecebe7}main{background:#1d1d1b;border-color:#2e2e2b}p{color:#a3a29c}}</style>",
-    `</head><body><main><h1>${title}</h1><p>${text}</p></main></body></html>`,
-    ""
-  ].join("\n");
-}
-function respond(res, status, body) {
-  res.writeHead(status, {
-    "Content-Type": "text/html; charset=utf-8",
-    "Content-Length": String(Buffer.byteLength(body)),
-    "Content-Security-Policy": PAGE_CSP,
-    "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
-    Connection: "close"
-  });
-  res.end(body);
-}
-function idTokenClaims(idToken) {
-  const parts = idToken.split(".");
-  if (parts.length !== 3 || parts[1].length > 8192) return null;
-  try {
-    const v = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
-    return typeof v === "object" && v !== null && !Array.isArray(v) ? v : null;
-  } catch {
-    return null;
-  }
-}
-function checkIdToken(idToken, want) {
-  if (typeof idToken !== "string" || idToken.length > 16384) return { ok: false, reason: "Google did not say which account signed in" };
-  const c = idTokenClaims(idToken);
-  if (!c) return { ok: false, reason: "Google did not say which account signed in" };
-  if (typeof c.iss !== "string" || !GOOGLE_ISSUERS.has(c.iss)) return { ok: false, reason: "the sign-in did not come from Google" };
-  const audOk = c.aud === want.clientId || Array.isArray(c.aud) && c.aud.includes(want.clientId) && c.azp === want.clientId;
-  if (!audOk) return { ok: false, reason: "the sign-in was for another app" };
-  if (typeof c.exp !== "number" || c.exp * 1e3 <= want.nowMs) return { ok: false, reason: "the sign-in had already expired" };
-  if (typeof c.nonce !== "string" || !sameSecret(c.nonce, want.nonce)) return { ok: false, reason: "the sign-in did not match this request" };
-  const email2 = c.email;
-  if (typeof email2 !== "string" || email2.length > 254 || !EMAIL_RE2.test(email2)) return { ok: false, reason: "Google did not say which account signed in" };
-  if (c.email_verified !== true) return { ok: false, reason: "the Google account's email is not verified" };
-  if (c.hd !== want.domain || !emailInDomain(email2, want.domain)) {
-    return { ok: false, reason: `the Google account is not in ${want.domain}; sign in with your ${want.domain} account` };
-  }
-  return { ok: true, email: email2.toLowerCase() };
-}
-async function startDriveConnect(opts) {
-  const log2 = opts.log ?? (() => {
-  });
-  const now = opts.now ?? Date.now;
-  if (!isDomain(opts.domain)) throw new DriveConnectError("the team's Drive domain is not valid");
-  if (opts.loginHint !== void 0 && (!EMAIL_RE2.test(opts.loginHint) || !emailInDomain(opts.loginHint, opts.domain))) {
-    throw new DriveConnectError(`the account must be an address in ${opts.domain}`);
-  }
-  const doFetch = opts.fetch ?? ((u, i) => fetch(u, i));
-  const verifier = base64url(randomBytes2(48));
-  const state = base64url(randomBytes2(32));
-  const nonce = base64url(randomBytes2(32));
-  const challenge = codeChallenge(verifier);
-  let settle;
-  const done = new Promise((resolve, reject) => {
-    settle = { resolve, reject };
-  });
-  done.catch(() => {
-  });
-  let finished = false;
-  let used = false;
-  let timer = null;
-  let server = null;
-  let port = 0;
-  const shut = () => {
-    if (timer) clearTimeout(timer);
-    timer = null;
-    if (server) {
-      server.close();
-      server.closeAllConnections();
-    }
-  };
-  const fail2 = (message2) => {
-    if (finished) return;
-    finished = true;
-    shut();
-    settle.reject(new DriveConnectError(message2));
-  };
-  const succeed = (v) => {
-    if (finished) return;
-    finished = true;
-    shut();
-    settle.resolve(v);
-  };
-  const discard = async (token) => {
-    if (!token) return;
-    const gone = await revokeToken(doFetch, token).catch(() => false);
-    if (!gone) log2('could not revoke the unused Google token; remove "team relay" access at myaccount.google.com/permissions');
-  };
-  const redirectUri = () => `http://127.0.0.1:${port}/callback`;
-  const exchange = async (code) => {
-    const r = await googleForm(
-      doFetch,
-      GOOGLE_TOKEN_URL,
-      {
-        code,
-        client_id: opts.client.client_id,
-        client_secret: opts.client.client_secret,
-        redirect_uri: redirectUri(),
-        grant_type: "authorization_code",
-        code_verifier: verifier
-      },
-      64 * 1024
-    );
-    if (r.status === 0) return fail2("Google did not answer the sign-in; run /team-relay:drive connect again");
-    let body = null;
-    if (!r.over) {
-      try {
-        const v = JSON.parse(r.body.toString("utf8"));
-        if (typeof v === "object" && v !== null && !Array.isArray(v)) body = v;
-      } catch {
-        body = null;
-      }
-    }
-    const refresh = typeof body?.refresh_token === "string" ? body.refresh_token : null;
-    const access = typeof body?.access_token === "string" ? body.access_token : null;
-    if (r.status !== 200 || !body) {
-      await discard(refresh ?? access);
-      const e = oauthError(r);
-      return fail2(`Google refused the sign-in (${r.status}${e ? ` ${e}` : ""}); run /team-relay:drive connect again`);
-    }
-    const reject = async (why) => {
-      await discard(refresh ?? access);
-      return fail2(`${why}; nothing was stored`);
-    };
-    if (!refresh || !REFRESH_TOKEN_RE.test(refresh)) return reject("Google did not give a lasting Drive connection");
-    const scope = typeof body.scope === "string" ? body.scope.split(" ") : [];
-    if (!scope.includes(DRIVE_SCOPE)) return reject('Drive read access was not granted (tick "See and download your Google Drive files")');
-    const id = checkIdToken(body.id_token, { clientId: opts.client.client_id, nonce, domain: opts.domain, nowMs: now() });
-    if (!id.ok) return reject(id.reason);
-    let previous = null;
-    let previousToken = null;
-    try {
-      previous = await opts.keychain.account();
-      if (previous && previous !== id.email) previousToken = await opts.keychain.read(previous);
-      await opts.keychain.removeAll();
-      await opts.keychain.write(id.email, refresh);
-    } catch (err) {
-      await discard(refresh);
-      return fail2(`signed in, but the Keychain could not keep the connection (${err.message}); nothing was stored`);
-    }
-    clearDriveTokenCache();
-    if (previousToken) await discard(previousToken);
-    succeed({ email: id.email, replaced: previous && previous !== id.email ? previous : null });
-  };
-  const handle = (req, res) => {
-    req.resume();
-    if (used || finished) {
-      respond(res, 410, page("Sign-in link used", "This sign-in has finished. You can close this tab."));
-      return;
-    }
-    const notOurs = (why) => {
-      respond(res, 404, page("Not found", "There is nothing here."));
-      log2(`ignored a request to the Drive sign-in listener (${why}); still waiting`);
-    };
-    if (req.headers.host !== `127.0.0.1:${port}`) return notOurs("unexpected Host");
-    let url2;
-    try {
-      url2 = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
-    } catch {
-      return notOurs("unreadable request");
-    }
-    if (req.method !== "GET" || url2.pathname !== "/callback") return notOurs("not GET /callback");
-    const states = url2.searchParams.getAll("state");
-    if (states.length !== 1 || !STATE_RE.test(states[0]) || !sameSecret(states[0], state)) return notOurs("wrong state");
-    used = true;
-    const errors = url2.searchParams.getAll("error");
-    if (errors.length > 0) {
-      respond(res, 200, page("Not connected", "Nothing was changed. You can close this tab."));
-      const e = /^[a-z_]{1,40}$/.test(errors[0]) ? errors[0] : "error";
-      return fail2(`the Google sign-in was cancelled or refused (${e}); run /team-relay:drive connect to try again`);
-    }
-    const codes = url2.searchParams.getAll("code");
-    if (codes.length !== 1 || !GOOGLE_CODE_RE.test(codes[0])) {
-      respond(res, 400, page("Not connected", "The sign-in answer carried no code. Run /team-relay:drive connect again in Claude Code."));
-      return fail2("the Google sign-in did not complete (no code); run /team-relay:drive connect again");
-    }
-    respond(res, 200, page("Google Drive connected", "You can close this tab and go back to Claude Code."));
-    void exchange(codes[0]).catch(() => fail2("the Google sign-in could not be completed; run /team-relay:drive connect again"));
-  };
-  server = createServer(handle);
-  server.requestTimeout = 3e4;
-  server.headersTimeout = 1e4;
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-  port = server.address().port;
-  const auth = new URL(GOOGLE_AUTH_URL);
-  auth.searchParams.set("client_id", opts.client.client_id);
-  auth.searchParams.set("redirect_uri", redirectUri());
-  auth.searchParams.set("response_type", "code");
-  auth.searchParams.set("scope", DRIVE_CONNECT_SCOPE);
-  auth.searchParams.set("access_type", "offline");
-  auth.searchParams.set("prompt", "consent");
-  auth.searchParams.set("hd", opts.domain);
-  auth.searchParams.set("state", state);
-  auth.searchParams.set("nonce", nonce);
-  auth.searchParams.set("code_challenge", challenge);
-  auth.searchParams.set("code_challenge_method", "S256");
-  if (opts.loginHint) auth.searchParams.set("login_hint", opts.loginHint);
-  const url = auth.toString();
-  const limit = opts.timeoutMs ?? DRIVE_CONNECT_TIMEOUT_MS;
-  timer = setTimeout(() => fail2(`the Google sign-in was not finished within ${Math.round(limit / 1e3)} seconds; run /team-relay:drive connect again`), limit);
-  timer.unref?.();
-  try {
-    (opts.open ?? ((u) => void openInBrowser(u, { log: log2, title: "Connect Google Drive", what: "the Google sign-in link" })))(url);
-  } catch {
-    log2("could not open a browser");
-  }
-  return { url, port, done, cancel: () => fail2("the Google sign-in was cancelled") };
-}
-function teamDriveDomain(drives, loginHint) {
-  const domains = [...new Set((drives ?? []).map((d) => d.domain).filter(isDomain))];
-  if (domains.length === 0) throw new DriveConnectError("your team has no shared Google Drive or Drive folder in its boundaries, so there is nothing to connect");
-  if (loginHint) {
-    const d = domains.find((x) => emailInDomain(loginHint, x));
-    if (!d) throw new DriveConnectError(`that account is not in your team's Drive domain (${domains.join(", ")})`);
-    return d;
-  }
-  if (domains.length > 1) throw new DriveConnectError(`your team's Drive folders and drives are in several domains (${domains.join(", ")}): run /team-relay:drive connect <your email>`);
-  return domains[0];
-}
-async function driveStatus(keychain) {
-  if (!keychain) return MAC_ONLY;
-  const account = await keychain.account();
-  return account ? `Google Drive is connected as ${account} on this Mac. /team-relay:drive disconnect removes it.` : "Google Drive is not connected on this Mac. Run /team-relay:drive connect.";
-}
-async function driveDisconnect(keychain, doFetch = (u, i) => fetch(u, i)) {
-  if (!keychain) return MAC_ONLY;
-  const account = await keychain.account();
-  if (!account) {
-    await keychain.removeAll();
-    return "Google Drive was not connected on this Mac; nothing to do.";
-  }
-  let token = null;
-  try {
-    token = await keychain.read(account);
-  } catch {
-    token = null;
-  }
-  const revoked = token ? await revokeToken(doFetch, token).catch(() => false) : false;
-  await keychain.removeAll();
-  clearDriveTokenCache();
-  return revoked ? `Google Drive disconnected: ${account}'s access was revoked at Google and removed from this Mac.` : `Google Drive disconnected: removed from this Mac. Google could not confirm the revocation; remove "team relay" at myaccount.google.com/permissions to be sure.`;
-}
-
-// src/drive-cli.ts
-var USAGE = "usage: /team-relay:drive [status | connect [your-email] | disconnect]";
-function parseDriveArgs(argv) {
-  const a = argv.filter((x) => x !== "");
-  if (a.length === 0 || a.length === 1 && a[0] === "status") return { cmd: "status" };
-  if (a.length === 1 && a[0] === "disconnect") return { cmd: "disconnect" };
-  if (a[0] === "connect" && a.length === 1) return { cmd: "connect" };
-  if (a[0] === "connect" && a.length === 2 && a[1].length <= 254 && EMAIL_RE2.test(a[1])) return { cmd: "connect", email: a[1].toLowerCase() };
-  return null;
-}
-async function defaultRelay() {
-  const { relayClientFromEnv: relayClientFromEnv2 } = await Promise.resolve().then(() => (init_relay_client(), relay_client_exports));
-  const c = relayClientFromEnv2(process.env, { attempts: 1, timeoutMs: 15e3 });
-  return { driveClient: () => c.driveClient(), boundaries: () => c.boundaries() };
-}
-async function runDriveCli(argv, deps = {}) {
-  const parsed = parseDriveArgs(argv);
-  if (!parsed) return { exitCode: 2, line: USAGE };
-  const platform = deps.platform ?? process.platform;
-  if (platform !== "darwin") return { exitCode: 1, line: MAC_ONLY };
-  const keychain = deps.keychain === void 0 ? defaultKeychain(platform) : deps.keychain;
-  if (!keychain) return { exitCode: 1, line: MAC_ONLY };
-  try {
-    if (parsed.cmd === "status") return { exitCode: 0, line: await driveStatus(keychain) };
-    if (parsed.cmd === "disconnect") return { exitCode: 0, line: await driveDisconnect(keychain, deps.fetch) };
-    let relay;
-    try {
-      relay = deps.relay ? deps.relay() : await defaultRelay();
-    } catch {
-      return { exitCode: 1, line: "Not signed in to the team relay: run /team-relay:login first." };
-    }
-    let tb;
-    try {
-      tb = await relay.boundaries();
-    } catch {
-      tb = null;
-    }
-    if (!validBoundaries(tb)) return { exitCode: 1, line: "The team relay did not give your team's boundaries; try again later." };
-    const domain = teamDriveDomain(tb.boundaries ? [...tb.boundaries.drive_folders, ...tb.boundaries.drives] : [], parsed.email);
-    const client = await fetchDriveClient(relay);
-    const flow = await startDriveConnect({
-      domain,
-      client,
-      keychain,
-      ...parsed.email ? { loginHint: parsed.email } : {},
-      ...deps.fetch ? { fetch: deps.fetch } : {},
-      ...deps.open ? { open: deps.open } : {},
-      ...deps.timeoutMs !== void 0 ? { timeoutMs: deps.timeoutMs } : {},
-      ...deps.log ? { log: deps.log } : {}
-    });
-    const r = await flow.done;
-    const was = r.replaced ? ` It replaced the connection for ${r.replaced}.` : "";
-    return { exitCode: 0, line: `Google Drive connected as ${r.email} (read-only). The token is kept in this Mac's Keychain only.${was}` };
-  } catch (err) {
-    if (err instanceof DriveConnectError || err instanceof DriveReadError || err instanceof KeychainError) return { exitCode: 1, line: `Google Drive: ${err.message}` };
-    return { exitCode: 1, line: "Google Drive: that did not work; try again." };
-  }
-}
-if (process.argv[1] && /drive-cli\.[jt]s$/.test(process.argv[1])) {
-  void runDriveCli(process.argv.slice(2), { log: (l) => process.stderr.write(`team-relay: ${l}
-`) }).then(
-    ({ exitCode, line }) => {
-      process.stdout.write(`${line}
-`);
-      process.exitCode = exitCode;
-    },
-    () => {
-      process.stdout.write("Google Drive: that did not work; try again.\n");
-      process.exitCode = 1;
-    }
-  );
-}
 
 // src/locate.ts
 import { fileURLToPath as fileURLToPath3 } from "node:url";
@@ -25111,7 +24103,6 @@ var FETCH_NODE_TIMEOUT_MS = 15 * 60 * 1e3;
 var CHOOSER_TIMEOUT_MS = 10 * 60 * 1e3;
 
 // src/tool-util.ts
-init_relay_client();
 function describeError(err) {
   if (err instanceof RelayError) {
     return `relay refused (${err.status} ${err.code})${err.detail ? `: ${err.detail}` : ""}`;
@@ -25132,9 +24123,6 @@ var LOCAL_ROUTES = Object.freeze({
 });
 
 // src/console-app.ts
-init_relay_client();
-init_credentials();
-init_relay_default();
 var CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "script-src 'self'",
@@ -25155,30 +24143,6 @@ var SECURITY_HEADERS = {
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Resource-Policy": "same-origin"
 };
-var PICKER_CONTENT_SECURITY_POLICY = [
-  "default-src 'none'",
-  "script-src 'self' https://apis.google.com https://accounts.google.com/gsi/client",
-  "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style",
-  "img-src 'self' data:",
-  "font-src 'self'",
-  "connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/ https://oauth2.googleapis.com/revoke",
-  "frame-src https://docs.google.com https://accounts.google.com/gsi/",
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "frame-ancestors 'none'"
-].join("; ");
-var PICKER_HEADERS = Object.freeze({
-  "Content-Security-Policy": PICKER_CONTENT_SECURITY_POLICY,
-  "Cross-Origin-Opener-Policy": "same-origin-allow-popups",
-  "Referrer-Policy": "strict-origin-when-cross-origin",
-  "X-Frame-Options": "DENY",
-  "X-Content-Type-Options": "nosniff",
-  "Cross-Origin-Resource-Policy": "same-origin",
-  "Cache-Control": "no-store"
-});
-var PICKER_PATH = "/pick/drive";
-var PICKER_FILE = "pick-drive.html";
 var MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -25255,9 +24219,7 @@ function relayBackend(client) {
     membersStatus: (ctx) => on(ctx).membersStatus(opts(ctx)),
     myRequests: (limit, ctx) => on(ctx).myRequests(limit, opts(ctx)),
     // One key per question sent from the page: the console never retries it (attempts: 1).
-    ask: (body, ctx) => on(ctx).createRequest({ idempotency_key: randomUUID(), kind: "question", to: body.to, question: body.question }, opts(ctx)),
-    sourcesConfig: (ctx) => on(ctx).sourcesConfig(opts(ctx)),
-    sourcesGithub: (ctx) => on(ctx).sourcesGithub(opts(ctx))
+    ask: (body, ctx) => on(ctx).createRequest({ idempotency_key: randomUUID(), kind: "question", to: body.to, question: body.question }, opts(ctx))
   };
 }
 function boundTeams(me, team) {
@@ -25297,9 +24259,7 @@ function demoBackend(account) {
     setAcceptance: async (version, ctx) => account.team(ctx?.team).setAcceptance(version),
     membersStatus: async (ctx) => account.team(ctx?.team).membersStatus(),
     myRequests: async (limit, ctx) => account.team(ctx?.team).myRequests(limit),
-    ask: async (body, ctx) => account.team(ctx?.team).ask(body),
-    sourcesConfig: async (ctx) => account.team(ctx?.team).sourcesConfig(),
-    sourcesGithub: async (ctx) => account.team(ctx?.team).sourcesGithub()
+    ask: async (body, ctx) => account.team(ctx?.team).ask(body)
   };
 }
 var ROSTER_EMAIL_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})+$/;
@@ -25379,131 +24339,24 @@ function checkConfirm(raw, team) {
   if (b.confirm !== team) throw new BodyError('type the team id to confirm: {"confirm": "<team id>"}');
   return team;
 }
-var BOUNDARIES_BODY_LIMIT = 160 * 1024;
+var BOUNDARIES_BODY_LIMIT = 16 * 1024;
 var isRecord = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var hasExactly = (o, keys) => Object.keys(o).length === keys.length && keys.every((k) => Object.prototype.hasOwnProperty.call(o, k));
-function list(v, field, max, what) {
-  if (!Array.isArray(v)) throw new BodyError(`${field} must be a list`);
-  if (v.length > max) throw new BodyError(`${field}: at most ${max} ${what}`);
-  return v;
-}
-var REPO_FIELDS = ["org", "repo", "id"];
-var FOLDER_FIELDS = ["domain", "drive_id", "folder_id", "folder_name", "drive_name"];
-var LEGACY_DRIVE_FIELDS = ["domain", "shared_drive"];
-var ORG_TEXT = "1 to 39 letters, digits or -, not starting with -";
-var DOMAIN_TEXT = "a lower-case domain name, such as example.com";
-var NAME_TEXT = "with no control or invisible characters and no leading or trailing space";
-function checkRepo(v) {
-  if (!isRecord(v) || !hasExactly(v, REPO_FIELDS)) throw new BodyError('github_repos: each repository must be exactly {"org", "repo", "id"}');
-  if (!orgOk(v.org)) throw new BodyError(`github_repos: a repository's org must be ${ORG_TEXT}`);
-  if (!repoNameOk(v.repo)) {
-    throw new BodyError(`github_repos: a repository's name must be 1 to ${REPO_NAME_MAX} letters, digits, ., _ or -, and not only dots`);
-  }
-  if (!repoIdOk(v.id)) throw new BodyError("github_repos: a repository's id must be a whole number from 1 to 2^53-1, or null");
-}
-function checkFolder(v) {
-  if (!isRecord(v) || !hasExactly(v, FOLDER_FIELDS)) {
-    throw new BodyError('drive_folders: each folder must be exactly {"domain", "drive_id", "folder_id", "folder_name", "drive_name"}');
-  }
-  if (!domainOk(v.domain)) throw new BodyError(`drive_folders: a folder's domain must be ${DOMAIN_TEXT}`);
-  if (v.drive_id !== null && !driveItemIdOk(v.drive_id)) {
-    throw new BodyError("drive_folders: a shared drive id must be 10 to 200 letters, digits, _ or -, or null");
-  }
-  if (!driveItemIdOk(v.folder_id)) throw new BodyError("drive_folders: a folder id must be 10 to 200 letters, digits, _ or -");
-  if (!folderNameOk(v.folder_name)) throw new BodyError(`drive_folders: a folder name must be 1 to ${FOLDER_NAME_MAX} characters, ${NAME_TEXT}`);
-  if (!pickedDriveNameOk(v.drive_name)) {
-    throw new BodyError(`drive_folders: a shared drive name must be null or 1 to ${DRIVE_NAME_MAX} characters, ${NAME_TEXT}`);
-  }
-}
-function checkLegacyDrive(v) {
-  if (!isRecord(v) || !hasExactly(v, LEGACY_DRIVE_FIELDS)) throw new BodyError('drives: each drive must be exactly {"domain", "shared_drive"}');
-  if (!domainOk(v.domain)) throw new BodyError(`drives: a drive domain must be ${DOMAIN_TEXT}`);
-  if (!driveNameOk(v.shared_drive)) {
-    throw new BodyError(`drives: a shared drive name must be 1 to ${SHARED_DRIVE_MAX} characters, with no /, no control or invisible characters and no leading or trailing space`);
-  }
-}
 function checkSetBoundaries(raw) {
   const b = object(raw);
   onlyKeys(b, ["version", "boundaries"]);
   if (!versionOk(b.version)) {
     throw new BodyError("version must be the whole number the boundaries were read at");
   }
-  if (!isRecord(b.boundaries)) {
-    throw new BodyError(`boundaries must be {${BOUNDARIES_FIELDS.map((f) => `"${f}"`).join(", ")}}`);
-  }
+  if (!isRecord(b.boundaries)) throw new BodyError('boundaries must be {"topic"}');
   const x = b.boundaries;
+  const removed = removedField(x);
+  if (removed) throw new BodyError(removedFieldDetail(removed));
   onlyKeys(x, [...BOUNDARIES_FIELDS]);
   if (!topicOk(x.topic)) {
     throw new BodyError(`topic must be 1 to ${TOPIC_MAX} characters, with no control or invisible characters`);
   }
-  for (const o of list(x.github_orgs, "github_orgs", BOUNDARIES_MAX_ORGS, "GitHub orgs")) {
-    if (!orgOk(o)) throw new BodyError(`github_orgs: a GitHub org must be ${ORG_TEXT}`);
-  }
-  list(x.github_repos, "github_repos", BOUNDARIES_MAX_REPOS, "repositories").forEach(checkRepo);
-  list(x.drive_folders, "drive_folders", BOUNDARIES_MAX_FOLDERS, "shared-drive folders").forEach(checkFolder);
-  list(x.drives, "drives", BOUNDARIES_MAX_DRIVES, "shared drives").forEach(checkLegacyDrive);
-  if (typeof x.member_folders !== "boolean") throw new BodyError("member_folders must be true or false");
   if (!boundariesValid(x)) throw new BodyError("boundaries do not pass the rule");
   return { version: b.version, boundaries: normaliseBoundaries(x) };
-}
-var INSTALL_URL_RE = /^https:\/\/github\.com\/apps\/[a-z0-9][a-z0-9-]{0,99}\/installations\/new$/;
-var PICKER_CLIENT_ID_RE = /^[A-Za-z0-9.-]{1,200}\.apps\.googleusercontent\.com$/;
-var PICKER_API_KEY_RE = /^AIza[0-9A-Za-z_-]{35}$/;
-var PICKER_APP_ID_RE = /^[0-9]{6,20}$/;
-var GITHUB_REPOS_MAX = 1e3;
-var GITHUB_INSTALLATIONS_MAX = 300;
-function pickerConfig(v) {
-  if (!isRecord(v)) return null;
-  const { client_id, api_key, app_id } = v;
-  if (typeof client_id !== "string" || !PICKER_CLIENT_ID_RE.test(client_id)) return null;
-  if (typeof api_key !== "string" || !PICKER_API_KEY_RE.test(api_key)) return null;
-  if (typeof app_id !== "string" || !PICKER_APP_ID_RE.test(app_id)) return null;
-  return { client_id, api_key, app_id };
-}
-function sourcesConfigView(raw, local, viewer) {
-  const r = isRecord(raw) ? raw : {};
-  const gh = isRecord(r.github) ? r.github : {};
-  const configured = gh.configured === true;
-  const install = configured && typeof gh.install_url === "string" && INSTALL_URL_RE.test(gh.install_url) ? gh.install_url : null;
-  const picker = local ? null : pickerConfig(r.google_picker);
-  const hint = typeof viewer === "string" && viewer.length <= 254 && ROSTER_EMAIL_RE.test(viewer) ? viewer : null;
-  return { github: { configured, install_url: install }, google_picker: picker && hint ? { ...picker, login_hint: hint } : picker };
-}
-function githubRepo(v) {
-  if (!isRecord(v) || !repoNameOk(v.name) || typeof v.id !== "number" || !Number.isSafeInteger(v.id) || v.id < 1) return null;
-  return { name: v.name, id: v.id, private: v.private === true, archived: v.archived === true };
-}
-function githubInstallation(v) {
-  if (!isRecord(v) || !orgOk(v.account)) return null;
-  const suspended = v.state === "suspended";
-  const repos = [];
-  if (!suspended && Array.isArray(v.repos)) {
-    for (const x of v.repos) {
-      const repo = githubRepo(x);
-      if (repo && repos.length < GITHUB_REPOS_MAX) repos.push(repo);
-    }
-  }
-  repos.sort((a, b) => a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0);
-  const truncated = v.truncated === true || Array.isArray(v.repos) && v.repos.length > GITHUB_REPOS_MAX && !suspended;
-  return {
-    account: v.account,
-    state: suspended ? "suspended" : "ok",
-    repository_selection: v.repository_selection === "selected" ? "selected" : "all",
-    repos,
-    truncated
-  };
-}
-function githubListingView(raw) {
-  const r = isRecord(raw) ? raw : {};
-  const installations = [];
-  if (Array.isArray(r.installations)) {
-    for (const x of r.installations.slice(0, GITHUB_INSTALLATIONS_MAX)) {
-      const inst = githubInstallation(x);
-      if (inst) installations.push(inst);
-    }
-  }
-  const fetched = typeof r.fetched_at === "string" && RFC33392.test(r.fetched_at) ? r.fetched_at : (/* @__PURE__ */ new Date()).toISOString();
-  return { installations, fetched_at: fetched };
 }
 function checkAcceptance(raw) {
   const b = object(raw);
@@ -25542,16 +24395,16 @@ var displayName = (v, team) => typeof v === "string" && v.trim() !== "" && [...v
 var roleOf = (v) => v === "owner" ? "owner" : "member";
 function parseTeams(raw) {
   const r = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
-  const list2 = (v) => Array.isArray(v) ? v.filter((x) => !!x && typeof x === "object" && !Array.isArray(x)).slice(0, 500) : [];
+  const list = (v) => Array.isArray(v) ? v.filter((x) => !!x && typeof x === "object" && !Array.isArray(x)).slice(0, 500) : [];
   const seen = /* @__PURE__ */ new Set();
   const teams = [];
-  for (const t of list2(r.teams)) {
+  for (const t of list(r.teams)) {
     if (typeof t.team !== "string" || !TEAM_RE.test(t.team) || typeof t.member !== "string" || !MEMBER_RE.test(t.member) || seen.has(t.team)) continue;
     seen.add(t.team);
     teams.push({ team: t.team, name: displayName(t.name, t.team), member: t.member, role: roleOf(t.role) });
   }
   const invitations = [];
-  for (const t of list2(r.invitations)) {
+  for (const t of list(r.invitations)) {
     if (typeof t.team !== "string" || !TEAM_RE.test(t.team) || typeof t.member !== "string" || !MEMBER_RE.test(t.member) || seen.has(t.team)) continue;
     seen.add(t.team);
     invitations.push({
@@ -25626,7 +24479,7 @@ function addressKey(address) {
   return "unknown";
 }
 function clientIpHash(salt, req, hops = 1) {
-  return createHash4("sha256").update(salt + addressKey(clientAddress(req, hops)), "utf8").digest("hex");
+  return createHash2("sha256").update(salt + addressKey(clientAddress(req, hops)), "utf8").digest("hex");
 }
 function checkIpHashSalt(raw) {
   const v = raw?.trim();
@@ -25635,11 +24488,11 @@ function checkIpHashSalt(raw) {
 }
 var JOIN_MARKETPLACE = "team-relay-dev";
 var JOIN_PLUGIN = "team-relay";
-var GITHUB_REPO_RE2 = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
+var GITHUB_REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/;
 function checkJoinMarketplace(raw) {
   const v = raw?.trim();
   if (!v) return null;
-  if (GITHUB_REPO_RE2.test(v) && !v.split("/").some((x) => x === "." || x === "..")) return v;
+  if (GITHUB_REPO_RE.test(v) && !v.split("/").some((x) => x === "." || x === "..")) return v;
   try {
     return checkJoinRepoUrl(v);
   } catch {
@@ -25651,10 +24504,10 @@ function marketplaceFromRepoUrl(repoUrl) {
   const m = /^https:\/\/github\.com\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/i.exec(repoUrl);
   return m ? `${m[1]}/${m[2]}` : repoUrl;
 }
-function joinInfo(relayUrl, team, repoUrl, marketplaceSource = null, defaultRelay2 = defaultRelayUrl()) {
+function joinInfo(relayUrl, team, repoUrl, marketplaceSource = null, defaultRelay = defaultRelayUrl()) {
   let isDefault = false;
   try {
-    isDefault = defaultRelay2 !== null && normaliseRelayUrl(relayUrl) === normaliseRelayUrl(defaultRelay2);
+    isDefault = defaultRelay !== null && normaliseRelayUrl(relayUrl) === normaliseRelayUrl(defaultRelay);
   } catch {
     isDefault = false;
   }
@@ -25702,10 +24555,10 @@ address in an <code>X-Console-Key</code> header.</p>
 </html>
 `;
 function digest(s) {
-  return createHash4("sha256").update(s, "utf8").digest();
+  return createHash2("sha256").update(s, "utf8").digest();
 }
 function keyMatches(given, key) {
-  return timingSafeEqual3(digest(given), digest(key));
+  return timingSafeEqual(digest(given), digest(key));
 }
 var HOST_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$/;
 function checkPublicHost(raw) {
@@ -26097,15 +24950,15 @@ function createConsoleServer(opts) {
         return failure(res, err, viewer);
       }
     }
-    const own2 = query.filter((k) => k !== "team");
-    const known = path === "/api/join" || path === "/api/me" || path === "/api/directory" || path === "/api/roster" || path === "/api/inbox/summary" || path === "/api/boundaries" || path === "/api/acceptance" || path === "/api/members-status" || path === "/api/my-requests" || path === "/api/sources/config" || path === "/api/sources/github";
+    const own = query.filter((k) => k !== "team");
+    const known = path === "/api/join" || path === "/api/me" || path === "/api/directory" || path === "/api/roster" || path === "/api/inbox/summary" || path === "/api/boundaries" || path === "/api/acceptance" || path === "/api/members-status" || path === "/api/my-requests";
     const requestMatch = /^\/api\/requests\/([^/]+)$/.exec(path);
     if (!known && path !== "/api/activity" && !requestMatch) return sendJson(res, 404, { error: "not_found" });
-    if (requestMatch && (!REQUEST_ID_RE.test(requestMatch[1]) || own2.length > 0)) return sendJson(res, 404, { error: "not_found" });
-    if (known && own2.length > 0) return sendJson(res, 400, { error: "bad_request", detail: "no query parameters here" });
+    if (requestMatch && (!REQUEST_ID_RE.test(requestMatch[1]) || own.length > 0)) return sendJson(res, 404, { error: "not_found" });
+    if (known && own.length > 0) return sendJson(res, 400, { error: "bad_request", detail: "no query parameters here" });
     const q = {};
     if (path === "/api/activity") {
-      for (const k of own2) {
+      for (const k of own) {
         if (k !== "since" && k !== "limit") return sendJson(res, 400, { error: "bad_request", detail: `unknown parameter ${k.slice(0, 40)}` });
       }
       if (url.searchParams.getAll("since").length > 1 || url.searchParams.getAll("limit").length > 1) {
@@ -26150,8 +25003,6 @@ function createConsoleServer(opts) {
     else if (path === "/api/acceptance") call = () => opts.backend.acceptance(on);
     else if (path === "/api/members-status") call = () => opts.backend.membersStatus(on);
     else if (path === "/api/my-requests") call = () => opts.backend.myRequests(MY_REQUESTS_LIMIT, on);
-    else if (path === "/api/sources/config") call = async () => sourcesConfigView(await opts.backend.sourcesConfig(on), !hosted2, on.viewer);
-    else if (path === "/api/sources/github") call = async () => githubListingView(await opts.backend.sourcesGithub(on));
     else if (path === "/api/activity") call = () => opts.backend.activity(q, on);
     else {
       const rid = requestMatch[1];
@@ -26160,7 +25011,7 @@ function createConsoleServer(opts) {
     try {
       return sendJson(res, 200, await call());
     } catch (err) {
-      const newer = path === "/api/boundaries" || path === "/api/acceptance" || path === "/api/members-status" || path === "/api/my-requests" || path === "/api/sources/config" || path === "/api/sources/github";
+      const newer = path === "/api/boundaries" || path === "/api/acceptance" || path === "/api/members-status" || path === "/api/my-requests";
       return failure(res, err, viewer, requestMatch || newer ? void 0 : team);
     }
   }
@@ -26219,8 +25070,7 @@ function createConsoleServer(opts) {
     const head = req.method === "HEAD";
     if (req.method !== "GET" && !head) return send(res, 405, "method not allowed\n", "text/plain; charset=utf-8", { Allow: "GET, HEAD" });
     const html = (body) => send(res, 200, body, MIME[".html"], { "Cache-Control": "no-cache" }, head);
-    if (url.pathname.toLowerCase() === `/${PICKER_FILE}`) return send(res, 404, "not found\n", "text/plain; charset=utf-8");
-    const index = staticRoot ? join4(staticRoot, "index.html") : null;
+    const index = staticRoot ? join3(staticRoot, "index.html") : null;
     if (!staticRoot || !index || !existsSync(index)) return html(PLACEHOLDER);
     let rel;
     try {
@@ -26232,14 +25082,13 @@ function createConsoleServer(opts) {
       return send(res, 400, "bad path\n", "text/plain; charset=utf-8");
     }
     if (rel === "/" || rel === "") return html(readFileSync5(index));
-    const candidate = join4(staticRoot, rel);
+    const candidate = join3(staticRoot, rel);
     let real = null;
     try {
       real = realpathSync(candidate);
     } catch {
       real = null;
     }
-    if (real && real.slice(staticRoot.length + 1).toLowerCase() === PICKER_FILE) return send(res, 404, "not found\n", "text/plain; charset=utf-8");
     if (real && real.startsWith(staticRoot + sep) && statSync(real).isFile()) {
       const type = MIME[extname(real).toLowerCase()] ?? "application/octet-stream";
       const cache2 = rel.startsWith("/assets/") ? `${hosted2 ? "private" : "public"}, max-age=31536000, immutable` : "no-cache";
@@ -26248,25 +25097,8 @@ function createConsoleServer(opts) {
     if (!extname(rel)) return html(readFileSync5(index));
     return send(res, 404, "not found\n", "text/plain; charset=utf-8");
   }
-  function pickerPage(req, res, url) {
-    const notFound = () => send(res, 404, "not found\n", "text/plain; charset=utf-8");
-    if (!hosted2 || url.search !== "") return notFound();
-    const head = req.method === "HEAD";
-    if (req.method !== "GET" && !head) return send(res, 405, "method not allowed\n", "text/plain; charset=utf-8", { Allow: "GET, HEAD" });
-    if (!staticRoot) return notFound();
-    let real;
-    try {
-      real = realpathSync(join4(staticRoot, PICKER_FILE));
-    } catch {
-      return notFound();
-    }
-    if (real !== join4(staticRoot, PICKER_FILE) || !statSync(real).isFile()) return notFound();
-    const body = readFileSync5(real);
-    res.writeHead(200, { ...PICKER_HEADERS, "Content-Type": MIME[".html"], "Content-Length": String(body.length) });
-    res.end(head ? void 0 : body);
-  }
   const unauthorized = (res) => send(res, 401, "unauthorized\n", "text/plain; charset=utf-8", { "Cache-Control": "no-store" });
-  const server = createServer2((req, res) => {
+  const server = createServer((req, res) => {
     if (!hostAllowed(req)) {
       req.resume();
       send(res, 403, "forbidden host\n", "text/plain; charset=utf-8");
@@ -26317,8 +25149,7 @@ function createConsoleServer(opts) {
       return;
     }
     try {
-      if (url.pathname === PICKER_PATH) pickerPage(req, res, url);
-      else staticFile(req, res, url);
+      staticFile(req, res, url);
     } catch {
       if (!res.headersSent) send(res, 500, "internal error\n", "text/plain; charset=utf-8");
     }
@@ -26340,6 +25171,79 @@ function createConsoleServer(opts) {
       server.close(() => resolve());
     })
   };
+}
+
+// src/console-open.ts
+import { execFile as execFile2 } from "node:child_process";
+import { chmodSync as chmodSync2, mkdtempSync, rmSync as rmSync2, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute as isAbsolute3, join as join4 } from "node:path";
+var REDIRECT_TTL_MS = 1e4;
+var REDIRECT_FILE = "console.html";
+var defaultRun = (command, args, done) => {
+  execFile2(command, args, { shell: false, timeout: 1e4 }, (err) => done(err));
+};
+function escapeHtml(text) {
+  return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+function redirectHtml(url, title = "Team console") {
+  const u = escapeHtml(url);
+  const t = escapeHtml(title);
+  return [
+    "<!doctype html>",
+    '<html lang="en"><head><meta charset="utf-8">',
+    '<meta name="referrer" content="no-referrer">',
+    `<meta http-equiv="refresh" content="0;url=${u}">`,
+    `<title>${t}</title></head>`,
+    `<body><p><a href="${u}">${t}</a></p></body></html>`,
+    ""
+  ].join("\n");
+}
+function openerFor(platform, env = process.env) {
+  const custom = env.TEAM_RELAY_OPEN_COMMAND?.trim();
+  if (custom) return isAbsolute3(custom) ? custom : null;
+  if (platform === "darwin") return "open";
+  if (platform === "linux") return "xdg-open";
+  return null;
+}
+function openInBrowser(url, opts) {
+  const what = opts.what ?? "the URL above";
+  const told = (opened) => opts.onResult?.(opened);
+  const opener = opts.opener ?? openerFor(opts.platform ?? process.platform);
+  if (!opener) {
+    opts.log(`no browser opener on this platform; open ${what} yourself`);
+    told(false);
+    return null;
+  }
+  let dir;
+  try {
+    dir = mkdtempSync(join4(opts.tmpRoot ?? tmpdir(), "team-relay-console-"));
+    chmodSync2(dir, 448);
+  } catch {
+    opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
+    return null;
+  }
+  const cleanup = () => rmSync2(dir, { recursive: true, force: true });
+  const file = join4(dir, REDIRECT_FILE);
+  try {
+    writeFileSync(file, redirectHtml(url, opts.title), { mode: 384, flag: "wx" });
+  } catch {
+    cleanup();
+    opts.log(`could not prepare the browser hand-off; open ${what} yourself`);
+    told(false);
+    return null;
+  }
+  process.once("exit", cleanup);
+  setTimeout(() => {
+    process.removeListener("exit", cleanup);
+    cleanup();
+  }, opts.deleteAfterMs ?? REDIRECT_TTL_MS).unref();
+  (opts.run ?? defaultRun)(opener, [file], (err) => {
+    if (err) opts.log(`could not open a browser (${opener}); open ${what} yourself`);
+    told(!err);
+  });
+  return file;
 }
 
 // src/approvals-state.ts
@@ -26377,10 +25281,9 @@ function makeLogger(component) {
 }
 
 // src/console-server.ts
-init_relay_client();
 var log = makeLogger("console");
 var DEFAULT_PORT = 4317;
-var USAGE2 = `usage: bin/console [--demo] [--open]
+var USAGE = `usage: bin/console [--demo] [--open]
   --demo  serve synthetic teams (demo: alice, bob, carol) instead of calling the relay
   --open  open the console in the default browser (by way of a private, short-lived file)
 Signs in as you with the credential /team-relay:login stored; nothing else is needed.
@@ -26402,11 +25305,11 @@ function parseArgs(argv) {
     if (a === "--demo") flags.demo = true;
     else if (a === "--open") flags.open = true;
     else if (a === "--help" || a === "-h") {
-      process.stdout.write(`${USAGE2}
+      process.stdout.write(`${USAGE}
 `);
       process.exit(0);
     } else fail(`unknown argument: ${a.slice(0, 60)}
-${USAGE2}`, 2);
+${USAGE}`, 2);
   }
   return flags;
 }
@@ -26500,7 +25403,7 @@ async function main() {
     label = `team ${client.team}`;
     join6 = joinInfo(client.url, client.team, repoUrl, marketplace);
   }
-  const key = randomBytes3(32).toString("base64url");
+  const key = randomBytes(32).toString("base64url");
   const staticDir = fileURLToPath4(new URL("./console/", import.meta.url));
   const approvals = flags.demo ? void 0 : () => ({ pending: readApprovalsState(statePath(process.env))?.pending ?? 0 });
   const app = createConsoleServer({ backend, key, staticDir, join: join6, log, ...approvals ? { approvals } : {} });
