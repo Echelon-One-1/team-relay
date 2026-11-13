@@ -6,12 +6,14 @@ batched, resumable removal. The Firestore half needs the emulator (scripts/test-
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import grpc
 import pytest
 
 from relay.errors import ApiError
@@ -585,3 +587,94 @@ async def test_admin_audit_round_trips(store: Store):
     )
     await store.append_admin_audit([entry])
     assert [e for e in await store.list_admin_audit(100000) if e.team == team] == [entry]
+
+
+# Contention and finished calls (13 Nov 2026) ------------------------------------------------------
+
+
+@pytest.mark.parametrize("team_scoped", [False, True])
+async def test_a_counter_hit_at_once_lets_exactly_its_limit_through(
+    store: Store, team_scoped: bool
+):
+    # An atomic increment, no read-then-write transaction: twenty at once take no locks.
+    quota = Quota(key="hot." + uuid.uuid4().hex, limit=5, expire_at=NOW + timedelta(hours=2))
+    team = unique_team()
+
+    async def count() -> bool:
+        if team_scoped:
+            return await store.count_quota(team, quota)
+        return await store.count_login_quota(quota)
+
+    results = await asyncio.gather(*(count() for _ in range(20)))
+    assert results.count(True) == 5
+    assert await count() is False
+
+
+async def test_twelve_creations_by_one_account_at_once_create_three(store: Store):
+    email = new_email()
+    results = await asyncio.gather(
+        *(create(store, new_id(), email) for _ in range(12)), return_exceptions=True
+    )
+    assert results.count("created") == 3
+    assert all(r.code == "team_limit" for r in results if isinstance(r, ApiError)), results
+    account = await store.get_account(email_hash(email))
+    assert account is not None and len(account.created) == 3
+
+
+async def test_no_grpc_call_is_left_open_after_a_store_call(store: Store):
+    # gRPC delivers a call's closing status to the event loop the call was made on; a call
+    # still waiting for it when a test's loop closes reaches that closed loop later, and
+    # "Event loop is closed" fails whatever test runs then.
+    if isinstance(store, MemoryStore):
+        pytest.skip("no gRPC")
+
+    def open_calls() -> list[str]:
+        # Checked right after each call returns, before anything else can run: the call must
+        # be finished already, not merely soon.
+        gc.collect()
+        return [
+            type(o).__name__
+            for o in gc.get_objects()
+            if isinstance(o, grpc.aio.Call) and not o.done()
+        ]
+
+    team = new_id()
+    await create(store, team, new_email())
+    assert open_calls() == []
+    assert await store.team_has_documents(team) is True
+    assert open_calls() == []
+    assert await store.get_account(email_hash(new_email())) is None
+    assert open_calls() == []
+    assert await store.roster_version(team) >= 1
+    assert open_calls() == []
+    assert await store.get_boundaries(team) is None
+    assert open_calls() == []
+    quota = Quota(key="open." + uuid.uuid4().hex, limit=1, expire_at=NOW + timedelta(hours=2))
+    assert await store.count_login_quota(quota) is True
+    assert open_calls() == []
+
+
+async def test_one_instances_holders_of_a_key_take_turns():
+    from relay.store_firestore import _Turns
+
+    turns = _Turns()
+    inside: list[str] = []
+    most = 0
+
+    async def hold(name: str, keys: list[str]) -> None:
+        nonlocal most
+        async with turns.hold(keys):
+            inside.append(name)
+            most = max(most, len(inside))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            inside.remove(name)
+
+    # Overlapping key sets, given in different orders: one at a time, and no deadlock.
+    await asyncio.gather(hold("a", ["x", "y"]), hold("b", ["y", "x"]), hold("c", ["y", "z", "y"]))
+    assert most == 1
+    # Disjoint keys do not wait for each other.
+    most = 0
+    await asyncio.gather(hold("d", ["p"]), hold("e", ["q"]))
+    assert most == 2
+    assert turns._locks == {}

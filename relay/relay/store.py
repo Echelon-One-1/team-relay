@@ -991,8 +991,9 @@ class Store(Protocol):
         ...
 
     async def count_quota(self, team: str, quota: Quota) -> bool:
-        """Count one against ``quota`` and return True, atomically, if it is under its
-        limit; otherwise write nothing and return False."""
+        """Count one against ``quota`` atomically and return True if the count, this one
+        included, is within its limit; otherwise False. A refused call may still be counted
+        (the window is already at its limit, so every later call in it is refused too)."""
         ...
 
     # Roster (M6-SPEC §1) -------------------------------------------------------------

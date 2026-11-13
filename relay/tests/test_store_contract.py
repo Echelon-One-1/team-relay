@@ -1210,13 +1210,14 @@ async def test_a_new_document_keeps_the_m10_fields_exactly():
     M10 code wrote them, so an M10 reader sees whole orgs and legacy drives only."""
     if not emulator_host():
         pytest.skip(NO_EMULATOR)
-    from relay.store_firestore import FirestoreStore
+    from relay.store_firestore import FirestoreStore, _read
 
     fs = FirestoreStore(project=os.environ.get("GOOGLE_CLOUD_PROJECT", "demo-relay"))
     try:
         team = unique_team()
         await fs.set_boundaries(team, "alice", _writing(PICKED))
-        raw = (await fs._boundaries(team).get()).to_dict()  # noqa: SLF001
+        # _read, not .get(): .get() leaves its call open past this test's event loop.
+        raw = (await _read(fs._boundaries(team))).to_dict()  # noqa: SLF001
         assert raw["github_orgs"] == ["Example-Org"]
         assert raw["orgs_since"] == {"example-org": 1}
         assert raw["drives"] == [
