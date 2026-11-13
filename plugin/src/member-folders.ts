@@ -1,89 +1,67 @@
-// M10-SPEC §2, §7.1: the member's own, local part of the boundaries, per team. Where their
-// clones live (`repo_roots`, searched 3 levels deep for work trees of the team's GitHub orgs),
-// folders of their own (`extra_folders`, used only when the team allows it). The answerer reads
-// only from what is both in the team's current boundaries and in the accepted set
-// (effectiveBoundaries): narrowing applies at once, widening only once the member accepts it.
-// Nothing accepted: nothing is answered for that team.
-//
-// M11-SPEC §2: the member accepts in the browser and the relay keeps the accepted version
-// (GET me/acceptance); acceptedAtVersion turns that version into the accepted set. The
-// `accepted` entry M10 kept in this file is ignored from now on: still read without complaint
-// (a malformed one counts as absent; one without the picked lists reads with them empty), never
-// used to decide what is read.
-//
-// PICKERS-SPEC §2.3: every item (whole org, repository, Drive folder, legacy drive) is known by
-// its key (boundaries-rule.ts itemKey) and covered by an acceptance of version n when its
-// `since` is at most n. A repository is held by an accepted whole org of its org, and a folder by
-// an accepted whole shared drive of its drive, so narrowing either needs no new acceptance.
+// The member's own, local part of answering, per team (13 Nov 2026, local folders only): the
+// folders on this Mac their answerer may read from for that team. One list, at most 20, chosen
+// in /team-relay:setup or with /team-relay:folders. The team's boundaries are its topic alone
+// (boundaries-types.ts); what is read is decided here and in boundary-set.ts, never by an owner.
 //
 //   $XDG_CONFIG_HOME/team-relay/boundaries.local.json   (default ~/.config/team-relay/)
-//   {"teams": {"<team>": {"repo_roots": ["~/code/example-org"], "extra_folders": [],
-//     "accepted": {"version": 3, "github_orgs": ["example-org"],
-//                  "drives": [{"domain": "example.com", "shared_drive": "Example Team Drive"}],
-//                  "member_folders": false}}}}
+//   {"teams": {"<team>": {"folders": ["~/code/example-org", "/Volumes/Work/notes"]}}}
+//
+// Earlier plugins wrote two lists per team, `repo_roots` (folders searched only for clones of
+// the team's repositories) and `extra_folders` (folders of the member's own, often unused, as
+// the team had to allow them), and an `accepted` entry. Reading either as a folder to answer
+// from would silently widen what is read, so they never are: the answerer reads `folders` alone
+// (empty for a member who has not chosen folders since 13 Nov 2026). The old entries are a
+// read-only `previous` list, `repo_roots` then `extra_folders`, each with its kind, a duplicate
+// (the same string, or the same path once ~ is expanded) and one already in `folders` left out.
+// They are shown where folders are chosen (/team-relay:folders, the setup page, setup-cli) so the
+// member can add the ones they still want, and only by the usual ways (the Mac's chooser, or
+// /team-relay:folders add <path>, each checked again). They stay in the file until the member
+// saves that team's folders: that write stores the team as `folders` alone (its old keys gone);
+// other teams' old lists are written back as they were. `accepted` is never written back.
+//
+// Accepting: a member has accepted their team's boundaries when the version the relay holds for
+// them (GET me/acceptance) is from 1 to the current version (hasAccepted). A greater one belongs
+// to an earlier team under the same id (deleted and created again, versions start over).
 //
 // The file is mode 600 in a mode-700 directory, owned by the member, never a symlink; one others
 // could read or write is refused, never used (the answerer may read nothing from it then). The
 // directory is the relay's config directory, which the answerer can never read (deny list).
 // Every entry is checked strictly: an absolute or ~-prefixed path to a folder that passes the
 // folder rules (scope.ts folderSafety: not /, $HOME or above it, not directly in $HOME, not
-// under ~/Library or any ~/.* entry, not a configuration or credential location), and the
-// accepted set by the boundaries rules (M10-SPEC §7.5). The Drive mounts under
-// ~/Library/CloudStorage are never configured here: the host resolves them from the team's
-// boundaries (boundary-set.ts).
+// under ~/Library or any ~/.* entry, not a configuration or credential location). A folder
+// that is gone is kept (a disconnected disk); it is checked again whenever the allowed set is
+// built (boundary-set.ts).
 
 import { randomBytes } from 'node:crypto';
 import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync, type Stats } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
 import { configDir } from './answering-lock.js';
-import {
-  BOUNDARIES_MAX_DRIVES,
-  BOUNDARIES_MAX_FOLDERS,
-  BOUNDARIES_MAX_ORGS,
-  BOUNDARIES_MAX_REPOS,
-  BOUNDARIES_VERSION_MAX,
-  boundaryItems,
-  domainOk,
-  driveKey,
-  driveNameOk,
-  folderKey,
-  folderOk,
-  itemKey,
-  normaliseBoundaries,
-  orgKey,
-  orgOk,
-  repoKey,
-  repoOk,
-} from './boundaries-rule.js';
-import type { Boundaries, BoundariesSince, BoundaryItem, DriveBoundary, FolderBoundary, ItemKey, RepoBoundary } from './boundaries-types.js';
+import { BOUNDARIES_VERSION_MAX } from './boundaries-rule.js';
 import { TEAM_RE } from './relay-client-core.js';
 import { folderSafety } from './scope.js';
 
 export const MEMBER_FOLDERS_FILE = 'boundaries.local.json';
-/** At most this many entries in each list. */
+/** At most this many folders per team. */
 export const MAX_FOLDERS = 20;
 /** At most this many teams in the file. */
 export const MAX_TEAMS = 20;
 const MAX_PATH = 1024;
 const MAX_FILE_BYTES = 256 * 1024;
+/** The lists of earlier plugins: never read from, shown as `previous` in this order. */
+export const OLD_FOLDER_LISTS = ['repo_roots', 'extra_folders'] as const;
 
-export type MemberFolders = { repo_roots: string[]; extra_folders: string[] };
-export type FolderList = keyof MemberFolders;
-/** M10-SPEC §7.1: the boundaries the member accepted for a team (what the answerer may come to read). */
-export type AcceptedBoundaries = {
-  version: number;
-  github_orgs: string[];
-  /** PICKERS-SPEC §2.3: empty in what an M10 plugin accepted. */
-  github_repos: RepoBoundary[];
-  /** PICKERS-SPEC §2.3: empty in what an M10 plugin accepted. */
-  drive_folders: FolderBoundary[];
-  drives: DriveBoundary[];
-  member_folders: boolean;
+/** A folder an earlier plugin's file held: shown to the member, never read from. */
+export type PreviousFolder = { path: string; kind: 'repo_root' | 'own_folder' };
+/** One team's folders: `folders` (at most 20, the only ones read) and `previous` (never read). */
+export type TeamSettings = { folders: string[]; previous: PreviousFolder[] };
+/** An earlier plugin's lists for one team, as the file holds them (written back until that team saves). */
+export type OldLists = { repo_roots?: string[]; extra_folders?: string[] };
+export type MemberSettings = {
+  teams: Record<string, TeamSettings>;
+  /** Per team, the earlier plugin's lists still in the file (gone once that team's folders are saved). */
+  old?: Record<string, OldLists>;
 };
-/** One team's local settings. `accepted` null: the member has not accepted any boundaries yet. */
-export type TeamSettings = MemberFolders & { accepted: AcceptedBoundaries | null };
-export type MemberSettings = { teams: Record<string, TeamSettings> };
 
 export class MemberFoldersError extends Error {
   constructor(message: string) {
@@ -110,7 +88,7 @@ export function expandPath(raw: string, env: NodeJS.ProcessEnv): string | null {
 
 /**
  * Why `raw` cannot be a member folder (null: it can), and where it resolves. The same folder
- * rules as the scope folder, without the git rule (a repo root is usually no repository).
+ * rules as the scope folder, without the git rule (a folder of clones is usually no repository).
  */
 export function memberFolderProblem(raw: unknown, env: NodeJS.ProcessEnv): { path: string | null; reason: string | null } {
   if (typeof raw !== 'string' || raw.length === 0) return { path: null, reason: 'it is not a path' };
@@ -131,86 +109,60 @@ function onlyKeys(o: Record<string, unknown>, allowed: readonly string[], what: 
   }
 }
 
-/** One team's two folder lists, checked strictly (wrong types, too many entries, unsafe folders: refused). */
-export function parseMemberFolders(raw: unknown, env: NodeJS.ProcessEnv, what = 'the folders file'): MemberFolders {
-  if (!isObj(raw)) throw new MemberFoldersError(`${what} is not a JSON object`);
-  const out: MemberFolders = { repo_roots: [], extra_folders: [] };
-  for (const key of ['repo_roots', 'extra_folders'] as const) {
-    const list = raw[key] ?? [];
-    if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
-    if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
-    for (const entry of list) {
-      const { reason } = memberFolderProblem(entry, env);
-      // A folder that is gone is kept (a disconnected disk); every other problem refuses the file.
-      // Each entry is checked again whenever the allowed set is built (boundary-set.ts).
-      if (reason && reason !== 'it does not exist') throw new MemberFoldersError(`${key} entry ${JSON.stringify(String(entry).slice(0, 200))} cannot be used: ${reason}`);
-      if (!out[key].includes(entry as string)) out[key].push(entry as string);
-    }
-  }
-  return out;
+/** Whether `list` already holds `raw`: the same string, or the same path once expanded. */
+function holds(list: readonly string[], raw: string, env: NodeJS.ProcessEnv): boolean {
+  const target = expandPath(raw, env);
+  return list.some((e) => e === raw || (target !== null && expandPath(e, env) === target));
 }
 
-/** Drives match exactly on domain and name. */
-export function sameDrive(a: DriveBoundary, b: DriveBoundary): boolean {
-  return a.domain === b.domain && a.shared_drive === b.shared_drive;
+/** One list of a team's entry, checked strictly (wrong type, more than 20, an unsafe folder: refused). */
+function parseList(raw: unknown, key: string, env: NodeJS.ProcessEnv): string[] {
+  const list = raw ?? [];
+  if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
+  if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
+  for (const entry of list) {
+    const { reason } = memberFolderProblem(entry, env);
+    // A folder that is gone is kept (a disconnected disk); every other problem refuses the file.
+    if (reason && reason !== 'it does not exist') throw new MemberFoldersError(`${key} entry ${JSON.stringify(String(entry).slice(0, 200))} cannot be used: ${reason}`);
+  }
+  return list as string[];
 }
 
-/** The accepted part of one team's settings, checked by the boundaries rules. */
-export function parseAccepted(raw: unknown): AcceptedBoundaries {
-  if (!isObj(raw)) throw new MemberFoldersError('accepted is not a JSON object');
-  onlyKeys(raw, ['version', 'github_orgs', 'github_repos', 'drive_folders', 'drives', 'member_folders'], 'accepted');
-  const v = raw.version;
-  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 1 || v > BOUNDARIES_VERSION_MAX) throw new MemberFoldersError('accepted.version must be a whole number from 1');
-  if (!Array.isArray(raw.github_orgs) || raw.github_orgs.length > BOUNDARIES_MAX_ORGS) throw new MemberFoldersError('accepted.github_orgs must be a list of at most 10 org names');
-  const orgs: string[] = [];
-  for (const o of raw.github_orgs) {
-    if (!orgOk(o)) throw new MemberFoldersError('accepted.github_orgs has an entry that is not a GitHub org name');
-    if (!orgs.some((x) => x.toLowerCase() === o.toLowerCase())) orgs.push(o);
-  }
-  if (!Array.isArray(raw.drives) || raw.drives.length > BOUNDARIES_MAX_DRIVES) throw new MemberFoldersError('accepted.drives must be a list of at most 10 shared drives');
-  const drives: DriveBoundary[] = [];
-  for (const d of raw.drives) {
-    if (!isObj(d)) throw new MemberFoldersError('accepted.drives has an entry that is not an object');
-    onlyKeys(d, ['domain', 'shared_drive'], 'an accepted drive');
-    if (!domainOk(d.domain)) throw new MemberFoldersError('accepted.drives has a domain that is not a lower-case DNS name');
-    if (!driveNameOk(d.shared_drive)) throw new MemberFoldersError('accepted.drives has a shared drive name that cannot be used');
-    const drive = { domain: d.domain, shared_drive: d.shared_drive };
-    if (!drives.some((x) => sameDrive(x, drive))) drives.push(drive);
-  }
-  if (typeof raw.member_folders !== 'boolean') throw new MemberFoldersError('accepted.member_folders must be true or false');
-  // PICKERS-SPEC §2.3: absent from what an M10 plugin accepted.
-  const rawRepos = raw.github_repos ?? [];
-  if (!Array.isArray(rawRepos) || rawRepos.length > BOUNDARIES_MAX_REPOS) throw new MemberFoldersError('accepted.github_repos must be a list of at most 100 repositories');
-  const repos: RepoBoundary[] = [];
-  for (const r of rawRepos) {
-    if (!repoOk(r)) throw new MemberFoldersError('accepted.github_repos has an entry that is not a GitHub repository');
-    if (!repos.some((x) => repoKey(x) === repoKey(r))) repos.push({ org: r.org, repo: r.repo, id: r.id });
-  }
-  const rawFolders = raw.drive_folders ?? [];
-  if (!Array.isArray(rawFolders) || rawFolders.length > BOUNDARIES_MAX_FOLDERS) throw new MemberFoldersError('accepted.drive_folders must be a list of at most 20 folders');
-  const folders: FolderBoundary[] = [];
-  for (const f of rawFolders) {
-    if (!folderOk(f)) throw new MemberFoldersError('accepted.drive_folders has an entry that is not a shared-drive folder');
-    if (!folders.some((x) => x.folder_id === f.folder_id)) folders.push({ domain: f.domain, drive_id: f.drive_id, folder_id: f.folder_id, folder_name: f.folder_name, drive_name: f.drive_name });
-  }
-  return { version: v, github_orgs: orgs, github_repos: repos, drive_folders: folders, drives, member_folders: raw.member_folders };
+/**
+ * An earlier plugin's list: a list of at most 20 strings (else the file is refused). An entry
+ * that could not be added now (other than a folder that is gone) is left out of `previous`.
+ */
+function parseOldList(raw: unknown, key: string, env: NodeJS.ProcessEnv): string[] {
+  const list = raw ?? [];
+  if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
+  if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
+  if (list.some((e) => typeof e !== 'string')) throw new MemberFoldersError(`${key} must be a list of paths`);
+  return (list as string[]).filter((e) => {
+    const { reason } = memberFolderProblem(e, env);
+    return reason === null || reason === 'it does not exist';
+  });
 }
 
-/** One team's settings, checked strictly. */
+/**
+ * One team's settings, checked strictly: `folders` (the only folders ever read), and an earlier
+ * plugin's `repo_roots` and `extra_folders` as `previous` (never read; duplicates and ones in
+ * `folders` left out); `accepted` ignored.
+ */
 export function parseTeamSettings(raw: unknown, env: NodeJS.ProcessEnv, team = 'a team'): TeamSettings {
   if (!isObj(raw)) throw new MemberFoldersError(`the settings for ${team} are not a JSON object`);
-  onlyKeys(raw, ['repo_roots', 'extra_folders', 'accepted'], `the settings for ${team}`);
-  const folders = parseMemberFolders(raw, env, `the settings for ${team}`);
-  // M11-SPEC §2: ignored from now on, so one that does not parse is no reason to refuse the file.
-  let accepted: AcceptedBoundaries | null = null;
-  if (raw.accepted !== undefined && raw.accepted !== null) {
-    try {
-      accepted = parseAccepted(raw.accepted);
-    } catch {
-      accepted = null;
+  onlyKeys(raw, ['folders', ...OLD_FOLDER_LISTS, 'accepted'], `the settings for ${team}`);
+  const folders: string[] = [];
+  for (const entry of parseList(raw.folders, 'folders', env)) if (!holds(folders, entry, env)) folders.push(entry);
+  const previous: PreviousFolder[] = [];
+  const seen: string[] = [...folders];
+  for (const [key, kind] of [['repo_roots', 'repo_root'], ['extra_folders', 'own_folder']] as const) {
+    for (const entry of parseOldList(raw[key], key, env)) {
+      if (holds(seen, entry, env)) continue;
+      seen.push(entry);
+      previous.push({ path: entry, kind });
     }
   }
-  return { ...folders, accepted };
+  return { folders, previous };
 }
 
 function emptyTeams(): Record<string, TeamSettings> {
@@ -220,7 +172,7 @@ function emptyTeams(): Record<string, TeamSettings> {
 /** The file's content, checked strictly (unknown keys, wrong types, too many entries: refused). */
 export function parseMemberSettings(raw: unknown, env: NodeJS.ProcessEnv): MemberSettings {
   if (!isObj(raw)) throw new MemberFoldersError('the folders file is not a JSON object');
-  if ('repo_roots' in raw || 'extra_folders' in raw) {
+  if ('repo_roots' in raw || 'extra_folders' in raw || 'folders' in raw) {
     throw new MemberFoldersError('the folders file has an older format (no "teams"); remove it and set your folders again with /team-relay:folders');
   }
   onlyKeys(raw, ['teams'], 'the folders file');
@@ -228,26 +180,38 @@ export function parseMemberSettings(raw: unknown, env: NodeJS.ProcessEnv): Membe
   const names = Object.keys(raw.teams);
   if (names.length > MAX_TEAMS) throw new MemberFoldersError(`the folders file has more than ${MAX_TEAMS} teams`);
   const teams = emptyTeams();
+  const old = Object.create(null) as Record<string, OldLists>;
   for (const name of names) {
     if (!TEAM_RE.test(name)) throw new MemberFoldersError(`the folders file has a team name that is not a team id (${JSON.stringify(name.slice(0, 40))})`);
-    teams[name] = parseTeamSettings(raw.teams[name], env, `team ${name}`);
+    const entry = raw.teams[name];
+    teams[name] = parseTeamSettings(entry, env, `team ${name}`);
+    // Checked by parseTeamSettings: each present list is at most 20 strings.
+    const kept: OldLists = {};
+    for (const key of OLD_FOLDER_LISTS) {
+      const list = (entry as Record<string, unknown>)[key];
+      if (Array.isArray(list)) kept[key] = [...(list as string[])];
+    }
+    if (Object.keys(kept).length) old[name] = kept;
   }
-  return { teams };
+  return { teams, old };
 }
 
-/** One team's settings (empty, nothing accepted, when the team is not in the file). */
+/** One team's settings (no folders when the team is not in the file). */
 export function teamSettings(settings: MemberSettings, team: string): TeamSettings {
   const t = Object.prototype.hasOwnProperty.call(settings.teams, team) ? settings.teams[team] : undefined;
-  return t ? { repo_roots: [...t.repo_roots], extra_folders: [...t.extra_folders], accepted: t.accepted } : { repo_roots: [], extra_folders: [], accepted: null };
+  return t ? { folders: [...t.folders], previous: t.previous.map((x) => ({ ...x })) } : { folders: [], previous: [] };
 }
 
-/** The settings with one team's entry replaced. */
-export function withTeam(settings: MemberSettings, team: string, value: TeamSettings): MemberSettings {
+/** The settings with one team's folders replaced (the previous list is gone: it is not written). */
+export function withTeam(settings: MemberSettings, team: string, value: { folders: string[] }): MemberSettings {
   if (!TEAM_RE.test(team)) throw new MemberFoldersError('not a team id');
   const teams = emptyTeams();
   for (const [k, v] of Object.entries(settings.teams)) teams[k] = v;
-  teams[team] = value;
-  return { teams };
+  teams[team] = { folders: [...value.folders], previous: [] };
+  // That team's earlier lists leave the file; every other team's stay until it saves its own.
+  const old = Object.create(null) as Record<string, OldLists>;
+  for (const [k, v] of Object.entries(settings.old ?? {})) if (k !== team) old[k] = v;
+  return { teams, old };
 }
 
 function uid(): number | null {
@@ -292,11 +256,12 @@ export function readTeamSettings(path: string, env: NodeJS.ProcessEnv, team: str
   return teamSettings(readMemberSettings(path, env), team);
 }
 
+/** What is written: each team's `folders`, and the earlier lists of a team that has not saved yet (`accepted` never). */
 function serialise(settings: MemberSettings): Record<string, unknown> {
   const teams: Record<string, unknown> = {};
   for (const name of Object.keys(settings.teams).sort()) {
-    const t = settings.teams[name]!;
-    teams[name] = { repo_roots: t.repo_roots, extra_folders: t.extra_folders, ...(t.accepted ? { accepted: t.accepted } : {}) };
+    const old = Object.prototype.hasOwnProperty.call(settings.old ?? {}, name) ? settings.old![name] : undefined;
+    teams[name] = { folders: settings.teams[name]!.folders, ...(old ?? {}) };
   }
   return { teams };
 }
@@ -341,226 +306,49 @@ export function writeMemberSettings(path: string, value: MemberSettings, env: No
   }
 }
 
-/** The list with `raw` added (checked) or removed. Returns the new value and what changed. */
-export function changeMemberFolders<T extends MemberFolders>(
-  current: T,
-  list: FolderList,
+/** The folders with `raw` added (checked) or removed. Returns the new list and what changed. */
+export function changeMemberFolders(
+  current: readonly string[],
   op: 'add' | 'remove',
   raw: string,
   env: NodeJS.ProcessEnv,
-): { value: T; changed: boolean; resolved: string | null } {
+): { folders: string[]; changed: boolean; resolved: string | null } {
   if (op === 'remove') {
     const target = expandPath(raw, env);
-    const kept = current[list].filter((e) => e !== raw && (target === null || expandPath(e, env) !== target));
-    return { value: { ...current, [list]: kept }, changed: kept.length !== current[list].length, resolved: target };
+    const kept = current.filter((e) => e !== raw && (target === null || expandPath(e, env) !== target));
+    return { folders: kept, changed: kept.length !== current.length, resolved: target };
   }
   const { path, reason } = memberFolderProblem(raw, env);
   if (reason) throw new MemberFoldersError(`${JSON.stringify(raw.slice(0, 200))} cannot be added: ${reason}`);
-  const target = expandPath(raw, env);
-  if (current[list].some((e) => e === raw || (target !== null && expandPath(e, env) === target))) {
-    return { value: current, changed: false, resolved: path };
-  }
-  if (current[list].length >= MAX_FOLDERS) throw new MemberFoldersError(`at most ${MAX_FOLDERS} entries in ${list}`);
-  return { value: { ...current, [list]: [...current[list], raw] }, changed: true, resolved: path };
+  if (holds(current, raw, env)) return { folders: [...current], changed: false, resolved: path };
+  if (current.length >= MAX_FOLDERS) throw new MemberFoldersError(`at most ${MAX_FOLDERS} folders`);
+  return { folders: [...current, raw], changed: true, resolved: path };
 }
 
-// -- M10-SPEC §7.1: what the member accepted, and what the answerer may read ---------------------
-
-/** What a team's current boundaries add to what the member accepted (all of it when nothing was). */
-export type Widening = {
-  github_orgs: string[];
-  github_repos: RepoBoundary[];
-  drive_folders: FolderBoundary[];
-  drives: DriveBoundary[];
-  member_folders: boolean;
-};
-
-export type Effective = {
-  /** The boundaries the answerer works within: the team's current ones narrowed to what was accepted. */
-  boundaries: Boundaries;
-  /** Nothing accepted for this team yet: questions are declined. */
-  notAccepted: boolean;
-  /** What the current boundaries add beyond the accepted set (null: nothing). */
-  pending: Widening | null;
-};
+const KIND_TEXT: Record<PreviousFolder['kind'], string> = { repo_root: 'repository root', own_folder: 'folder of your own' };
 
 /**
- * M10-SPEC §7.1 and PICKERS-SPEC §2.3: in which version each item of a boundaries document was
- * last added (the relay's `since`), by item key, and that document's version. An item the relay
- * does not name counts as added in the current version, so no earlier acceptance covers it.
+ * The folders an earlier plugin's file held, for where folders are chosen (null: none). Paths
+ * are as the member wrote them, quoted when they hold anything but plain characters.
  */
-export type ItemSince = { version: number; item: (key: ItemKey) => number; memberFolders: () => number };
-
-/** An own entry of a map read from JSON (a key may be named like an Object.prototype member). */
-const own = (o: Record<string, number> | undefined, key: string): number | undefined => (o && Object.prototype.hasOwnProperty.call(o, key) ? o[key] : undefined);
-
-/** The `since` of a boundaries document from the relay, as lookups (see ItemSince). */
-export function sinceOf(tb: { version: number; since?: (Omit<BoundariesSince, 'github_repos' | 'drive_folders'> & Partial<BoundariesSince>) | null }): ItemSince {
-  const s = tb.since ?? null;
-  const item = (key: ItemKey): number | undefined => {
-    if (!s) return undefined;
-    const at = key.indexOf(':');
-    const kind = key.slice(0, at);
-    const rest = key.slice(at + 1);
-    if (kind === 'org') return own(s.github_orgs, rest);
-    if (kind === 'repo') return own(s.github_repos, rest);
-    if (kind === 'folder') return own(s.drive_folders, rest);
-    return s.drives.find((d) => driveKey(d) === key)?.since;
-  };
-  return {
-    version: tb.version,
-    item: (key) => item(key) ?? tb.version,
-    memberFolders: () => s?.member_folders ?? tb.version,
-  };
+export function previousSentence(previous: readonly PreviousFolder[]): string | null {
+  if (previous.length === 0) return null;
+  const shown = (p: string) => (/^[\w~./ @+,-]+$/.test(p) ? p : JSON.stringify(p.slice(0, 200)));
+  const list = previous.map((x) => `${shown(x.path)} (${KIND_TEXT[x.kind]})`).join(', ');
+  return `Folders you chose before 13 Nov 2026 (not used now; add the ones you still want with /team-relay:folders add <path>): ${list}.`;
 }
-
-const keySet = (a: AcceptedBoundaries): Set<ItemKey> =>
-  new Set<ItemKey>([...a.github_orgs.map(orgKey), ...a.github_repos.map(repoKey), ...a.drive_folders.map(folderKey), ...a.drives.map(driveKey)]);
-
-/** The whole shared drives an accepted set holds (by drive id). */
-const wholeDrives = (a: AcceptedBoundaries): Set<string> => new Set(a.drive_folders.filter((f) => f.drive_id !== null && f.folder_id === f.drive_id).map((f) => f.folder_id));
 
 /**
- * Whether the accepted set holds an item: the item itself (same key), or, for a repository, its
- * org as a whole org, and for a Drive folder with a drive id, that whole shared drive.
+ * Whether a member has accepted their team's boundaries: the version the relay holds for them
+ * is a whole number from 1 to the current version. Version 0 is never accepted; a greater one
+ * belongs to an earlier team under the same id.
  */
-function holds(keys: Set<ItemKey>, wholes: Set<string>, item: BoundaryItem): boolean {
-  if (keys.has(itemKey(item))) return true;
-  if (item.kind === 'repo') return keys.has(orgKey(item.org));
-  if (item.kind === 'folder') return item.drive_id !== null && wholes.has(item.drive_id);
-  return false;
-}
-
-function widening(items: BoundaryItem[], member_folders: boolean): Widening {
-  const w: Widening = { github_orgs: [], github_repos: [], drive_folders: [], drives: [], member_folders };
-  for (const i of items) {
-    if (i.kind === 'org') w.github_orgs.push(i.org);
-    else if (i.kind === 'repo') w.github_repos.push({ org: i.org, repo: i.repo, id: i.id });
-    else if (i.kind === 'folder') w.drive_folders.push({ domain: i.domain, drive_id: i.drive_id, folder_id: i.folder_id, folder_name: i.folder_name, drive_name: i.drive_name });
-    else w.drives.push({ domain: i.domain, shared_drive: i.shared_drive });
-  }
-  return w;
-}
-
-const widens = (w: Widening) => w.github_orgs.length > 0 || w.github_repos.length > 0 || w.drive_folders.length > 0 || w.drives.length > 0 || w.member_folders;
-
-/**
- * M10-SPEC §7.1: the intersection of the team's current boundaries and the accepted set (by item
- * key; a repository also through its accepted whole org, a folder through its accepted whole
- * drive; member folders only when both allow them), and what the current boundaries add to it.
- * An accepted item counts only when it has been in the boundaries since the accepted version
- * (`since`): one the team dropped and added back after that is waiting again. The topic is the
- * team's current one.
- */
-export function effectiveBoundaries(current: Boundaries, acceptedRaw: AcceptedBoundaries | null, since: ItemSince): Effective {
-  const accepted = acceptedRaw ? (narrowAccepted(current, acceptedRaw, since)?.accepted ?? acceptedRaw) : null;
-  const keys = accepted ? keySet(accepted) : new Set<ItemKey>();
-  const wholes = accepted ? wholeDrives(accepted) : new Set<string>();
-  const stale = accepted !== null && accepted.version > since.version;
-  const isIn = (i: BoundaryItem) => accepted !== null && !stale && since.item(itemKey(i)) <= accepted.version && holds(keys, wholes, i);
-  const items = boundaryItems(current);
-  const inside = items.filter(isIn);
-  const kept = widening(inside, current.member_folders && accepted?.member_folders === true);
-  const added = widening(
-    items.filter((i) => !isIn(i)),
-    current.member_folders && accepted?.member_folders !== true,
+export function hasAccepted(acceptedVersion: unknown, currentVersion: number): boolean {
+  return (
+    typeof acceptedVersion === 'number' &&
+    Number.isSafeInteger(acceptedVersion) &&
+    acceptedVersion >= 1 &&
+    acceptedVersion <= BOUNDARIES_VERSION_MAX &&
+    acceptedVersion <= currentVersion
   );
-  return {
-    boundaries: { topic: current.topic, ...kept },
-    notAccepted: accepted === null,
-    pending: widens(added) ? added : null,
-  };
-}
-
-/**
- * M10-SPEC §7.1: the accepted set without what the team's current boundaries no longer hold and
- * without what they hold only since a version after the accepted one (`since`: the team dropped
- * it and added it back, whether or not this host saw the drop), and what that drops; null when
- * nothing changes. An accepted whole org the team narrowed to some of its repositories becomes
- * those repositories (and a whole drive its folders), when they are covered. Narrowing needs no
- * dialog, and what is dropped needs a new acceptance to come back.
- */
-export function narrowAccepted(current: Boundaries, accepted: AcceptedBoundaries | null, since: ItemSince): { accepted: AcceptedBoundaries; dropped: Widening } | null {
-  if (!accepted) return null;
-  // An acceptance of a version this document has not reached belongs to an earlier team under
-  // the same id (deleted and created again, versions start over): it covers nothing.
-  const stale = accepted.version > since.version;
-  const covered = (n: number) => !stale && n <= accepted.version;
-  const keys = keySet(accepted);
-  const wholes = wholeDrives(accepted);
-  const kept = boundaryItems(current).filter((i) => covered(since.item(itemKey(i))) && holds(keys, wholes, i));
-  const keptKeys = new Set(kept.map(itemKey));
-  const folders = accepted.member_folders && current.member_folders && covered(since.memberFolders());
-  const next: AcceptedBoundaries = { version: accepted.version, ...widening(kept, folders) };
-  const droppedItems: BoundaryItem[] = [
-    ...accepted.github_orgs.map((org): BoundaryItem => ({ kind: 'org', org })),
-    ...accepted.github_repos.map((r): BoundaryItem => ({ kind: 'repo', ...r })),
-    ...accepted.drive_folders.map((f): BoundaryItem => ({ kind: 'folder', ...f })),
-    ...accepted.drives.map((d): BoundaryItem => ({ kind: 'drive', ...d })),
-  ].filter((i) => !keptKeys.has(itemKey(i)));
-  const dropped = widening(droppedItems, accepted.member_folders && !folders);
-  const same = keptKeys.size === keys.size && [...keys].every((k) => keptKeys.has(k));
-  if (!widens(dropped) && same) return null;
-  // Entries kept as accepted wrote them (case as accepted) where the key is the same.
-  const asAccepted = <T>(list: T[], key: (x: T) => ItemKey, from: T[]) => list.map((x) => from.find((y) => key(y) === key(x)) ?? x);
-  return {
-    accepted: {
-      ...next,
-      github_orgs: next.github_orgs.map((o) => accepted.github_orgs.find((a) => a.toLowerCase() === o.toLowerCase()) ?? o),
-      github_repos: asAccepted(next.github_repos, repoKey, accepted.github_repos),
-      drive_folders: asAccepted(next.drive_folders, folderKey, accepted.drive_folders),
-      drives: asAccepted(next.drives, driveKey, accepted.drives),
-    },
-    dropped,
-  };
-}
-
-/**
- * One team's settings from the file, with what the team's current boundaries dropped taken
- * out of the accepted set and written back (atomically) first. Throws MemberFoldersError when
- * the file cannot be read or written.
- */
-export function settingsNarrowedTo(
-  path: string,
-  env: NodeJS.ProcessEnv,
-  team: string,
-  current: Boundaries,
-  since: ItemSince,
-): { settings: TeamSettings; dropped: Widening | null } {
-  const all = readMemberSettings(path, env);
-  const mine = teamSettings(all, team);
-  const narrowed = narrowAccepted(current, mine.accepted, since);
-  if (!narrowed) return { settings: mine, dropped: null };
-  const next: TeamSettings = { ...mine, accepted: narrowed.accepted };
-  writeMemberSettings(path, withTeam(all, team, next), env);
-  return { settings: next, dropped: narrowed.dropped };
-}
-
-/**
- * M11-SPEC §2: the accepted set the relay's accepted version stands for: every item of the
- * team's current boundaries, as accepted at that version (effectiveBoundaries then keeps only
- * those in the boundaries since that version or earlier, M10-SPEC §7.1). Null, nothing
- * accepted, for version 0 (never accepted), anything that is not a whole number from 1, and a
- * version greater than the document's (an earlier team under the same id: it covers nothing).
- */
-export function acceptedAtVersion(current: Boundaries, version: unknown, since: ItemSince): AcceptedBoundaries | null {
-  if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1 || version > since.version) return null;
-  try {
-    return acceptedFrom(current, version);
-  } catch {
-    return null;
-  }
-}
-
-/** What accepting a team's boundaries (version `version`) records. */
-export function acceptedFrom(current: Boundaries, version: number): AcceptedBoundaries {
-  const n = normaliseBoundaries(current);
-  return parseAccepted({
-    version,
-    github_orgs: n.github_orgs,
-    github_repos: n.github_repos,
-    drive_folders: n.drive_folders,
-    drives: n.drives,
-    member_folders: n.member_folders,
-  });
 }

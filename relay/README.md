@@ -23,6 +23,7 @@ asker polls `replies` or anyone reads a request.
 | `relay/jsonutil.py` | the strict body parser (§11.9), canonical JSON and hashing |
 | `relay/models.py` | request bodies, strict, `extra="forbid"` |
 | `relay/manifest.py` | schema validation, the §3.3 checks, RE2 patterns (§11.1), param validation with defaults (§3.5, §11.2) |
+| `relay/boundaries.py` | M10 §1, schema v3 (13 Nov 2026): the strict body of `PUT boundaries` (the topic only; a field of the earlier schemas refused by name) and the JSON both routes answer |
 | `relay/member_state.py` | M11 §2, §3: the strict bodies of `PUT me/acceptance` and `PUT me/status`, and their JSON |
 | `relay/setup_script.py` | M11 §5: `RELAY_PLUGIN_MARKETPLACE`, and the setup script rendered once at start for `GET /setup` |
 | `relay/static/setup.sh` | M11 §5: the setup script's template (package data; written with the plugin) |
@@ -71,7 +72,6 @@ points them at another copy (tests only).
 | `RELAY_TEAM_CONFIG` | required | path to the team YAML (`../config/team.example.yaml` shape, M6 below); on Cloud Run the mounted secret `/secrets/team/team.yaml` |
 | `RELAY_PUBLIC_URL` | unset; required on Cloud Run | the relay's own origin, e.g. `https://team-relay-….run.app` (no path, query or fragment; a trailing slash is dropped). Google's redirect URI is `{RELAY_PUBLIC_URL}/v1/login/callback`. `https` always, except `http://127.0.0.1` or `http://localhost` off Cloud Run |
 | `RELAY_OAUTH_CLIENT_FILE` | unset; required on Cloud Run | path to the relay's OAuth client, a JSON object with string `client_id` and `client_secret` (other keys ignored); on Cloud Run the mounted secret `team-relay-oauth-client`. Goes with `RELAY_PUBLIC_URL`: both or neither. Without them the login pages answer `404` |
-| `RELAY_DRIVE_CLIENT_FILE` | unset | M10-SPEC §2a: path to the Desktop OAuth client members connect Google Drive with: Google's downloaded JSON (`{"installed": {client_id, client_secret, …}}`) or a flat `{client_id, client_secret}`; on Cloud Run the optional mounted secret `team-relay-drive-client` (`/secrets/drive-oauth/client.json`). No setting or no file: `GET /drive-client` is `404 drive_not_configured`. A `"web"` client, an unreadable file, or the login's own client id is a startup error |
 | `RELAY_FORWARDED_FOR_HOPS` | `1`; required on Cloud Run when `RELAY_PUBLIC_URL` is not a `run.app` address | M10-SPEC §5: how many right-most `X-Forwarded-For` entries Google appends in front of the relay; the per-IP limits count the left-most of them. `1` when Cloud Run is reached directly (its front end's entry); `2` behind the external Application Load Balancer (the client's address, then the forwarding rule's). `1`, `2` or `3`. Check the `x_forwarded_for_hops` field of `login_started` on the live service |
 | `RELAY_ALLOWED_DOMAINS` | unset (any domain) | M10-SPEC §7.2: comma-separated lower-case domains, e.g. `example.com`; set it for any deployment meant for one organisation. When set, every Google identity needs a verified email whose domain is exactly one of them (a subdomain is not its parent) and an `hd` claim equal to that domain; see "Allowed domains" below. A malformed or empty entry, or a seed member or admin in the team file outside them, is a startup error |
 | `RELAY_BRAND_NAME` | unset (generic copy) | [docs/SIGNIN-PAGE.md](../docs/SIGNIN-PAGE.md): the name the public sign-in page shows (e.g. `Example Co`): 1 to 40 ASCII letters, digits, spaces and `& . , ' -`, not starting or ending with a space. Anything else is a startup error that does not quote the value; shown HTML-escaped |
@@ -614,41 +614,45 @@ names. A per-team
 delegate keeps working as before. A team in the file may carry an optional `name` (1..60
 characters, as above; its id otherwise).
 
-## Team boundaries (M10-SPEC §1, 10 Nov 2026)
+## Team boundaries (M10-SPEC §1; schema v3, 13 Nov 2026)
 
-What a team's members answer about and from; the plugin's answerer and the console read them.
-Stored at `teams/{team}/settings/boundaries` (`version`, `topic`, `github_orgs`, `drives`,
-`member_folders`, `updated_at`, `updated_by`), never expiring, purged with the team. The JSON
-matches `plugin/src/boundaries-types.ts`.
+(Correction, 13 Nov 2026: local folders only. A team's boundaries are its topic alone; the
+GitHub orgs, legacy shared drives, picked repositories and Drive folders, the members' folders
+switch and the per-item `since` are gone, and so are the GitHub App, the Drive Picker and the
+Drive client. Each member chooses the folders on their own Mac the answers come from; the
+relay only learns how many, in the member's status below.)
+
+What a team's members answer about; the plugin's answerer and the console read it. Stored at
+`teams/{team}/settings/boundaries` (`version`, `topic`, `updated_at`, `updated_by`), never
+expiring, purged with the team. The JSON matches `plugin/src/boundaries-types.ts`.
 
 - `GET /v1/teams/{team}/boundaries` (any active member; a delegate reading for one) → `200
-  {team, version, boundaries | null, since | null, updated_at | null, updated_by | null}`;
-  never set: `version: 0`, `boundaries: null`, `since: null`. `since` (M10-SPEC §7.1) is
-  `{"github_orgs": {"<org, lower case>": n}, "drives": [{domain, shared_drive, since: n}],
-  "member_folders": n | null}`: the version in which each item was last added, kept while
-  it stays and set anew when it is added back after a removal (computed in the writing
-  transaction; a document stored before it counts every item from its own version). Counted per member and minute (`reads_per_minute`, its own
-  counter); over it `429 rate_limited`.
+  {team, version, boundaries: {topic} | null, updated_at | null, updated_by | null}`; never
+  set: `version: 0`, `boundaries: null`. Counted per member and minute (`reads_per_minute`,
+  its own counter); over it `429 rate_limited`.
 - `PUT /v1/teams/{team}/boundaries` (an active owner; a `manage-roster` delegate for an
-  owner) with `{"version": <the one read>, "boundaries": {topic, github_orgs, drives,
-  member_folders}}` → `200`, the same shape with `version + 1`. A non-owner member is `403`
-  before the body is looked at; a non-member, an invitation or a deleted team `404` (`401`
-  for an account on no team), as the roster routes answer. The body is strict (`400
-  invalid_body`, never echoing the value): unknown fields; `version` an integer 0..2^31-1
-  (not a bool); `topic` with no control character other than newline and tab and no format,
-  surrogate, private-use, unassigned or separator character, then trimmed to 1-500
-  characters; at most 10 `github_orgs` (`^[A-Za-z0-9][A-Za-z0-9-]{0,38}$`, de-duplicated
-  case-insensitively); at most 10 `drives` (`domain` a lower-case DNS name of at most 253
-  characters, at least two labels, not an IP, no trailing dot, and with
-  `RELAY_ALLOWED_DOMAINS` set one of those, else `400 domain_not_allowed`; `shared_drive`
-  1-100 characters, no `/`, no control or format characters, not `.` or `..`, no leading or
-  trailing space; de-duplicated); `member_folders` a bool. The caps count the lists as sent.
-  `../schema/boundaries-vectors.json` holds the shared accepted and refused examples (M10-SPEC
-  §7.5); `tests/test_boundaries.py` loads it. The version and the owner rule are checked again in the writing transaction:
-  a stale version is `409 version_conflict`. The body cap is the usual 256 KiB. Owner writes
-  are counted per owner and hour (`roster_mutations_per_hour`, its own counter). Audited as
-  `boundaries_set` with `version N` (and `; via delegate`) in the detail, never the text;
-  refusals are audited like any other mutation's.
+  owner) with `{"version": <the one read>, "boundaries": {"topic": "…"}}` → `200`, the same
+  shape with `version + 1`. A non-owner member is `403` before the body is looked at; a
+  non-member, an invitation or a deleted team `404` (`401` for an account on no team), as the
+  roster routes answer. The body is strict (`400 invalid_body`, never echoing the value):
+  unknown fields (`<where>: unknown field`); `version` an integer 0..2^31-1 (not a bool);
+  `topic` with no control character other than newline and tab and no format, surrogate,
+  private-use or separator character, then trimmed to 1-500 characters. A `boundaries`
+  holding a field of the earlier schemas (the first of `github_orgs`, `github_repos`,
+  `drive_folders`, `drives`, `member_folders`) is refused naming it: `boundaries.<field>: no
+  longer part of a team's boundaries (only the topic is, since 13 Nov 2026)`.
+  `../schema/boundaries-vectors.json` holds the shared accepted, refused, removed and
+  normalised examples (M10-SPEC §7.5); `tests/test_boundaries.py` loads it. The version and
+  the owner rule are checked again in the writing transaction: a stale version is `409
+  version_conflict`. The body cap is the usual 256 KiB. Owner writes are counted per owner
+  and hour (`roster_mutations_per_hour`, its own counter). Audited as `boundaries_set` with
+  `version N` (and `; via delegate`) in the detail, never the text; refusals are audited like
+  any other mutation's.
+- A document an earlier relay stored (M10's or schema v2's, with `github_orgs`, `drives`,
+  `member_folders`, `github_repos`, `drive_folders` and their `*_since`) reads as its topic,
+  version and who and when; the rest is ignored and never handed out, and the next `PUT`
+  replaces the whole document with the v3 fields alone. Members' acceptances of its version
+  still count.
 
 ## A member's own state and asking from the console (M11-SPEC §2-§5, 10 Nov 2026)
 
@@ -668,14 +672,22 @@ The JSON matches `plugin/src/boundaries-types.ts` (`Acceptance`, `MemberStatusBo
   `teams/{team}/acceptances/{member}` `{version, accepted_at}`.
 - `PUT /v1/teams/{team}/me/status` (the member only; never a delegate) with the background
   answerer's report (strict, every field required: `daemon {version ≤32 chars, started_at}`,
-  `claude {found, signed_in}`, `folders {repo_roots 0-64, clones 0-10000, extra_folders
-  0-64}`, `drive {connected}`, `self_test {ok, at, reason ≤200 chars | null}`; times RFC 3339
-  with a zone, answered in the relay's form) → `200` the status with the relay's `seen_at`. At
-  most one write per member per 20 s (`429 rate_limited`). Counts, booleans and times only;
-  not audited. Stored, overwritten, at `teams/{team}/member_status/{member}`.
+  `claude {found, signed_in}`, `folder_count` (how many folders the member chose, an integer
+  0..20, never a bool or a float), `folders_ok` (a bool: false when the member's folders file
+  cannot be used, and then `folder_count` must be 0), `self_test {ok, at, reason ≤200 chars |
+  null}`; times RFC 3339 with a zone, answered in the relay's form) → `200 {daemon, claude,
+  self_test, seen_at, folder_count, folders_ok}` with the relay's `seen_at`. At most one
+  write per member per 20 s (`429 rate_limited`). A count, booleans and times only, never a
+  folder's name or path; not audited. Stored, overwritten, at `teams/{team}/member_status/{member}`. (Correction, 13 Nov
+  2026: `folders {repo_roots, clones, extra_folders}`, `drive {connected}` and `sources` are
+  gone; an older plugin's body is `400 invalid_body` "unknown field".)
 - `GET /v1/teams/{team}/members/status` (any active member; a delegate reading for one) →
-  `{"members": [{member, status | null, answering, accepted_version}], "boundaries_version"}`
-  for every active member; `answering` is a status received in the last 180 s.
+  `{"members": [{member, status: {daemon, claude, self_test, seen_at} | null, answering,
+  accepted_version, folder_count, folders_ok}], "boundaries_version"}` for every active
+  member; `answering` is a status received in the last 180 s. `folder_count` and `folders_ok`
+  go to an owner for every member and to anyone else (a delegate reading for a member
+  included) for their own entry only (null for the others); each is also null without a
+  status, and for a stored status that lacks it (an older plugin's).
 - `GET /v1/teams/{team}/requests/{id}` also answers each visible recipient's
   `answer_preview` and, to the asker only (a delegate reading for the asker included),
   `answer`: the full reply text. It is kept at `teams/{team}/requests/{id}/answers/{member}`
@@ -699,14 +711,6 @@ The JSON matches `plugin/src/boundaries-types.ts` (`Acceptance`, `MemberStatusBo
   stylesheet `GET /v1/login/welcome.css` and four fonts `GET /v1/login/fonts/<name>`. GET and
   HEAD only (else `405`, `Allow: GET, HEAD`), static, no scripts; see
   [docs/SIGNIN-PAGE.md](../docs/SIGNIN-PAGE.md).
-
-## Google Drive's client (M10-SPEC §2a)
-
-`GET /v1/teams/{team}/drive-client` (any active member, by a device credential or a Google
-identity; not a delegate) → `{client_id, client_secret}` of the Desktop OAuth client from
-`RELAY_DRIVE_CLIENT_FILE`, with `Cache-Control: no-store`; not set up: `404
-drive_not_configured`. An installed app's secret is not confidential (Google's own words), but
-it is still only handed to members and never logged.
 
 ## One address with the console (M10-SPEC §5)
 
@@ -737,7 +741,6 @@ organisation's Google accounts. Every place an identity or an email enters is ch
 | Roster `POST` (an invitation) and `PATCH` `add_email` | the email's domain | `403 domain_not_allowed` (`remove_email` is never refused) |
 | Creating a team (`POST /v1/teams`, the login's create page) and accepting an invitation | the creator's or invitee's email | `403 domain_not_allowed` |
 | The team file's seed members and `admins` | every `google:` principal | a startup error naming the member (or `admins.N`), never the email |
-| `PUT /boundaries` | every `drives[].domain` is in the list | `400 domain_not_allowed` |
 
 A delegate's own principal (the console's service account, `*.iam.gserviceaccount.com`) is
 not a person and is exempt; `token:sha256:` development principals have no email. Unset, all
@@ -1014,9 +1017,13 @@ A question sent while its recipient's answering session is not running waits in 
   account document is deleted when it holds nothing). Team creations count in `login_limits`.
 - M10: no new index or TTL (`settings/boundaries` never expires). Behind the load balancer:
   `RELAY_PUBLIC_URL=https://team.example.com`, `RELAY_FORWARDED_FOR_HOPS=2`, the OAuth
-  client's redirect URI `https://team.example.com/v1/login/callback`, and optionally
-  `RELAY_DRIVE_CLIENT_FILE=/secrets/drive-oauth/client.json` with the secret
-  `team-relay-drive-client` mounted there.
+  client's redirect URI `https://team.example.com/v1/login/callback`.
+- Local folders only (13 Nov 2026): no GitHub App, Drive Picker or Drive client secret is
+  mounted any more, and `scripts/deploy.sh` removes `RELAY_GITHUB_ORGS`,
+  `RELAY_GITHUB_APP_FILE`, `RELAY_PICKER_FILE`, `RELAY_ALLOWED_SHARED_DRIVES` and
+  `RELAY_DRIVE_CLIENT_FILE` from the live service when it still has them. The secrets
+  `team-relay-github-app`, `team-relay-picker` and `team-relay-drive-client` (where they
+  exist) and the Picker and Drive APIs are the operator's to delete and disable.
 
 ## Deliberately not done
 

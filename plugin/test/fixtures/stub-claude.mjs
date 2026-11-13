@@ -21,7 +21,7 @@
 //                                                            hooks, as Claude Code would
 //   {"host": {"tool": "list_files", "args": {...}}}           call one of the host server's own tools
 //                                                            (M10 boundary mode: list_files,
-//                                                            search_files, read_google_file)
+//                                                            search_files)
 //   {"request_approval": "reason"}
 //   {"reply": {"text": "...", "needs_approval": true, ...}}  "{{decision}}" in text is replaced by
 //                                                            the last permission's behavior

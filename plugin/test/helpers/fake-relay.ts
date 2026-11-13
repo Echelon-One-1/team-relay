@@ -5,8 +5,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import { knownItemKeys, nextSince, readBoundaries } from '../../src/boundaries-rule.js';
-import type { Boundaries, BoundariesSince } from '../../src/boundaries-types.js';
 
 export const TOKENS: Record<string, string> = {
   'tok-alice-0123456789': 'alice',
@@ -109,13 +107,11 @@ export class FakeRelay {
   boundaries: {
     version: number;
     boundaries: Record<string, unknown> | null;
-    since: BoundariesSince | null;
     updated_at: string | null;
     updated_by: string | null;
   } = {
     version: 0,
     boundaries: null,
-    since: null,
     updated_at: null,
     updated_by: null,
   };
@@ -134,15 +130,12 @@ export class FakeRelay {
   teamName: string | null = null;
 
   /**
-   * Set the team's boundaries, as an owner's PUT would (the version goes up by one), with the
-   * relay's `since` (M10-SPEC §7.1): an item the previous version holds keeps its version; one
-   * added, or added back after a removal, gets the new one.
+   * Set the team's boundaries, as an owner's PUT would (the version goes up by one). Schema v3
+   * (13 Nov 2026): the topic alone.
    */
   setBoundaries(b: Record<string, unknown> | null): void {
     const version = this.boundaries.version + 1;
-    const prev = { boundaries: this.boundaries.boundaries as unknown as Boundaries | null, since: this.boundaries.since };
-    const since = b ? nextSince(prev, version, b as unknown as Boundaries) : null;
-    this.boundaries = { version, boundaries: b, since, updated_at: iso(), updated_by: 'alice' };
+    this.boundaries = { version, boundaries: b, updated_at: iso(), updated_by: 'alice' };
   }
 
   /** Mint a device credential for `member` directly (as a completed login would). */
@@ -306,6 +299,8 @@ export class FakeRelay {
       return this.send(res, 200, { version: v, accepted_at: v > 0 ? iso() : null });
     }
     if (m === 'PUT' && rest.length === 2 && rest[0] === 'me' && rest[1] === 'status') {
+      // As strict as the relay (member_state.py): every field, no other, each of its type.
+      if (!validStatusBody(body)) return this.send(res, 400, { error: 'invalid_body' });
       const last = this.statusAt.get(member) ?? Number.NEGATIVE_INFINITY;
       if (Date.now() - last < this.statusGapMs) return this.send(res, 429, { error: 'rate_limited' });
       this.statusAt.set(member, Date.now());
@@ -313,26 +308,21 @@ export class FakeRelay {
       return this.send(res, 200, { ok: true });
     }
     if (m === 'GET' && rest.length === 2 && rest[0] === 'members' && rest[1] === 'status') {
-      // PICKERS-SPEC §3.4, as the relay does: each entry's `sources`, narrowed to the current
-      // boundaries' items, goes to an owner for every member and to anyone else for their own
-      // entry only; the status itself never carries them.
+      // As the relay does (13 Nov 2026): each entry's folder_count and folders_ok go to an owner
+      // for every member and to anyone else for their own entry only; the status never carries them.
       const owner = this.roster.find((r) => r.member === member)?.role === 'owner';
-      const current = this.boundaries.boundaries ? readBoundaries(this.boundaries.boundaries) : null;
       return this.send(res, 200, {
         members: MEMBERS.map((x) => {
           const stored = this.memberStatus.get(x) ?? null;
-          const { sources: reported, ...st } = stored ?? {};
+          const { folder_count: count, folders_ok: ok, ...st } = stored ?? {};
           const seen = stored ? Date.parse(String(stored.seen_at)) : NaN;
-          const r = reported as { boundaries_version: number; missing: string[] } | undefined;
-          const sources =
-            r && (owner || x === member) ? { boundaries_version: r.boundaries_version, missing: current ? knownItemKeys(current, r.missing) : [] } : null;
-          return { member: x, status: stored ? st : null, answering: Number.isFinite(seen) && Date.now() - seen < 180_000, accepted_version: this.acceptances.get(x) ?? 0, sources };
+          const shown = owner || x === member;
+          const folder_count = typeof count === 'number' && shown ? count : null;
+          const folders_ok = typeof ok === 'boolean' && shown ? ok : null;
+          return { member: x, status: stored ? st : null, answering: Number.isFinite(seen) && Date.now() - seen < 180_000, accepted_version: this.acceptances.get(x) ?? 0, folder_count, folders_ok };
         }),
         boundaries_version: this.boundaries.version,
       });
-    }
-    if (m === 'GET' && rest.length === 1 && rest[0] === 'drive-client') {
-      return this.send(res, 404, { error: 'drive_not_configured' });
     }
     if (m === 'PUT' && rest[0] === 'members' && rest[2] === 'manifest' && rest.length === 3) {
       if (rest[1] !== member) return this.send(res, 403, { error: 'forbidden' });
@@ -556,4 +546,19 @@ export class FakeRelay {
       ...(email !== null ? { email } : {}),
     });
   }
+}
+
+/** The relay's rule for a status body (member_state.py, 13 Nov 2026). */
+function validStatusBody(b: Record<string, unknown>): boolean {
+  const obj = (v: unknown, keys: string[]): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).sort().join() === [...keys].sort().join();
+  const str = (v: unknown, max: number) => typeof v === 'string' && v.length <= max;
+  const time = (v: unknown) => str(v, 40) && Number.isFinite(Date.parse(v as string));
+  if (!obj(b, ['daemon', 'claude', 'folder_count', 'folders_ok', 'self_test'])) return false;
+  if (!obj(b.daemon, ['version', 'started_at']) || !str(b.daemon.version, 32) || !time(b.daemon.started_at)) return false;
+  if (!obj(b.claude, ['found', 'signed_in']) || typeof b.claude.found !== 'boolean' || typeof b.claude.signed_in !== 'boolean') return false;
+  if (typeof b.folder_count !== 'number' || !Number.isInteger(b.folder_count) || b.folder_count < 0 || b.folder_count > 20) return false;
+  if (typeof b.folders_ok !== 'boolean' || (!b.folders_ok && b.folder_count !== 0)) return false;
+  if (!obj(b.self_test, ['ok', 'at', 'reason']) || typeof b.self_test.ok !== 'boolean' || !time(b.self_test.at)) return false;
+  return b.self_test.reason === null || (typeof b.self_test.reason === 'string' && b.self_test.reason.length <= 200);
 }

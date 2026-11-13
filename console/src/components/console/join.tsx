@@ -10,7 +10,7 @@ import { BigCopyCommand } from './copy'
 import { useViewerSetup } from './setup'
 
 // M11-SPEC "Simpler joining": on the team page, for a viewer who has not joined yet (their Mac
-// has never reported in, or they have never accepted what the team shares), one small card with
+// has never reported in, or they have never accepted the team's topic), one small card with
 // the three things to do. It goes once they have joined (lib/setup.ts hasJoined). Nothing in it
 // names a tool: it is for people who have never used Terminal.
 

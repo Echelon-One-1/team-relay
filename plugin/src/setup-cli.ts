@@ -2,16 +2,14 @@
 // the plugin. The setup script runs them in order; a member can run any of them again.
 //
 //   login [--relay <url>]               the browser sign-in of M5 (skipped when signed in to that relay)
-//   folders                             choose the folders that hold your clones of the team's whole
-//                                       orgs and repositories (asks on the terminal)
-//   drive                               connect Google Drive when the team shares Drive folders or
-//                                       drives (M10 §2a)
+//   folders                             choose the folders on this Mac your Claude may answer your
+//                                       team from (one list, at most 20; the Mac's chooser, or asks
+//                                       on the terminal)
 //   daemon install --claude <path> --plugin team-relay@<marketplace>
 //                                       write and load the background answerer's LaunchAgent, for
 //                                       the plugin installed under exactly that key
 //   daemon uninstall                    stop and remove it
-//   status [--after-setup]              your setup checklist, as the relay sees it (M11 §6), and what
-//                                       your Mac cannot find of what the team shares (PICKERS-SPEC §7.4)
+//   status [--after-setup]              your setup checklist, as the relay sees it (M11 §6)
 //
 // Nothing here prints a credential or token. Exit 0: done (or nothing to do); 1: it did not
 // work (the line says why); 2: usage.
@@ -22,19 +20,14 @@
 import { createReadStream, openSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { boundaryItems, itemKey, sinceByKey } from './boundaries-rule.js';
-import { SELF_TEST_PENDING, type Boundaries, type MemberSources, type MemberStatusEntry, type TeamBoundaries } from './boundaries-types.js';
-import { homeDir, type GithubSources } from './boundary-set.js';
-import { clonesUnder } from './clones.js';
+import { SELF_TEST_PENDING, type MemberStatusEntry } from './boundaries-types.js';
+import { homeDir } from './boundary-set.js';
 import { consoleUrl } from './console-url.js';
 import { CredentialFileError, credentialsPath, normaliseRelayUrl, readCredential } from './credentials.js';
 import { AgentError, type Exec } from './daemon-launch.js';
-import type { DriveCliOutcome } from './drive-cli.js';
-import { MAC_ONLY } from './drive-login.js';
-import { defaultKeychain, type Keychain } from './google-drive.js';
 import type { FetchPinnedNode } from './locate.js';
 import { LoginError, connectedAs, identityChange, startLogin, type LoginFlow, type LoginOptions } from './login.js';
-import { MAX_FOLDERS, MemberFoldersError, expandPath, memberFolderProblem, memberFoldersPath, readMemberSettings, teamSettings } from './member-folders.js';
+import { MAX_FOLDERS, MemberFoldersError, expandPath, hasAccepted, memberFolderProblem, memberFoldersPath, readMemberSettings, previousSentence, teamSettings } from './member-folders.js';
 import { configValue, parseRelayUrl, type RelayClient } from './relay-client.js';
 import { defaultRelayUrl } from './relay-default.js';
 import { connectOnce } from './relay-connect.js';
@@ -42,11 +35,9 @@ import {
   addFolder,
   currentUid,
   defaultChooser,
-  driveConnect,
   backgroundNode,
   installBackground,
   saveTeamFolders,
-  teamBoundaries,
   uninstallBackground,
   type FolderChooser,
 } from './setup-steps.js';
@@ -59,8 +50,7 @@ export const HELP = [
   'usage: node setup-cli.js <command>',
   '',
   '  login [--relay <url>]            sign in to the team relay in your browser',
-  '  folders                          choose the folders that hold your clones of the team\'s repositories',
-  '  drive                            connect Google Drive, when your team has shared drives',
+  '  folders                          choose the folders your Claude may answer your team from',
   '  daemon install --claude <path> --plugin team-relay@<marketplace>',
   '                                   start answering teammates in the background (macOS)',
   '  daemon uninstall                 stop answering in the background',
@@ -92,22 +82,17 @@ export type SetupDeps = {
   startLogin?: (o: LoginOptions) => Promise<LoginFlow>;
   /** The relay client for the signed-in member (default: connectOnce). */
   connect?: () => Promise<{ client: RelayClient; member: string; team: string } | { error: string }>;
-  keychain?: Keychain | null;
-  drive?: (argv: string[], client: RelayClient, keychain: Keychain) => Promise<DriveCliOutcome>;
-  clones?: (raw: string, sources: GithubSources) => Promise<number>;
   /** The Mac's folder chooser (default: osascript's `choose folder`; tests: a fake). */
   chooseFolders?: FolderChooser;
 };
 
 export const NOT_SIGNED_IN = 'You are not signed in to your team on this Mac yet. Run the setup line again.';
-const UNREACHABLE_BOUNDARIES = 'Could not reach your team just now. Run the setup line again in a minute.';
 
 // macOS privacy protection: a LaunchAgent's node may be refused (or macOS may ask the member)
-// for folders under these, and for the Drive mount (~/Library/CloudStorage).
+// for folders under these.
 const PROTECTED_DIRS = ['Documents', 'Desktop', 'Downloads', join('Library', 'Mobile Documents')];
 export const PRIVACY_FOLDERS_NOTE =
   'The first time your Mac answers from a folder in Documents, Desktop, Downloads or iCloud Drive, macOS may ask whether "node" may open it: click Allow.';
-export const PRIVACY_DRIVE_NOTE = 'The first time your Mac answers from Google Drive, macOS may ask whether "node" may open it: click Allow.';
 
 /** Whether `raw` (as the member wrote it) resolves to a folder macOS protects. */
 function privacyProtected(raw: string, env: NodeJS.ProcessEnv): boolean {
@@ -203,80 +188,65 @@ async function login(argv: string[], d: SetupDeps): Promise<number> {
 
 // -- folders ---------------------------------------------------------------------------------------
 
-type ListSpec = {
-  /** "Your folders for projects now:" */
-  nowTitle: string;
-  keepPrompt: string;
-  /** Asked when the member said No to keepPrompt and then cancelled the chooser. */
-  stopPrompt: string;
-  /** Said before the chooser opens. */
-  pickIntro: string;
-  /** The chooser's own prompt. */
-  prompt: string;
-  /** Said when there is no chooser and the member types the folders. */
-  typeIntro: string;
-  current: string[];
-  count: ((raw: string) => Promise<number>) | null;
-};
+/** The chooser's own prompt (the setup page's says the same, local-setup.ts). */
+export const FOLDERS_PROMPT = 'Pick the folders your Claude may answer your team from. Hold Cmd to pick more than one.';
 
 const plural = (n: number, one: string, many: string) => `${n === 0 ? 'no' : n} ${n === 1 ? one : many}`;
 
-async function chooseList(d: SetupDeps, spec: ListSpec): Promise<string[]> {
+/** The member's folders, kept, re-picked in the Mac's chooser or typed (asked once). */
+async function chooseFolders(d: SetupDeps, current: string[]): Promise<string[]> {
   const { io, env } = d;
   const name = (raw: string) => {
     const resolved = expandPath(raw, env) ?? raw;
     return basename(resolved) || resolved;
   };
-  const describe = async (raw: string) => {
+  const describe = (raw: string) => {
     const { reason } = memberFolderProblem(raw, env);
-    if (reason) return `Not used: ${raw} (${reason}).`;
-    if (!spec.count) return `${name(raw)} (${expandPath(raw, env) ?? raw})`;
-    const n = await spec.count(raw);
-    return `Found ${plural(n, 'project folder', 'project folders')} in ${name(raw)}.`;
+    return reason ? `Not used: ${raw} (${reason}).` : `${name(raw)} (${expandPath(raw, env) ?? raw})`;
   };
   /** Adds `raw` to `out` when it can be used; says what happened. */
-  const add = async (raw: string, out: string[]) => {
+  const add = (raw: string, out: string[]) => {
     const r = addFolder(out, raw, env);
     if (r.kind === 'refused') io.print(`  Not used: ${raw} (${r.reason}).`);
     else if (r.kind === 'duplicate') io.print(`  ${name(raw)} is already in the list.`);
     else if (r.kind === 'full') io.print(`  At most ${MAX_FOLDERS} folders; ${name(raw)} is not added.`);
-    else io.print(`  ${await describe(raw)}`);
+    else io.print(`  ${describe(raw)}`);
   };
 
   let saidNo = false;
-  if (spec.current.length > 0) {
-    io.print(spec.nowTitle);
-    for (const raw of spec.current) io.print(`  ${await describe(raw)}`);
-    if (yes(await io.ask(`${spec.keepPrompt} [Y/n] `), true)) return spec.current;
+  if (current.length > 0) {
+    io.print('The folders your Claude answers your team from:');
+    for (const raw of current) io.print(`  ${describe(raw)}`);
+    if (yes(await io.ask('Keep these folders? [Y/n] '), true)) return current;
     saidNo = true;
   }
 
   const chooser = d.chooseFolders ?? defaultChooser(d.platform ?? process.platform);
-  io.print(spec.pickIntro);
-  const r = await chooser(spec.prompt);
+  io.print('A window opens: pick the folders your Claude may answer your team from (hold Cmd to pick more than one), then click Choose.');
+  const r = await chooser(FOLDERS_PROMPT);
   if (r.kind === 'cancelled') {
     // After a No, a Cancel may mean "none at all": asked, never assumed.
-    if (saidNo && yes(await io.ask(`${spec.stopPrompt} [y/N] `), false)) return [];
-    io.print(spec.current.length > 0 ? 'Nothing picked, so your folders stay as they were.' : 'Nothing picked.');
-    return spec.current;
+    if (saidNo && yes(await io.ask('Stop using any folders? [y/N] '), false)) return [];
+    io.print(current.length > 0 ? 'Nothing picked, so your folders stay as they were.' : 'Nothing picked.');
+    return current;
   }
   if (r.kind === 'chosen') {
     const out: string[] = [];
-    for (const raw of r.paths) await add(raw, out);
+    for (const raw of r.paths) add(raw, out);
     if (out.length === 0 && r.paths.length > 0) {
-      io.print(spec.current.length > 0 ? 'None of those can be used, so your folders stay as they were.' : 'None of those can be used.');
-      return spec.current;
+      io.print(current.length > 0 ? 'None of those can be used, so your folders stay as they were.' : 'None of those can be used.');
+      return current;
     }
     return out;
   }
 
   // No chooser here (no screen, or no osascript): the member types the folders.
-  io.print(spec.typeIntro);
+  io.print('Type the full path of each folder your Claude may answer your team from, one per line (~ means your home folder). Press Enter on an empty line to finish.');
   const out: string[] = [];
   for (;;) {
     const line = await io.ask('> ');
     if (line === null || line.trim() === '') break;
-    await add(line.trim(), out);
+    add(line.trim(), out);
   }
   return out;
 }
@@ -288,16 +258,6 @@ async function folders(d: SetupDeps): Promise<number> {
     io.print(c.error);
     return 1;
   }
-  const tb = await teamBoundaries(c.client);
-  const url = consoleUrl(c.client.url);
-  if (!tb) {
-    io.print(UNREACHABLE_BOUNDARIES);
-    return 1;
-  }
-  if (!tb.boundaries) {
-    io.print(`Your team has not chosen what to share yet, so there are no folders to pick. Run the setup line again once a team owner has done that (on ${url}).`);
-    return 0;
-  }
   const file = memberFoldersPath(env);
   let all;
   try {
@@ -307,104 +267,23 @@ async function folders(d: SetupDeps): Promise<number> {
     return 1;
   }
   const current = teamSettings(all, c.team);
-  // PICKERS-SPEC §6.1: whole orgs and single repositories, as the team listed them.
-  const github: GithubSources = { github_orgs: tb.boundaries.github_orgs, github_repos: tb.boundaries.github_repos };
-  const count = d.clones ?? ((raw: string, g: GithubSources) => clonesUnder(raw, g, env));
-  let roots = current.repo_roots;
-  if (github.github_orgs.length + github.github_repos.length > 0) {
-    const names = listWords([...github.github_orgs, ...github.github_repos.map((x) => `${x.org}/${x.repo}`)], 12);
-    io.print(`Your team shares projects from GitHub: ${names}.`);
-    roots = await chooseList(d, {
-      nowTitle: 'The folders you picked for these projects:',
-      keepPrompt: 'Keep these folders?',
-      stopPrompt: 'Stop using project folders?',
-      pickIntro: `A window opens: pick the folders that hold your ${names} projects (hold Cmd to pick more than one), then click Choose.`,
-      prompt: `Pick the folders that hold your ${names} projects. Hold Cmd to pick more than one.`,
-      typeIntro: `Type the full path of each folder that holds your ${names} projects, one per line (~ means your home folder). Press Enter on an empty line to finish.`,
-      current: current.repo_roots,
-      count: (raw) => count(raw, github),
-    });
-  } else {
-    io.print('Your team shares no GitHub projects, so there are no project folders to pick.');
-  }
-  let extra = current.extra_folders;
-  if (tb.boundaries.member_folders) {
-    io.print('Your team also lets you share folders of your own.');
-    extra = await chooseList(d, {
-      nowTitle: 'The folders of your own you picked:',
-      keepPrompt: 'Keep these folders of your own?',
-      stopPrompt: 'Stop using folders of your own?',
-      pickIntro: 'A window opens: pick any folders of your own that answers may use, or click Cancel to skip.',
-      prompt: 'Pick any folders of your own that answers may use. Hold Cmd to pick more than one, or click Cancel to skip.',
-      typeIntro: 'Type the full path of any folder of your own that answers may use, one per line. Press Enter on an empty line to finish.',
-      current: current.extra_folders,
-      count: null,
-    });
-  } else if (current.extra_folders.length > 0) {
-    io.print('Your team no longer allows folders of your own, so the ones you picked earlier are not used.');
-  }
+  io.print('Your Claude answers your team from folders you choose on this Mac. In a folder that is a git repository, only the files git tracks are used.');
+  // An earlier plugin's folders are never used: named, so the member can pick again the ones they want.
+  const previous = previousSentence(current.previous);
+  if (previous) io.print(previous);
+  const chosen = await chooseFolders(d, current.folders);
+  let saved: string[];
   try {
-    // Read again: the file may have changed while the questions were open.
-    saveTeamFolders(env, c.team, () => ({ repo_roots: roots, extra_folders: extra }));
+    // Read again: the file may have changed while the questions were open. Saved as `folders`
+    // alone: an earlier plugin's lists leave the file.
+    saved = saveTeamFolders(env, c.team, () => chosen);
   } catch (err) {
     io.print(`Nothing was saved (${err instanceof MemberFoldersError ? err.message : describeError(err)}).`);
     return 1;
   }
-  const own = tb.boundaries.member_folders ? ` and ${plural(extra.length, 'folder', 'folders')} of your own` : '';
-  io.print(`Saved: ${plural(roots.length, 'folder', 'folders')} for projects${own}.`);
-  const used = tb.boundaries.member_folders ? [...roots, ...extra] : roots;
-  if (used.some((raw) => privacyProtected(raw, env))) io.print(PRIVACY_FOLDERS_NOTE);
+  io.print(`Saved: ${plural(saved.length, 'folder', 'folders')}.`);
+  if (saved.some((raw) => privacyProtected(raw, env))) io.print(PRIVACY_FOLDERS_NOTE);
   return 0;
-}
-
-/** "a", "a and b", "a, b and c"; past `max` items, "a, b and 3 more". */
-function listWords(items: string[], max = Number.POSITIVE_INFINITY): string {
-  if (items.length > max) return `${items.slice(0, max).join(', ')} and ${items.length - max} more`;
-  if (items.length <= 1) return items[0] ?? '';
-  return `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
-}
-
-// -- drive -----------------------------------------------------------------------------------------
-
-async function drive(d: SetupDeps): Promise<number> {
-  const { io, env } = d;
-  const c = await (d.connect ?? (() => defaultConnect(env)))();
-  if ('error' in c) {
-    io.print(c.error);
-    return 1;
-  }
-  const tb = await teamBoundaries(c.client);
-  if (!tb) {
-    io.print(UNREACHABLE_BOUNDARIES);
-    return 1;
-  }
-  if (!tb.boundaries || tb.boundaries.drives.length + tb.boundaries.drive_folders.length === 0) {
-    io.print('Your team has no shared Google Drives, so there is nothing to connect.');
-    return 0;
-  }
-  const platform = d.platform ?? process.platform;
-  const keychain = d.keychain === undefined ? defaultKeychain(platform) : d.keychain;
-  if (platform !== 'darwin' || !keychain) {
-    io.print(MAC_ONLY);
-    return 1;
-  }
-  let account: string | null;
-  try {
-    account = await keychain.account();
-  } catch (err) {
-    io.print(`Google Drive: ${describeError(err)}`);
-    return 1;
-  }
-  if (account) {
-    io.print(`Google Drive is already connected as ${account}.`);
-    io.print(PRIVACY_DRIVE_NOTE);
-    return 0;
-  }
-  io.print('Connecting Google Drive (read only): sign in with your work Google account in the browser window that opens.');
-  const r = d.drive ? await d.drive(['connect'], c.client, keychain) : await driveConnect(c.client, platform, keychain, (l) => io.print(`  ${l}`));
-  io.print(r.line);
-  if (r.exitCode === 0) io.print(PRIVACY_DRIVE_NOTE);
-  return r.exitCode;
 }
 
 // -- daemon ----------------------------------------------------------------------------------------
@@ -466,7 +345,7 @@ async function daemon(argv: string[], d: SetupDeps): Promise<number> {
 // -- status ----------------------------------------------------------------------------------------
 
 /** One thing the Mac must have for "Set up your Mac": done, or one plain sentence of what to do. */
-export type Check = { id: 'setup' | 'claude' | 'answering' | 'folders' | 'drive' | 'self_test'; done: boolean; todo: string };
+export type Check = { id: 'setup' | 'claude' | 'answering' | 'folders' | 'self_test'; done: boolean; todo: string };
 /** M11-SPEC "Simpler joining": the two steps; `checks` are the Mac's, shown only while one is not done. */
 export type Step = { id: 'mac' | 'accept'; done: boolean; title: string; todo: string; checks: Check[] };
 
@@ -479,23 +358,21 @@ export const WAITING_FOR_CHECK_IN = 'Waiting for your Mac to check in…';
 const PENDING_POLL_MS = 5000;
 const PENDING_WAIT_MS = 90_000;
 
-const NOT_KNOWN = "Could not check this just now, because your team's settings did not load. Run the setup line again in a minute.";
-
 /**
  * The two steps, from the relay's view of this member (the console's Setup page shows the
- * same; "Ask the team" is not a step, it is always there below them). "Set up your Mac" is done when every check is: the Mac has reported in, Claude Code is
- * there and signed in, the Mac answers now, folders and Google Drive (when the team's
- * boundaries ask for them) and the self-test. `orgs` and `drives`: how many the team's
- * boundaries hold (0 also when none are set), null when they could not be read, which never
- * counts as done.
+ * same; "Ask the team" is not a step, it is always there below them). "Set up your Mac" is done
+ * when every check is: the Mac has reported in, Claude Code is there and signed in, the Mac
+ * answers now, at least one folder is chosen (`folderCount`, the member's own entry's
+ * folder_count; null, not reported, never counts as done; when `foldersOk` is false the folders
+ * file cannot be used, which is said as such) and the self-test.
  */
 export function checklist(p: {
-  status: { claude?: { found?: unknown; signed_in?: unknown }; folders?: { repo_roots?: unknown }; drive?: { connected?: unknown }; self_test?: { ok?: unknown; reason?: unknown } } | null;
+  status: { claude?: { found?: unknown; signed_in?: unknown }; self_test?: { ok?: unknown; reason?: unknown } } | null;
+  folderCount: number | null;
+  foldersOk: boolean | null;
   answering: boolean;
   acceptedVersion: number;
   boundariesVersion: number;
-  orgs: number | null;
-  drives: number | null;
   console: string;
 }): Step[] {
   const s = p.status;
@@ -517,13 +394,11 @@ export function checklist(p: {
           { id: 'answering', done: p.answering, todo: "Your Mac isn't answering right now. Make sure it's switched on; if this stays, run the setup line again." },
           {
             id: 'folders',
-            done: p.orgs !== null && (p.orgs === 0 || (typeof s.folders?.repo_roots === 'number' && s.folders.repo_roots > 0)),
-            todo: p.orgs === null ? NOT_KNOWN : 'Your project folders are not picked yet. Run the setup line again and pick them.',
-          },
-          {
-            id: 'drive',
-            done: p.drives !== null && (p.drives === 0 || s.drive?.connected === true),
-            todo: p.drives === null ? NOT_KNOWN : 'Google Drive is not connected yet. Run the setup line again and sign in to Google when it asks.',
+            done: p.foldersOk !== false && typeof p.folderCount === 'number' && p.folderCount > 0,
+            todo:
+              p.foldersOk === false
+                ? 'Your saved folders file cannot be used on this Mac. In Claude Code, run /team-relay:folders to see why.'
+                : 'You have not chosen the folders your Claude answers from yet. Run the setup line again and pick them.',
           },
           {
             id: 'self_test',
@@ -541,7 +416,7 @@ export function checklist(p: {
     {
       id: 'accept',
       title: 'Accept what the team shares',
-      done: p.boundariesVersion > 0 && p.acceptedVersion === p.boundariesVersion,
+      done: p.boundariesVersion > 0 && hasAccepted(p.acceptedVersion, p.boundariesVersion),
       todo: p.boundariesVersion > 0 ? `Open ${p.console} and click Accept.` : `Your team has not chosen what to share yet. A team owner does that on ${p.console}.`,
       checks: [],
     },
@@ -588,19 +463,17 @@ async function status(d: SetupDeps, afterSetup: boolean): Promise<number> {
       // the last answer stands; looked at again next time
     }
   }
-  const tb = await teamBoundaries(c.client);
   const entry = mine(ms);
   const url = consoleUrl(c.client.url);
   const acceptedVersion = typeof acc.version === 'number' ? acc.version : 0;
   const boundariesVersion = typeof ms.boundaries_version === 'number' ? ms.boundaries_version : 0;
   const steps = checklist({
     status: entry?.status ?? null,
+    folderCount: typeof entry?.folder_count === 'number' ? entry.folder_count : null,
+    foldersOk: typeof entry?.folders_ok === 'boolean' ? entry.folders_ok : null,
     answering: entry?.answering === true,
     acceptedVersion,
     boundariesVersion,
-    // Not read: not known. Read with none set: nothing to choose.
-    orgs: tb ? (tb.boundaries ? tb.boundaries.github_orgs.length + tb.boundaries.github_repos.length : 0) : null,
-    drives: tb ? (tb.boundaries ? tb.boundaries.drives.length + tb.boundaries.drive_folders.length : 0) : null,
     console: url,
   });
   const done = steps.filter((s) => s.done).length;
@@ -615,57 +488,15 @@ async function status(d: SetupDeps, afterSetup: boolean): Promise<number> {
       io.print(`  [ ] ${s.title} - ${s.todo}`);
     }
   }
-  // PICKERS-SPEC §7.4: what this Mac cannot find (never makes "Set up your Mac" undone).
-  if (tb?.boundaries) for (const line of missingLines(tb, entry?.sources ?? null)) io.print(line);
   // Always there, never a step: asking is what the setup is for.
   io.print(`Ask the team: ${url}/ask`);
   if (afterSetup) {
     // The setup line's last words: back to the browser, and Accept when there is something to accept.
-    const toAccept = boundariesVersion > 0 && acceptedVersion !== boundariesVersion;
+    const toAccept = boundariesVersion > 0 && !hasAccepted(acceptedVersion, boundariesVersion);
     io.print('');
     io.print(`Done. Go back to the team page in your browser${toAccept ? ' and click Accept' : ''}.`);
   }
   return 0;
-}
-
-/**
- * PICKERS-SPEC §7.4: the lines for what the member's Mac reported it cannot find (`sources`,
- * the relay's view), named from the team's current boundaries: a `git clone` line for a
- * repository, plain words for a whole org and for Drive. Keys that are no item of the current
- * boundaries are left out; items added after the version the Mac looked at are "still checking".
- */
-export function missingLines(tb: TeamBoundaries, sources: MemberSources | null): string[] {
-  const b: Boundaries | null = tb.boundaries;
-  if (!b || !sources) return [];
-  const items = boundaryItems(b);
-  const reported = new Set(sources.missing);
-  const lines: string[] = [];
-  const since = sinceByKey(b, tb.since ?? null, tb.version);
-  const missing = items.filter((i) => reported.has(itemKey(i)));
-  if (missing.length > 0) {
-    lines.push(`Your Mac can't find ${missing.length} of the things your team shares. It answers from the rest.`);
-    for (const i of missing) {
-      if (i.kind === 'repo') {
-        lines.push(`  - git clone https://github.com/${i.org}/${i.repo}.git`);
-        lines.push('    Run it in Terminal inside the folder you picked for projects.');
-      } else if (i.kind === 'org') {
-        lines.push(`  - No ${i.org} projects found. Clone the ones you work on into the folder you picked for projects: https://github.com/orgs/${i.org}/repositories`);
-      } else {
-        const name =
-          i.kind === 'drive'
-            ? i.shared_drive
-            : i.drive_id !== null && i.folder_id === i.drive_id
-              ? i.folder_name
-              : `${i.folder_name} (${i.drive_name !== null ? `in ${i.drive_name}` : 'in a shared drive'})`;
-        lines.push(
-          `  - ${name} isn't on this Mac. Make sure Google Drive for desktop is signed in with your work account; if it still doesn't show, ask a team owner for access to the shared drive.`,
-        );
-      }
-    }
-  }
-  const checking = sources.boundaries_version < tb.version ? items.filter((i) => (since.get(itemKey(i)) ?? tb.version) > sources.boundaries_version).length : 0;
-  if (checking > 0) lines.push(`Your Mac is still checking ${checking === 1 ? '1 new thing' : `${checking} new things`} your team shares.`);
-  return lines;
 }
 
 // -- main ------------------------------------------------------------------------------------------
@@ -684,9 +515,6 @@ export async function runSetup(argv: string[], d: SetupDeps): Promise<number> {
     case 'folders':
       if (rest.length > 0) break;
       return folders(d);
-    case 'drive':
-      if (rest.length > 0) break;
-      return drive(d);
     case 'daemon':
       return daemon(rest, d);
     case 'status':

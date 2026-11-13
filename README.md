@@ -95,8 +95,8 @@ sign in with Google and choose your team (accept the invitation there). If you a
 already, this step is skipped; if no browser tab opens, Claude shows you the sign-in link to
 open yourself, and you type `/team-relay:setup` again once you have signed in. Then the setup
 page opens, on your own Mac: accept what the team shares, add the folders your Claude answers
-from with the Mac's own folder chooser (every folder you use for the team: your copies of its
-GitHub projects, your Google Drive for desktop folders, shared documents), leave "Background
+from with the Mac's own folder chooser (up to 20 folders you use for the team, for example the
+folder your clones of its projects are in, or a folder of shared documents), leave "Background
 answering" on (it answers teammates' questions from your folders even when Claude is closed;
 where it cannot run, the page says why and leaves it off), and click Done. The page says "All
 set. Go back to Claude." The plugin gets the Node.js it needs by itself.
@@ -128,34 +128,24 @@ below). Then, in Claude Code:
    you were invited with, accept the invitation (the page lists it with Accept and Decline),
    pick the team, done. The session waits for it and says "Connected as <you> (<your email>)
    on team <team>".
-3. **Say where your clones live, and accept the team's boundaries:** `/team-relay:folders`
-   adds your repository roots (for example `~/DEV/<org>`), searched three levels deep. Only
-   clones of the team's whole GitHub orgs and of the repositories it lists count (matched by
-   their `origin`), and in them only the files git tracks (no `.env`, notes or build output).
-   If the team allows it, the same command adds folders of your own. It also shows you the
-   team's boundaries (its GitHub orgs and repositories, shared-drive folders and whether
-   members may add folders) and asks you to accept them: your session answers only from what is both
-   in the team's boundaries and accepted by you. Until you accept, teammates' questions are
-   declined with "<you> hasn't set up answering for this team yet". When an owner narrows the
-   boundaries, that applies at once. When an owner widens them (a new org or repository, a new
-   folder or drive, member folders turned on), your session says "<team>'s boundaries changed … run
-   /team-relay:folders to accept" and keeps answering from what you accepted before; run the
-   command again to see exactly what is added and accept it.
-4. **Connect Google Drive** when the team's boundaries list shared-drive folders: Google Drive
-   for desktop signed in with your work account, then `/team-relay:drive` (a Google sign-in in
-   the browser, read-only; the token stays in your Mac's Keychain and never goes to the relay;
-   run it again to disconnect). Your Mac finds each folder in Drive for desktop's `Shared
-   drives` by its Drive id, not its name, so a renamed folder is still found.
+3. **Choose your folders, and accept the team's topic:** `/team-relay:folders add <path>` adds a
+   folder of your own Mac (`remove <path>` takes one out, `list` shows them; at most 20, the same
+   list `/team-relay:setup` edits). Inside a folder, files of a git work tree are read only when
+   git tracks them (no `.env`, notes or build output); elsewhere every file in the folder is
+   readable. Credential files and secret-looking names are never read, wherever they are. Then
+   accept the team's boundaries (its topic) in the console: until you accept, teammates'
+   questions are declined with "<you> hasn't set up answering for this team yet".
 
-Your Setup page in the console lists anything of the team's that your Mac did not find: a
-repository with the `git clone` line to get it (clone it under one of your roots), or a Drive
-folder with what to check (Drive for desktop signed in with your work account, and access to
-that shared drive). `setup-cli status` prints the same lines. Your Mac reports only which of the
-team's own items it is missing, never a path or a local folder name; owners see each member's
-missing items, other members only their own. A source you do not have is simply skipped.
+(Correction, 13 Nov 2026: teams no longer list GitHub repositories or shared-drive folders, and
+there is no Google Drive sign-in. Every member, owner included, answers from the folders they
+choose on their own Mac. Repository roots and own folders set before are not used for reading:
+a repository root was only searched for the team's own repositories, so reading it whole would
+share more than you chose. The setup page, `/team-relay:folders` and the setup line list them
+once as "folders you chose before"; add the ones you still want, and the old entries are removed
+from your settings when you save. Owners see how many folders each member chose, never which.)
 
 That is all. In a team with boundaries (Team settings in the console), questions on the
-team's topic are answered on their own from the allowed clones, drives and folders, with no
+team's topic are answered on their own from the folders you chose, with no
 dialogs; anything else is declined, and teammates see what you can answer from. In a team
 without them, answering works as before: within the folder you started the session in, and
 when an answer needs you, the session says so and `/team-relay:approvals` shows it in a
@@ -185,39 +175,25 @@ only one answerer runs per computer. Details, including writing capability runne
   team switcher; until then the entry shows as Invited, grants nothing, and the owner can
   withdraw it. Teammates listed in the relay's team file are members from the start.
 - **Set its boundaries.** In the console's Team settings, an owner sets what the team talks
-  about (its topic), the GitHub repositories and shared-drive folders its members answer from,
-  and whether members may add folders of their own. **GitHub:** with the relay's GitHub App
-  installed on the org (below), the GitHub picker lists the org's repositories; tick single
-  ones or the whole org (every repository of it, today's and future ones). Without the app, paste
-  `https://github.com/<org>` or `https://github.com/<org>/<repo>`. **Drive:** the Drive picker
-  opens Google's own picker on a page of its own, signed in as you, for shared-drive folders or a
-  whole shared drive (the page never sends your Google token to the relay or the console, and
-  forgets it when it closes); or paste a folder's `drive.google.com/drive/folders/…` link.
-  Drives typed by name before this change are kept as "matched by name" until you re-pick them;
-  no new name can be added, and members accept a re-picked drive once more. Narrowing a whole
-  org to some of its repositories needs no new acceptance; adding a repository or a folder does.
-  The members view shows each member's missing items by name. Inside them answers go out without approval
-  dialogs; off-topic questions are declined. Members see them read-only; a save made from an
-  older version than the current one is refused, and the form shows the latest. Right after
-  creating a team the console opens there. Until they are set, answers need each member's
-  approval, as before. Each member accepts the boundaries once in `/team-relay:folders`
-  (and again when an owner widens them) before their session answers from them.
+  about: its topic. Each member answers from the folders they choose on their own Mac (above);
+  the members view shows owners how many folders each member chose ("5 folders"), never their
+  names or paths. Inside the topic answers go out without approval dialogs; off-topic questions
+  are declined. Members see the topic read-only; a save made from an older version than the
+  current one is refused, and the form shows the latest. Right after creating a team the console
+  opens there. Until they are set, answers need each member's approval, as before. Each member
+  accepts the boundaries once in the console before their session answers on its own.
+  (Correction, 13 Nov 2026: owners no longer pick GitHub repositories or shared-drive folders;
+  [docs/PICKERS-SPEC.md](docs/PICKERS-SPEC.md) is superseded.)
 
   **Accepted risks.** Boundaries are a deliberate trade-off; know these before you set them:
-  - Everyone on the team may get anything inside the boundaries, whatever their own access.
-    A teammate who cannot open a repository on GitHub, or a folder on the shared drive, can
-    still get an answer drawn from it. Sharing the team's work inside the team is the point.
+  - Everyone on the team may get anything in a member's chosen folders that fits the topic,
+    whatever their own access. A teammate who cannot open a repository on GitHub, or a folder on
+    a shared drive, can still get an answer drawn from another member's copy of it. Sharing the
+    team's work inside the team is the point; each member decides which folders they share.
   - The check for secrets in answers looks for known patterns. A teammate who talks the
     answerer into disguising a secret (spelling it out, encoding it) could get one past it.
     Credential files and files git does not track are never read, and the repositories' own
     secret scanning keeps the tracked files free of secrets.
-  - The relay's GitHub App lists the repository names of the orgs in `GITHUB_ORGS` to the
-    owner of **any** team on the relay (never their contents). A relay that serves one
-    organisation's own teams accepts that; bind orgs to teams before another organisation's
-    team joins it.
-  - The Google Drive sign-in (read-only, the narrowest access Google offers for reading
-    shared drives) is kept in your Mac's login Keychain. Programs running as you can read it
-    without asking, like any of your files. The answerer itself cannot run commands.
 - **Delete a team.** Any owner of a created team deletes it in the console's Team settings,
   by typing its id. Everyone loses access at once and its data is removed; the id stays
   reserved for 31 days. The teams in the relay's team file cannot be deleted this way.
@@ -283,44 +259,29 @@ services take traffic only from it.
    `https://iap.googleapis.com/v1/oauth/clientIds/<client id>:handleRedirect` (IAP). With a
    Google Workspace organisation, set the consent screen to *Internal*: only your domain's
    accounts can sign in at all.
-3. **Optional, Drive:** a *Desktop app* OAuth client in the same project for
-   `/team-relay:drive` (scope `drive.readonly`). Its JSON goes in once as
-   `DRIVE_CLIENT_FILE`; the relay serves its id to active members and mounts it from Secret
-   Manager.
-4. **Optional, picked sources** ([docs/PICKERS-SPEC.md](docs/PICKERS-SPEC.md) §13). *GitHub:*
-   create a GitHub App in the org (Settings, Developer settings, GitHub Apps): webhook off, no
-   user sign-in, Repository permission **Metadata: Read-only** and nothing else, no events,
-   "Only on this account"; note its App ID and slug, generate a private key, and install it on
-   the org. Run `GITHUB_APP_ID=… GITHUB_APP_SLUG=… GITHUB_APP_KEY_FILE=<the .pem> bash
-   scripts/gcp-bootstrap.sh` (stores the secret `team-relay-github-app`; the key is never
-   printed), then delete the `.pem`. Set `GITHUB_ORGS=<org login>[,…]` in
-   `config/deploy.local.env`: the only orgs owners may pick from and the only installations the
-   relay lists; `deploy.sh` refuses the app without it. Optionally
-   `ALLOWED_SHARED_DRIVES=<shared drive id>[,…]` limits the Drive folders owners may pick.
-   *Drive picker:* a *Web application* OAuth client "team-relay picker" with the JavaScript
-   origin `https://team.example.com` and no redirect URI, and an API key restricted to the
-   websites `https://team.example.com/*` and `https://docs.google.com/*` and to the Google
-   Picker API. Run `PICKER_CLIENT_ID=… PICKER_API_KEY=… bash scripts/gcp-bootstrap.sh` (stores
-   `team-relay-picker` with the project number, and enables the Picker and Drive APIs). Without
-   these owners paste links instead.
-5. **Deploy**, in this order:
+   (Correction, 13 Nov 2026: the optional Drive client, GitHub App and Drive picker steps are
+   gone with owner-picked sources; members choose local folders instead.)
+3. **Deploy**, in this order:
    ```bash
-   OAUTH_CLIENT_FILE=~/Downloads/client_secret_web.json DRIVE_CLIENT_FILE=~/Downloads/client_secret_desktop.json \
-     bash scripts/gcp-bootstrap.sh     # also enables the Compute API and stores the Drive client
+   OAUTH_CLIENT_FILE=~/Downloads/client_secret_web.json \
+     bash scripts/gcp-bootstrap.sh     # also enables the Compute API
    OAUTH_CLIENT_FILE=~/Downloads/client_secret_web.json \
      bash scripts/deploy-lb.sh         # IP, certificate, NEGs, backends, IAP, URL maps, :443 and :80
    bash scripts/deploy.sh              # the relay, reachable only through the load balancer
    bash scripts/deploy-console.sh      # the console, IAP now on the load balancer's backend
    ```
-6. **DNS.** `deploy-lb.sh` ends by printing the one record to add, `A team → <IP>` (TTL
+4. **DNS.** `deploy-lb.sh` ends by printing the one record to add, `A team → <IP>` (TTL
    600). The certificate goes active once the name resolves (up to an hour); then run
    `bash scripts/smoke.sh`, which also checks that the `run.app` URL answers nothing from
-   outside, the console (and its Drive picker page, `/pick/drive`) asks for a sign-in and plain
+   outside, the console asks for a sign-in and plain
    http redirects to https.
 
+**Roll forward only past the local-folders revision (13 Nov 2026).** Once it is deployed, the
+relay writes boundaries documents with the topic alone and member statuses with a folder count;
+an older relay image cannot read them. Never roll the relay back past it; fix forward instead.
+
 `deploy.sh` never quietly drops a setting: when the live relay has one (say
-`RELAY_PLUGIN_MARKETPLACE`, `RELAY_ALLOWED_DOMAINS`, `RELAY_BRAND_NAME`, `RELAY_GITHUB_ORGS` or
-a mounted secret) that this deploy would remove, because it is unset in
+`RELAY_PLUGIN_MARKETPLACE`, `RELAY_ALLOWED_DOMAINS`, `RELAY_BRAND_NAME` or a mounted secret) that this deploy would remove, because it is unset in
 `config/deploy.local.env` or its secret was not found, it stops and names it. Set it again, or
 run with `CONFIRM_REMOVE=<NAME>[,<NAME>]` to remove it on purpose. It reads only the names of
 the live settings, never their values.

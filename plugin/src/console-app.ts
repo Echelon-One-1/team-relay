@@ -30,20 +30,11 @@
 //   (a question, never a capability call; the idempotency key is made here). Both changes
 //   follow the rules above (checkAcceptance, checkAsk; ASK_BODY_LIMIT), and hosted, each is
 //   sent for the IAP-verified viewer, never for anyone the browser names.
-// - PICKERS-SPEC §3.7: GET /api/sources/config (the GitHub App's install link and the Google
-//   Picker's public settings; locally `google_picker` is always null, since the picker's OAuth
-//   client cannot have a loopback origin) and GET /api/sources/github (the repositories of the
-//   orgs where the relay's GitHub App is installed). Both are owners' reads, proxied with the
-//   other team routes' rules and shaped here (sourcesConfigView, githubListingView) before the
-//   page sees them; neither ever holds a key or a token.
 // - The setup page (/team-relay:setup, local-setup.ts), local mode only and only on a server
-//   given it: GET /api/local/setup and its changes (choose or remove a folder, connect Google
-//   Drive, background answering on or off, done). Hosted, every /api/local/* path is 404.
+//   given it: GET /api/local/setup and its changes (choose or remove a folder, background
+//   answering on or off, done). Hosted, every /api/local/* path is 404.
 // - Static files from dist/console/ under a strict CSP; a placeholder page when it is absent.
-//   PICKERS-SPEC §5.4: hosted only, GET/HEAD /pick/drive serves dist/console/pick-drive.html
-//   under its own headers (PICKER_HEADERS), the one page Google's Picker runs on; locally it is
-//   404, and /pick-drive.html itself is 404 everywhere, so that page never loads under other
-//   headers and no other page loads under its headers.
+//   Every page loads under the same headers.
 //
 // Several teams (M9-SPEC §5): every team-scoped /api/* route (me, directory, activity,
 // requests, roster and its changes, inbox summary, boundaries, join) takes the team from a `team` query
@@ -100,31 +91,14 @@ import {
   type RosterRole,
   type UpdateMemberBody,
 } from './relay-client.js';
-import type { GithubInstallation, GithubListing, GithubRepo, GooglePickerConfig, SetBoundariesBody, SourcesConfig } from './boundaries-types.js';
+import type { SetBoundariesBody } from './boundaries-types.js';
 import {
   BOUNDARIES_FIELDS,
-  BOUNDARIES_MAX_DRIVES,
-  BOUNDARIES_MAX_FOLDERS,
-  BOUNDARIES_MAX_ORGS,
-  BOUNDARIES_MAX_REPOS,
   BOUNDARIES_VERSION_MAX,
   boundariesValid,
-  DOMAIN_MAX,
-  DRIVE_DOMAIN_RE,
-  DRIVE_NAME_MAX,
-  domainOk,
-  driveItemIdOk,
-  driveNameOk,
-  FOLDER_NAME_MAX,
-  folderNameOk,
-  GITHUB_ORG_RE,
   normaliseBoundaries,
-  orgOk,
-  pickedDriveNameOk,
-  REPO_NAME_MAX,
-  repoIdOk,
-  repoNameOk,
-  SHARED_DRIVE_MAX,
+  removedField,
+  removedFieldDetail,
   TOPIC_MAX,
   topicOk,
   versionOk,
@@ -154,47 +128,6 @@ const SECURITY_HEADERS: Record<string, string> = {
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Cross-Origin-Resource-Policy': 'same-origin',
 };
-
-/**
- * PICKERS-SPEC §5.4: the CSP of the Google Drive picker page (`GET /pick/drive`, hosted only)
- * and of nothing else. Google's scripts (api.js and the Picker code it loads, Google Identity
- * Services), the Picker's iframe and the Drive API's `files.get` are allowed there; the page
- * shows no team data. Every other page keeps CONTENT_SECURITY_POLICY. Styles allow
- * 'unsafe-inline' because the Picker writes its dialog's layout as <style> blocks in this page
- * (their text changes with Google's releases, so no hash; it takes no nonce); scripts stay strict.
- */
-export const PICKER_CONTENT_SECURITY_POLICY = [
-  "default-src 'none'",
-  "script-src 'self' https://apis.google.com https://accounts.google.com/gsi/client",
-  "style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style",
-  "img-src 'self' data:",
-  "font-src 'self'",
-  "connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/ https://oauth2.googleapis.com/revoke",
-  "frame-src https://docs.google.com https://accounts.google.com/gsi/",
-  "object-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "frame-ancestors 'none'",
-].join('; ');
-
-/**
- * PICKERS-SPEC §5.4: every header of the picker page besides Content-Type and Content-Length,
- * exactly. COOP `same-origin-allow-popups` lets Google's consent popup talk back to the page;
- * the referrer policy is the one Google Identity Services asks for.
- */
-export const PICKER_HEADERS: Readonly<Record<string, string>> = Object.freeze({
-  'Content-Security-Policy': PICKER_CONTENT_SECURITY_POLICY,
-  'Cross-Origin-Opener-Policy': 'same-origin-allow-popups',
-  'Referrer-Policy': 'strict-origin-when-cross-origin',
-  'X-Frame-Options': 'DENY',
-  'X-Content-Type-Options': 'nosniff',
-  'Cross-Origin-Resource-Policy': 'same-origin',
-  'Cache-Control': 'no-store',
-});
-
-/** PICKERS-SPEC §3.7: the picker page's path (hosted only), and the built file it serves. */
-export const PICKER_PATH = '/pick/drive';
-export const PICKER_FILE = 'pick-drive.html';
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -268,10 +201,6 @@ export type ConsoleBackend = {
   myRequests(limit: number, ctx?: ReadContext): Promise<unknown>;
   /** M11-SPEC §4: a question from the viewer (never a capability call). */
   ask(body: AskBody, ctx?: ReadContext): Promise<unknown>;
-  /** PICKERS-SPEC §3.5 (owners): the GitHub App's install link and the Google Picker's public settings. */
-  sourcesConfig(ctx?: ReadContext): Promise<unknown>;
-  /** PICKERS-SPEC §3.6 (owners): the repositories of the allowed orgs where the GitHub App is installed. */
-  sourcesGithub(ctx?: ReadContext): Promise<unknown>;
 };
 
 /** How many of the viewer's requests the Ask page lists (M11-SPEC §4). */
@@ -338,8 +267,6 @@ export function relayBackend(client: RelayClient): ConsoleBackend {
     myRequests: (limit, ctx) => on(ctx).myRequests(limit, opts(ctx)),
     // One key per question sent from the page: the console never retries it (attempts: 1).
     ask: (body, ctx) => on(ctx).createRequest({ idempotency_key: randomUUID(), kind: 'question', to: body.to, question: body.question }, opts(ctx)),
-    sourcesConfig: (ctx) => on(ctx).sourcesConfig(opts(ctx)),
-    sourcesGithub: (ctx) => on(ctx).sourcesGithub(opts(ctx)),
   };
 }
 
@@ -389,8 +316,6 @@ export function demoBackend(account: DemoAccount): ConsoleBackend {
     membersStatus: async (ctx) => account.team(ctx?.team).membersStatus(),
     myRequests: async (limit, ctx) => account.team(ctx?.team).myRequests(limit),
     ask: async (body, ctx) => account.team(ctx?.team).ask(body),
-    sourcesConfig: async (ctx) => account.team(ctx?.team).sourcesConfig(),
-    sourcesGithub: async (ctx) => account.team(ctx?.team).sourcesGithub(),
   };
 }
 
@@ -496,95 +421,27 @@ export function checkConfirm(raw: unknown, team: string): string {
 }
 
 // ---------------------------------------------------------------------------------------
-// The boundaries body (M10-SPEC §1, PICKERS-SPEC §2.1, §3.2), checked before anything reaches
-// the relay.
+// The boundaries body (schema v3, 13 Nov 2026: the topic alone), checked before anything
+// reaches the relay.
 
 /**
- * The largest PUT /api/boundaries body: the largest valid document (a 500-character topic, 10
- * orgs, 100 repositories, 20 folders with 255-character names in shared drives with
- * 100-character names, 10 legacy drives; every name of characters outside the BMP), with every
- * character that is not ASCII escaped as \uXXXX, is about 136 KiB and fits; the relay's own cap
- * is 256 KiB. (PICKERS-SPEC §3.2 sized the cap at 64 KiB on an estimate of 40 KiB for the
- * largest body; that body is about 69 KiB even unescaped, so 64 KiB would refuse valid bodies.)
+ * The largest PUT /api/boundaries body: a 500-character topic of characters outside the BMP,
+ * each escaped as two \uXXXX, is about 6 KiB; 16 KiB leaves room for white space and fits
+ * under the relay's own cap.
  */
-export const BOUNDARIES_BODY_LIMIT = 160 * 1024;
+export const BOUNDARIES_BODY_LIMIT = 16 * 1024;
 // The rule itself (limits, character classes, trimming) is boundaries-rule.ts, shared with the
-// host's check of what the relay hands it and of what a member accepted.
-export {
-  BOUNDARIES_MAX_DRIVES,
-  BOUNDARIES_MAX_FOLDERS,
-  BOUNDARIES_MAX_ORGS,
-  BOUNDARIES_MAX_REPOS,
-  BOUNDARIES_VERSION_MAX,
-  DOMAIN_MAX,
-  DRIVE_DOMAIN_RE,
-  GITHUB_ORG_RE,
-  SHARED_DRIVE_MAX,
-  TOPIC_MAX,
-};
+// host's check of what the relay hands it.
+export { BOUNDARIES_VERSION_MAX, TOPIC_MAX };
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-const hasExactly = (o: Record<string, unknown>, keys: readonly string[]) =>
-  Object.keys(o).length === keys.length && keys.every((k) => Object.prototype.hasOwnProperty.call(o, k));
 
 /**
- * A list as sent; the cap counts it before duplicates are dropped (M10-SPEC §7.5). Every
- * refusal names the field at fault and never quotes a value (PICKERS-SPEC §3).
- */
-function list(v: unknown, field: string, max: number, what: string): unknown[] {
-  if (!Array.isArray(v)) throw new BodyError(`${field} must be a list`);
-  if (v.length > max) throw new BodyError(`${field}: at most ${max} ${what}`);
-  return v;
-}
-
-const REPO_FIELDS = ['org', 'repo', 'id'] as const;
-const FOLDER_FIELDS = ['domain', 'drive_id', 'folder_id', 'folder_name', 'drive_name'] as const;
-const LEGACY_DRIVE_FIELDS = ['domain', 'shared_drive'] as const;
-const ORG_TEXT = '1 to 39 letters, digits or -, not starting with -';
-const DOMAIN_TEXT = 'a lower-case domain name, such as example.com';
-const NAME_TEXT = 'with no control or invisible characters and no leading or trailing space';
-
-function checkRepo(v: unknown): void {
-  if (!isRecord(v) || !hasExactly(v, REPO_FIELDS)) throw new BodyError('github_repos: each repository must be exactly {"org", "repo", "id"}');
-  if (!orgOk(v.org)) throw new BodyError(`github_repos: a repository's org must be ${ORG_TEXT}`);
-  if (!repoNameOk(v.repo)) {
-    throw new BodyError(`github_repos: a repository's name must be 1 to ${REPO_NAME_MAX} letters, digits, ., _ or -, and not only dots`);
-  }
-  if (!repoIdOk(v.id)) throw new BodyError("github_repos: a repository's id must be a whole number from 1 to 2^53-1, or null");
-}
-
-function checkFolder(v: unknown): void {
-  if (!isRecord(v) || !hasExactly(v, FOLDER_FIELDS)) {
-    throw new BodyError('drive_folders: each folder must be exactly {"domain", "drive_id", "folder_id", "folder_name", "drive_name"}');
-  }
-  if (!domainOk(v.domain)) throw new BodyError(`drive_folders: a folder's domain must be ${DOMAIN_TEXT}`);
-  if (v.drive_id !== null && !driveItemIdOk(v.drive_id)) {
-    throw new BodyError('drive_folders: a shared drive id must be 10 to 200 letters, digits, _ or -, or null');
-  }
-  if (!driveItemIdOk(v.folder_id)) throw new BodyError('drive_folders: a folder id must be 10 to 200 letters, digits, _ or -');
-  if (!folderNameOk(v.folder_name)) throw new BodyError(`drive_folders: a folder name must be 1 to ${FOLDER_NAME_MAX} characters, ${NAME_TEXT}`);
-  if (!pickedDriveNameOk(v.drive_name)) {
-    throw new BodyError(`drive_folders: a shared drive name must be null or 1 to ${DRIVE_NAME_MAX} characters, ${NAME_TEXT}`);
-  }
-}
-
-function checkLegacyDrive(v: unknown): void {
-  if (!isRecord(v) || !hasExactly(v, LEGACY_DRIVE_FIELDS)) throw new BodyError('drives: each drive must be exactly {"domain", "shared_drive"}');
-  // Neither is trimmed: a value with surrounding space is refused, as the relay refuses it.
-  if (!domainOk(v.domain)) throw new BodyError(`drives: a drive domain must be ${DOMAIN_TEXT}`);
-  if (!driveNameOk(v.shared_drive)) {
-    throw new BodyError(`drives: a shared drive name must be 1 to ${SHARED_DRIVE_MAX} characters, with no /, no control or invisible characters and no leading or trailing space`);
-  }
-}
-
-/**
- * PUT /api/boundaries: exactly {"version", "boundaries": {"topic", "github_orgs",
- * "github_repos", "drive_folders", "drives", "member_folders"}}, every field required, by the
- * one rule of PICKERS-SPEC §2.1 (boundaries-rule.ts, schema/boundaries-vectors.json); the caps
- * count the lists as sent. What is sent on is the document as the relay stores it
- * (normaliseBoundaries): the topic trimmed, duplicates and repositories of whole orgs dropped.
- * Whether a legacy drive was already stored (400 legacy_drive) and the relay's allowlists are
- * the relay's to check.
+ * PUT /api/boundaries: exactly {"version", "boundaries": {"topic"}}, by the one rule
+ * (boundaries-rule.ts, schema/boundaries-vectors.json). A field of the earlier schemas is
+ * refused naming it, as the relay refuses it (the first of github_orgs, github_repos,
+ * drive_folders, drives, member_folders); any other unknown field is refused as unknown. What is
+ * sent on is the document as the relay stores it (normaliseBoundaries: the topic trimmed).
  */
 export function checkSetBoundaries(raw: unknown): SetBoundariesBody {
   const b = object(raw);
@@ -592,111 +449,17 @@ export function checkSetBoundaries(raw: unknown): SetBoundariesBody {
   if (!versionOk(b.version)) {
     throw new BodyError('version must be the whole number the boundaries were read at');
   }
-  if (!isRecord(b.boundaries)) {
-    throw new BodyError(`boundaries must be {${BOUNDARIES_FIELDS.map((f) => `"${f}"`).join(', ')}}`);
-  }
+  if (!isRecord(b.boundaries)) throw new BodyError('boundaries must be {"topic"}');
   const x = b.boundaries;
+  const removed = removedField(x);
+  if (removed) throw new BodyError(removedFieldDetail(removed));
   onlyKeys(x, [...BOUNDARIES_FIELDS]);
   // As the relay: refused characters are looked for in the topic as sent, before trimming.
   if (!topicOk(x.topic)) {
     throw new BodyError(`topic must be 1 to ${TOPIC_MAX} characters, with no control or invisible characters`);
   }
-  for (const o of list(x.github_orgs, 'github_orgs', BOUNDARIES_MAX_ORGS, 'GitHub orgs')) {
-    if (!orgOk(o)) throw new BodyError(`github_orgs: a GitHub org must be ${ORG_TEXT}`);
-  }
-  list(x.github_repos, 'github_repos', BOUNDARIES_MAX_REPOS, 'repositories').forEach(checkRepo);
-  list(x.drive_folders, 'drive_folders', BOUNDARIES_MAX_FOLDERS, 'shared-drive folders').forEach(checkFolder);
-  list(x.drives, 'drives', BOUNDARIES_MAX_DRIVES, 'shared drives').forEach(checkLegacyDrive);
-  if (typeof x.member_folders !== 'boolean') throw new BodyError('member_folders must be true or false');
-  // The one rule, whole: the checks above are it, field by field, so that a refusal names its field.
   if (!boundariesValid(x)) throw new BodyError('boundaries do not pass the rule');
   return { version: b.version, boundaries: normaliseBoundaries(x) };
-}
-
-// ---------------------------------------------------------------------------------------
-// The sources reads (PICKERS-SPEC §3.5, §3.6), shaped before the page sees them: the relay's
-// answer is data, and only the fields the page needs, each well-formed, are passed on.
-
-/** GitHub's "install this app" page for an app's slug. */
-const INSTALL_URL_RE = /^https:\/\/github\.com\/apps\/[a-z0-9][a-z0-9-]{0,99}\/installations\/new$/;
-/** PICKERS-SPEC §4.2: the picker's settings, each public by design and restricted by Google. */
-const PICKER_CLIENT_ID_RE = /^[A-Za-z0-9.-]{1,200}\.apps\.googleusercontent\.com$/;
-const PICKER_API_KEY_RE = /^AIza[0-9A-Za-z_-]{35}$/;
-const PICKER_APP_ID_RE = /^[0-9]{6,20}$/;
-/** PICKERS-SPEC §3.6: at most this many repositories per installation, and installations listed. */
-export const GITHUB_REPOS_MAX = 1000;
-const GITHUB_INSTALLATIONS_MAX = 300;
-
-/** The Google Picker's settings when each is well-formed, else null (the page then offers paste only). */
-function pickerConfig(v: unknown): GooglePickerConfig | null {
-  if (!isRecord(v)) return null;
-  const { client_id, api_key, app_id } = v;
-  if (typeof client_id !== 'string' || !PICKER_CLIENT_ID_RE.test(client_id)) return null;
-  if (typeof api_key !== 'string' || !PICKER_API_KEY_RE.test(api_key)) return null;
-  if (typeof app_id !== 'string' || !PICKER_APP_ID_RE.test(app_id)) return null;
-  return { client_id, api_key, app_id };
-}
-
-/**
- * GET /api/sources/config as the page gets it: `github.configured` true only when the relay says
- * so, `install_url` only a github.com app installation page, `google_picker` only well-formed
- * settings, and always null locally (`local`), where the picker cannot run. Nothing else the
- * relay might send is passed on.
- */
-export function sourcesConfigView(raw: unknown, local: boolean, viewer?: string): SourcesConfig {
-  const r = isRecord(raw) ? raw : {};
-  const gh = isRecord(r.github) ? r.github : {};
-  const configured = gh.configured === true;
-  const install = configured && typeof gh.install_url === 'string' && INSTALL_URL_RE.test(gh.install_url) ? gh.install_url : null;
-  const picker = local ? null : pickerConfig(r.google_picker);
-  // The viewer's own IAP-verified email only (§5.2): Google's sign-in then offers that account.
-  const hint = typeof viewer === 'string' && viewer.length <= 254 && ROSTER_EMAIL_RE.test(viewer) ? viewer : null;
-  return { github: { configured, install_url: install }, google_picker: picker && hint ? { ...picker, login_hint: hint } : picker };
-}
-
-function githubRepo(v: unknown): GithubRepo | null {
-  if (!isRecord(v) || !repoNameOk(v.name) || typeof v.id !== 'number' || !Number.isSafeInteger(v.id) || v.id < 1) return null;
-  return { name: v.name, id: v.id, private: v.private === true, archived: v.archived === true };
-}
-
-function githubInstallation(v: unknown): GithubInstallation | null {
-  if (!isRecord(v) || !orgOk(v.account)) return null;
-  const suspended = v.state === 'suspended';
-  const repos: GithubRepo[] = [];
-  if (!suspended && Array.isArray(v.repos)) {
-    for (const x of v.repos) {
-      const repo = githubRepo(x);
-      if (repo && repos.length < GITHUB_REPOS_MAX) repos.push(repo);
-    }
-  }
-  repos.sort((a, b) => (a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0));
-  const truncated = v.truncated === true || (Array.isArray(v.repos) && v.repos.length > GITHUB_REPOS_MAX && !suspended);
-  return {
-    account: v.account,
-    state: suspended ? 'suspended' : 'ok',
-    repository_selection: v.repository_selection === 'selected' ? 'selected' : 'all',
-    repos,
-    truncated,
-  };
-}
-
-/**
- * GET /api/sources/github as the page gets it: each installation on a well-formed org login,
- * its repositories well-formed (name by the repository rule, a positive whole id), sorted by
- * lower-case name, at most 1000; a suspended installation lists none. Malformed entries are
- * dropped, never repaired.
- */
-export function githubListingView(raw: unknown): GithubListing {
-  const r = isRecord(raw) ? raw : {};
-  const installations: GithubInstallation[] = [];
-  if (Array.isArray(r.installations)) {
-    for (const x of r.installations.slice(0, GITHUB_INSTALLATIONS_MAX)) {
-      const inst = githubInstallation(x);
-      if (inst) installations.push(inst);
-    }
-  }
-  const fetched = typeof r.fetched_at === 'string' && RFC3339.test(r.fetched_at) ? r.fetched_at : new Date().toISOString();
-  return { installations, fetched_at: fetched };
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1231,7 +994,7 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     }
     if (err instanceof RelayError) {
       // The relay's Retry-After (a whole number of seconds) rides along, so the page waits as
-      // long as the relay asked (PICKERS-SPEC §3.6: GitHub's rate limit).
+      // long as the relay asked.
       const wait = err.retryAfter;
       return sendJson(
         res,
@@ -1537,9 +1300,7 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
       path === '/api/boundaries' ||
       path === '/api/acceptance' ||
       path === '/api/members-status' ||
-      path === '/api/my-requests' ||
-      path === '/api/sources/config' ||
-      path === '/api/sources/github';
+      path === '/api/my-requests';
     const requestMatch = /^\/api\/requests\/([^/]+)$/.exec(path);
     if (!known && path !== '/api/activity' && !requestMatch) return sendJson(res, 404, { error: 'not_found' });
     if (requestMatch && (!REQUEST_ID_RE.test(requestMatch[1]!) || own.length > 0)) return sendJson(res, 404, { error: 'not_found' });
@@ -1600,10 +1361,6 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     else if (path === '/api/acceptance') call = () => opts.backend.acceptance(on);
     else if (path === '/api/members-status') call = () => opts.backend.membersStatus(on);
     else if (path === '/api/my-requests') call = () => opts.backend.myRequests(MY_REQUESTS_LIMIT, on);
-    // PICKERS-SPEC §3.7: locally the Google Picker cannot run (its OAuth client's origin is the
-    // hosted console's), so `google_picker` is null there whatever the relay holds.
-    else if (path === '/api/sources/config') call = async () => sourcesConfigView(await opts.backend.sourcesConfig(on), !hosted, on.viewer);
-    else if (path === '/api/sources/github') call = async () => githubListingView(await opts.backend.sourcesGithub(on));
     else if (path === '/api/activity') call = () => opts.backend.activity(q, on);
     else {
       const rid = requestMatch![1]!;
@@ -1614,17 +1371,13 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
       return sendJson(res, 200, await call());
     } catch (err) {
       // A request's 404 is about the request; any other read's is about the team, except the
-      // boundaries', M11's and the sources': membership was just checked, so a 404 there is a
-      // relay without the route (before M10, M11, PICKERS-SPEC) or, for the GitHub listing, a
-      // relay without the GitHub App (404 github_not_configured): shown as "not available",
-      // never as "not on this team".
+      // boundaries' and M11's: membership was just checked, so a 404 there is a relay without
+      // the route (before M10, M11): shown as "not available", never as "not on this team".
       const newer =
         path === '/api/boundaries' ||
         path === '/api/acceptance' ||
         path === '/api/members-status' ||
-        path === '/api/my-requests' ||
-        path === '/api/sources/config' ||
-        path === '/api/sources/github';
+        path === '/api/my-requests';
       return failure(res, err, viewer, requestMatch || newer ? undefined : team);
     }
   }
@@ -1691,7 +1444,6 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     const head = req.method === 'HEAD';
     if (req.method !== 'GET' && !head) return send(res, 405, 'method not allowed\n', 'text/plain; charset=utf-8', { Allow: 'GET, HEAD' });
     const html = (body: string | Buffer) => send(res, 200, body, MIME['.html']!, { 'Cache-Control': 'no-cache' }, head);
-    if (url.pathname.toLowerCase() === `/${PICKER_FILE}`) return send(res, 404, 'not found\n', 'text/plain; charset=utf-8');
     const index = staticRoot ? join(staticRoot, 'index.html') : null;
     if (!staticRoot || !index || !existsSync(index)) return html(PLACEHOLDER);
 
@@ -1712,8 +1464,6 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     } catch {
       real = null;
     }
-    // PICKERS-SPEC §3.7: the picker page loads only at /pick/drive, under its own headers.
-    if (real && real.slice(staticRoot.length + 1).toLowerCase() === PICKER_FILE) return send(res, 404, 'not found\n', 'text/plain; charset=utf-8');
     if (real && real.startsWith(staticRoot + sep) && statSync(real).isFile()) {
       const type = MIME[extname(real).toLowerCase()] ?? 'application/octet-stream';
       // Hashed assets never change under their name; everything else is revalidated.
@@ -1724,28 +1474,6 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
     // A client-side route (no file extension) gets the app; a missing asset is a 404.
     if (!extname(rel)) return html(readFileSync(index));
     return send(res, 404, 'not found\n', 'text/plain; charset=utf-8');
-  }
-
-  /**
-   * PICKERS-SPEC §3.7, §5.4: GET or HEAD /pick/drive, hosted only and with no query, answers
-   * dist/console/pick-drive.html with exactly PICKER_HEADERS (never the console's own headers).
-   */
-  function pickerPage(req: IncomingMessage, res: ServerResponse, url: URL): void {
-    const notFound = () => send(res, 404, 'not found\n', 'text/plain; charset=utf-8');
-    if (!hosted || url.search !== '') return notFound();
-    const head = req.method === 'HEAD';
-    if (req.method !== 'GET' && !head) return send(res, 405, 'method not allowed\n', 'text/plain; charset=utf-8', { Allow: 'GET, HEAD' });
-    if (!staticRoot) return notFound();
-    let real: string;
-    try {
-      real = realpathSync(join(staticRoot, PICKER_FILE));
-    } catch {
-      return notFound();
-    }
-    if (real !== join(staticRoot, PICKER_FILE) || !statSync(real).isFile()) return notFound();
-    const body = readFileSync(real);
-    res.writeHead(200, { ...PICKER_HEADERS, 'Content-Type': MIME['.html']!, 'Content-Length': String(body.length) });
-    res.end(head ? undefined : body);
   }
 
   /** Hosted: a bare 401, no detail (the reason is logged by the verifier). */
@@ -1806,8 +1534,7 @@ export function createConsoleServer(opts: ConsoleServerOptions): ConsoleServer {
       return;
     }
     try {
-      if (url.pathname === PICKER_PATH) pickerPage(req, res, url);
-      else staticFile(req, res, url);
+      staticFile(req, res, url);
     } catch {
       if (!res.headersSent) send(res, 500, 'internal error\n', 'text/plain; charset=utf-8');
     }

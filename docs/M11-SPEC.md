@@ -44,6 +44,8 @@ without a Claude session around it:
   the member first). When it recounts its facts (§3) the daemon lists each repo root, own folder
   and, for a team with drives, the Drive mount; an EPERM is logged with the kind of folder, its
   own name only and how many times so far. The status schema does not change.
+  (Correction, 13 Nov 2026: the daemon lists each folder the member chose; there are no repo
+  roots or Drive mounts any more.)
 - SIGTERM: stop taking work, end the running child, release the lock, exit within 15 s.
 - Desktop notifications as M8 (`TEAM_RELAY_DESKTOP_NOTIFY=0` turns them off).
 
@@ -89,6 +91,8 @@ when the member leaves the roster.
   sentence (error text, which can hold paths, stays in the local log).
 - Claude's sign-in and the clone count are recounted every 10 min (or when the folders or the
   boundaries change); `drive.connected` is checked for every status (one keychain look-up).
+  (Correction, 13 Nov 2026: no clone count and no `drive`; the status carries `folder_count` and
+  `folders_ok`, see below.)
 - (Correction, 11 Nov 2026, docs/PICKERS-SPEC.md §3.3-§3.4, §8.) The body may also hold
   `"sources": {"boundaries_version": int, "missing": [item key, …]}` (optional; an explicit null is
   400; ≤140 keys of ≤400 characters, no control characters): the team's own boundary items this
@@ -96,6 +100,19 @@ when the member leaves the roster.
   its current boundaries, in the writing transaction, and filters them again on read.
   `members/status` entries gain `"sources": {…}|null`: an owner gets every member's, anyone else
   only their own (others `null`). Old daemons' statuses (no `sources`) are still accepted.
+- (Correction, 13 Nov 2026, local folders only; docs/PICKERS-SPEC.md is superseded.) The body is
+  now `{"daemon": {...}, "claude": {...}, "folder_count": int 0-20, "self_test": {...}}`, strict:
+  `folders` (the object), `drive` and `sources` are gone, so an older daemon's body is
+  `400 invalid_body` until its plugin updates. `folder_count` is how many folders the member chose
+  for the team on their Mac (never a name or path). `members/status` entries are
+  `{"member", "status": {daemon, claude, self_test, seen_at}|null, "answering", "accepted_version",
+  "folder_count": int|null}`: an owner gets every member's count, anyone else only their own
+  (others `null`); a status stored by an older daemon reads `null`. The console shows owners
+  "N folders" per member. The body also holds `folders_ok` (bool, required): false when the
+  member's folders file cannot be used (`folder_count` is then 0); entries carry `folders_ok:
+  bool|null` with the same visibility, and owners see "folders unreadable" instead of a count.
+  **Roll forward only past this revision:** an older relay image cannot read the v3 boundaries
+  documents or the new statuses it writes, so after deploying it never roll back past it.
 
 ## 4. Asking from the console (relay + console)
 
@@ -137,7 +154,10 @@ The script (bash 3.2, `set -euo pipefail`, macOS only, never `sudo`, re-runnable
    install check, the launcher, the daemon's update check): the first user-scope entry with an
    absolute `installPath` under exactly the key it installed, `team-relay@<marketplace name>`;
    never another scope or another marketplace's copy. In this order: `login`, `folders`, `drive`
-   (never fatal), `daemon install`, `status --after-setup`.
+   (never fatal), `daemon install`, `status --after-setup`. (Correction, 13 Nov 2026: there is no
+   `drive` step; `folders` opens the Mac's chooser for one list of up to 20 folders, with no
+   question about repository roots, and first lists folders chosen before as "previously chosen",
+   never adding them itself.)
    - `login`: the browser sign-in of M5 against `__RELAY_URL__` (team chosen in the browser);
      skipped when a valid sign-in for this relay exists.
    - `folders`: shows the team's GitHub orgs and opens the Mac's folder chooser for the
@@ -147,7 +167,7 @@ The script (bash 3.2, `set -euo pipefail`, macOS only, never `sudo`, re-runnable
      shows the current list and lets the member keep or replace it. When a chosen folder is under
      `~/Documents`, `~/Desktop`, `~/Downloads` or `~/Library/Mobile Documents`, one sentence says
      macOS may ask to allow "node" the first time the background answerer reads it: click Allow.
-   - `drive`: when the team has drives, connects Google Drive (M10's Drive sign-in) unless
+   - `drive` (removed 13 Nov 2026 with the Drive sign-in): when the team has drives, connects Google Drive (M10's Drive sign-in) unless
      connected, and says macOS may ask to allow "node" for Google Drive. Before `daemon install`
      (so the daemon's first status already says connected), but a failed or cancelled Drive
      sign-in does not stop the setup: it says to run the same setup command again to connect
@@ -164,7 +184,8 @@ The script (bash 3.2, `set -euo pipefail`, macOS only, never `sudo`, re-runnable
      and `launchctl bootstrap gui/<uid>`, tried up to 3 more times 2 s apart when it fails. Files
      mode 600, folders 700.
    - `status`: prints the checklist of §6 from the relay's view (two steps since 10 Nov 2026,
-     "Simpler joining" §2). "Folders chosen" and "Google Drive connected" need nothing only when
+     "Simpler joining" §2; corrected 13 Nov 2026: "Folders chosen" is the member's own
+     `folder_count > 0` with `folders_ok`, and "Google Drive connected" is gone). "Folders chosen" and "Google Drive connected" need nothing only when
      the boundaries were read and hold no orgs (or no drives); boundaries that could not be read
      leave both not known, never ticked (the console too). While the self-test has not run yet
      it says so once and looks again every 5 s, for up to 90 s in all, before printing the
@@ -196,6 +217,8 @@ command and the console links are that host; a relay deployed at its run.app URL
   3. Answering in the background - `answering`.
   4. Folders chosen - `folders.repo_roots > 0` (or the team has no orgs).
   5. Google Drive connected - `drive.connected` (or the team has no drives).
+  (Correction, 13 Nov 2026: 4 is now the viewer's own `folder_count > 0`; 5 is removed with the
+  Drive sign-in.)
   6. Boundaries accepted - accepted version equals the current one (Accept button inline).
   7. Self-test passed - `self_test.ok`; while `reason` is the not-run-yet sentence, "Running the
      self-test now; this takes about a minute." (not a failure).
@@ -228,7 +251,7 @@ command and the console links are that host; a relay deployed at its run.app URL
   network calls are to the relay, GitHub (marketplace), nodejs.org (one pinned, hash-checked
   build, when the Mac does not have it yet; 10 Nov 2026) and, when the member agrees,
   Claude Code's installer.
-- The daemon has the member's sign-in and Drive token (as the channel server did); the child it
+- The daemon has the member's sign-in (and until 13 Nov 2026 the Drive token; as the channel server did); the child it
   runs keeps M10's limits. The LaunchAgent and launcher are the member's own files, mode 600.
 - Status holds counts and booleans only: no paths, folder names, questions or answers.
   (Correction, 11 Nov 2026, docs/PICKERS-SPEC.md §8: status holds counts, booleans and keys of
@@ -280,7 +303,8 @@ The seven steps of §6 become two:
 
 1. **Set up your Mac**: done when every old check is (Run the setup command, Claude Code found
    and signed in, answering in the background, folders chosen, Google Drive connected,
-   self-test passed), with the same rules: boundaries that could not be read never count as
+   self-test passed; corrected 13 Nov 2026: no Drive check, and "folders chosen" is the member's
+   own folder count), with the same rules: boundaries that could not be read never count as
    done for folders and Drive, and the self-test's not-run-yet reason shows as running ("Your
    Mac is checking that everything works. This takes about a minute."), not failed. The step
    holds the setup line with its copy box. The old checks show only while one is not done, each
@@ -292,7 +316,8 @@ The seven steps of §6 become two:
 2. **Accept what the team shares** (old step 6): the topic, the GitHub orgs, the shared drives
    and whether own folders are allowed, as a readable list; items added since the viewer last
    accepted are marked "new"; an Accept button; a 409 says what the team shares changed and
-   shows the latest.
+   shows the latest. (Correction, 13 Nov 2026: the boundaries are the topic alone, so the step
+   shows the topic and the Accept button.)
 
 **Ask the team** is not a step: below the two, always, "Ask your teammates a question at any
 time." with an "Ask the team" button to the Ask page; both steps done, it becomes "You're all
@@ -324,8 +349,8 @@ URL>/ask".
   download, hash, unpack, move) stops with one plain sentence when it fails, never a bare exit.
 - Nothing is linked onto PATH (no `~/.local/bin/node`). The plugin no longer depends on `node`
   from Claude Code's PATH: `.mcp.json`, `hooks/hooks.json` (both generated by
-  `plugin/scripts/generate.ts`) and the `!` lines of `/team-relay:logout` and `/team-relay:drive`
-  run `/bin/sh ${CLAUDE_PLUGIN_ROOT}/bin/run-node <script> <args>`. `plugin/bin/run-node` (POSIX
+  `plugin/scripts/generate.ts`) and the `!` lines of `/team-relay:logout` (and, until 13 Nov 2026,
+  `/team-relay:drive`) run `/bin/sh ${CLAUDE_PLUGIN_ROOT}/bin/run-node <script> <args>`. `plugin/bin/run-node` (POSIX
   sh) uses the first `node` on PATH when it is 22.12 or newer (absolute PATH entries only: an
   empty or relative entry such as `.` is skipped, so no node from the current folder runs;
   the version must read `vMAJOR.MINOR.PATCH`, numbers of at most 9 digits), else the newest
@@ -367,6 +392,6 @@ URL>/ask".
   the current list.
 - Own folders, when the team allows them, the same way with a second chooser.
 - The chooser is injected (`SetupDeps.chooseFolders`), so tests never run osascript.
-- The other lines of `setup-cli` are plain and short too (sign-in, Drive, the background
+- The other lines of `setup-cli` are plain and short too (sign-in, Drive until 13 Nov 2026, the background
   answerer: "Your Mac now answers your team in the background whenever it is on. Claude Code
   does not need to be open.").

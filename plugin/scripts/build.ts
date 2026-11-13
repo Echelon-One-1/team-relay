@@ -24,7 +24,6 @@ export const ENTRIES = [
   'answering-lock-info',
   'answer-dry-run',
   'read-trail',
-  'drive-cli',
   'daemon',
   'setup-cli',
 ] as const;

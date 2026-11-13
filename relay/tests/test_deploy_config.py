@@ -1,15 +1,15 @@
 """M2-SPEC §1 and §2: the relay's Cloud Run environment, /v1/health, and RELAY_AUDIENCE as a
-list of audiences; PICKERS-SPEC §4.2 and §16 (ACC-024): scripts/deploy.sh and
-scripts/gcp-bootstrap.sh with the GitHub App, the Picker, the source allowlists and
-CONFIRM_REMOVE. Throwaway keys and synthetic identities only; nothing reaches the network or
-GCP (gcloud and git are stubs)."""
+list of audiences; scripts/deploy.sh's CONFIRM_REMOVE, and (local folders only, 13 Nov 2026)
+that scripts/deploy.sh and scripts/gcp-bootstrap.sh no longer mount, set or store the GitHub
+App, the Drive Picker, the Drive client or the source allowlists, and remove their settings from
+the live service. Synthetic identities only; nothing reaches the network or GCP (gcloud and git
+are stubs)."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -18,8 +18,6 @@ from typing import Any
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from relay import __main__ as relay_main
 from relay import app as app_module
@@ -33,8 +31,6 @@ from relay.auth import (
 )
 from relay.config import (
     Settings,
-    load_github_app,
-    load_picker,
     load_schema,
     parse_audiences,
     parse_team_config,
@@ -308,7 +304,7 @@ def test_static_tokens_still_resolve_under_the_new_settings(tmp_path: Path):
     assert settings.team_config.token_member(principal, "demo") == "alice"
 
 
-# scripts/deploy.sh and scripts/gcp-bootstrap.sh (PICKERS-SPEC §4.2, §16; ACC-024) ---------------
+# scripts/deploy.sh and scripts/gcp-bootstrap.sh ------------------------------------------------
 #
 # Each script runs from a copy in a temporary folder (so no deploy.local.env is ever read) with
 # stubs of gcloud and git first on PATH: the stub answers from a JSON state file and records every
@@ -461,67 +457,70 @@ def _env_vars(run: ScriptRun) -> dict[str, str]:
     return dict(item.split("=", 1) for item in raw[3:].split(";"))
 
 
-def test_deploy_mounts_the_app_and_the_picker_only_when_their_secrets_exist(tmp_path: Path):
-    run = _deploy(
-        tmp_path / "with",
-        {"team-relay-github-app": [SECRET_VALUE], "team-relay-picker": [SECRET_VALUE]},
-        None,
-        GITHUB_ORGS=" Example-Org , example-labs",
-        ALLOWED_SHARED_DRIVES="0AExampleDriveId0PVA",
-    )
+# Local folders only (13 Nov 2026): the sources' settings, secrets and APIs.
+RETIRED = [
+    "RELAY_GITHUB_ORGS",
+    "RELAY_GITHUB_APP_FILE",
+    "RELAY_PICKER_FILE",
+    "RELAY_ALLOWED_SHARED_DRIVES",
+    "RELAY_DRIVE_CLIENT_FILE",
+]
+SOURCE_SECRETS = {
+    "team-relay-github-app": [SECRET_VALUE],
+    "team-relay-picker": [SECRET_VALUE],
+    "team-relay-drive-client": [SECRET_VALUE],
+}
+STALE_SOURCE_ENV = {
+    "GITHUB_ORGS": "example-org",
+    "ALLOWED_SHARED_DRIVES": "0AExampleDriveId0PVA",
+    "DRIVE_CLIENT_FILE": "/nonexistent/client.json",
+    "GITHUB_APP_ID": "424242",
+    "GITHUB_APP_SLUG": "example-relay-sources",
+    "GITHUB_APP_KEY_FILE": "/nonexistent/app.pem",
+    "PICKER_CLIENT_ID": "123456789012-picker.apps.googleusercontent.com",
+    "PICKER_API_KEY": "AIza" + "Example0Picker0Key0Only0For0Tests00",
+}
+
+
+def test_deploy_mounts_and_sets_nothing_of_the_removed_sources(tmp_path: Path):
+    """The sources' secrets still exist and config/deploy.local.env still names them: the
+    deploy mounts only the team config and the login's client and sets none of their
+    settings."""
+    run = _deploy(tmp_path, SOURCE_SECRETS, None, **STALE_SOURCE_ENV)
     assert run.code == 0, run.output
-    secrets = run.deploy_flag("--set-secrets") or ""
-    assert "/secrets/github-app/app.json=team-relay-github-app:1" in secrets
-    assert "/secrets/picker/picker.json=team-relay-picker:1" in secrets
+    secrets = (run.deploy_flag("--set-secrets") or "").split(",")
+    assert secrets == [
+        "/secrets/team/team.yaml=team-relay-team-config:1",
+        "/secrets/oauth/client.json=team-relay-oauth-client:1",
+    ]
     env = _env_vars(run)
-    assert env["RELAY_GITHUB_APP_FILE"] == "/secrets/github-app/app.json"
-    assert env["RELAY_PICKER_FILE"] == "/secrets/picker/picker.json"
-    assert env["RELAY_GITHUB_ORGS"] == "Example-Org,example-labs"
-    assert env["RELAY_ALLOWED_SHARED_DRIVES"] == "0AExampleDriveId0PVA"
+    assert not [name for name in env if name in RETIRED]
     assert SECRET_VALUE not in run.output
-    # Built only after every check passed.
-    assert run.calls("builds", "submit")
-
-    run = _deploy(tmp_path / "without", {}, None)
-    assert run.code == 0, run.output
-    secrets = run.deploy_flag("--set-secrets") or ""
-    assert "github-app" not in secrets and "picker" not in secrets
+    for value in STALE_SOURCE_ENV.values():
+        assert value not in run.output and value not in json.dumps(run.state["calls"])
+    # A service not deployed yet has none of them to remove.
     removed = (run.deploy_flag("--remove-env-vars") or "").split(",")
-    for name in (
-        "RELAY_GITHUB_APP_FILE",
-        "RELAY_PICKER_FILE",
-        "RELAY_GITHUB_ORGS",
-        "RELAY_ALLOWED_SHARED_DRIVES",
-    ):
-        assert name in removed and name not in _env_vars(run)
+    assert not [name for name in removed if name in RETIRED]
 
 
-def test_deploy_refuses_the_app_without_github_orgs(tmp_path: Path):
-    run = _deploy(tmp_path, {"team-relay-github-app": [SECRET_VALUE]}, None)
-    assert run.code != 0 and "GITHUB_ORGS" in run.output
-    assert not run.calls("builds", "submit") and not run.calls("run", "deploy")
-    assert SECRET_VALUE not in run.output
+def test_deploy_removes_the_removed_sources_settings_the_live_service_has(tmp_path: Path):
+    """Settings an earlier deploy left on the service are removed without CONFIRM_REMOVE; only
+    those the service has are named."""
+    live = ["RELAY_AUTH_MODE", "RELAY_ALLOWED_DOMAINS", *RETIRED[:4]]
+    run = _deploy(tmp_path, {}, live)
+    assert run.code == 0, run.output
+    removed = (run.deploy_flag("--remove-env-vars") or "").split(",")
+    assert [name for name in removed if name in RETIRED] == RETIRED[:4]
+    assert "RELAY_DRIVE_CLIENT_FILE" not in removed
+    assert "RELAY_ALLOWED_DOMAINS" not in removed
 
 
-@pytest.mark.parametrize(
-    "name, raw",
-    [
-        ("GITHUB_ORGS", "first-org,,other"),
-        ("GITHUB_ORGS", "-bad"),
-        ("GITHUB_ORGS", "example_org"),
-        ("GITHUB_ORGS", ","),
-        ("ALLOWED_SHARED_DRIVES", "short"),
-        ("ALLOWED_SHARED_DRIVES", "0AFirstDriveId00PVAx,has space in it"),
-        ("CONFIRM_REMOVE", "relay_brand_name"),
-    ],
-)
-def test_deploy_refuses_malformed_lists_without_quoting_them(tmp_path: Path, name, raw):
-    run = _deploy(tmp_path, {}, None, **{name: raw})
-    assert run.code != 0 and name in run.output
+@pytest.mark.parametrize("raw", ["relay_brand_name", "RELAY_BRAND_NAME,,X", ","])
+def test_deploy_refuses_a_malformed_confirm_remove_without_quoting_it(tmp_path: Path, raw: str):
+    run = _deploy(tmp_path, {}, None, CONFIRM_REMOVE=raw)
+    assert run.code != 0 and "CONFIRM_REMOVE" in run.output
     assert not run.calls("builds", "submit")
-    for entry in raw.split(","):
-        if len(entry.strip()) > 3:
-            assert entry.strip() not in run.output
+    assert "relay_brand_name" not in run.output
 
 
 LIVE = [
@@ -529,8 +528,6 @@ LIVE = [
     "RELAY_ALLOWED_DOMAINS",
     "RELAY_PLUGIN_MARKETPLACE",
     "RELAY_BRAND_NAME",
-    "RELAY_GITHUB_ORGS",
-    "RELAY_GITHUB_APP_FILE",
 ]
 
 
@@ -540,44 +537,33 @@ def test_deploy_refuses_to_remove_a_live_setting_unless_confirmed(tmp_path: Path
         "PLUGIN_MARKETPLACE": "example-org/team-relay",
         "PUBLIC_HOST": "relay.example.com",
         "BRAND_NAME": "Example Co",
-        "GITHUB_ORGS": "example-org",
     }
-    app = {"team-relay-github-app": [SECRET_VALUE]}
     # Everything the live service has is still set: deployed.
-    assert _deploy(tmp_path / "same", app, LIVE, **full).code == 0
+    assert _deploy(tmp_path / "same", {}, LIVE, **full).code == 0
     # One setting left out: refused, naming it, before anything is built.
     for name, setting in (
         ("PLUGIN_MARKETPLACE", "RELAY_PLUGIN_MARKETPLACE"),
         ("BRAND_NAME", "RELAY_BRAND_NAME"),
-        ("GITHUB_ORGS", "RELAY_GITHUB_ORGS"),
     ):
         env = {k: v for k, v in full.items() if k != name}
-        secrets = app if name != "GITHUB_ORGS" else {}
-        run = _deploy(tmp_path / name, secrets, LIVE, **env)
+        run = _deploy(tmp_path / name, {}, LIVE, **env)
         assert run.code != 0, run.output
         assert setting in run.output and f"CONFIRM_REMOVE={setting}" in run.output
         assert not run.calls("builds", "submit") and not run.calls("run", "deploy")
-        # Without the orgs the app's secret is gone too (it needs them): both are named.
-        confirm = setting if name != "GITHUB_ORGS" else f"{setting},RELAY_GITHUB_APP_FILE"
-        confirmed = _deploy(tmp_path / f"{name}-ok", secrets, LIVE, CONFIRM_REMOVE=confirm, **env)
+        confirmed = _deploy(tmp_path / f"{name}-ok", {}, LIVE, CONFIRM_REMOVE=setting, **env)
         assert confirmed.code == 0, confirmed.output
         assert setting in (confirmed.deploy_flag("--remove-env-vars") or "").split(",")
-    # A secret no longer found removes its mount: refused too, unless confirmed.
-    run = _deploy(tmp_path / "secret", {}, LIVE, **full)
-    assert run.code != 0 and "RELAY_GITHUB_APP_FILE" in run.output
-    run = _deploy(tmp_path / "secret-ok", {}, LIVE, CONFIRM_REMOVE="RELAY_GITHUB_APP_FILE", **full)
-    assert run.code == 0, run.output
     # Removing the domain allowlist needs both confirmations.
     env = {k: v for k, v in full.items() if k != "ALLOWED_DOMAINS"}
-    run = _deploy(tmp_path / "open", app, LIVE, ALLOWED_DOMAINS="", CONFIRM_OPEN_RELAY="1", **env)
+    run = _deploy(tmp_path / "open", {}, LIVE, ALLOWED_DOMAINS="", CONFIRM_OPEN_RELAY="1", **env)
     assert run.code != 0 and "RELAY_ALLOWED_DOMAINS" in run.output
     run = _deploy(
         tmp_path / "open-ok",
-        app,
+        {},
         LIVE,
         ALLOWED_DOMAINS="",
         CONFIRM_OPEN_RELAY="1",
-        CONFIRM_REMOVE="RELAY_BRAND_NAME,RELAY_ALLOWED_DOMAINS",
+        CONFIRM_REMOVE="RELAY_ALLOWED_DOMAINS",
         **env,
     )
     assert run.code == 0, run.output
@@ -621,163 +607,19 @@ def test_deploy_stops_when_describe_and_list_both_fail(tmp_path: Path):
     assert not [c for c in calls if c[:2] == ["builds", "submit"]]
 
 
-def _rsa_pem(bits: int, password: bytes | None = None) -> str:
-    key = rsa.generate_private_key(public_exponent=65537, key_size=bits)
-    encryption = (
-        serialization.BestAvailableEncryption(password)
-        if password
-        else serialization.NoEncryption()
-    )
-    return key.private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, encryption
-    ).decode()
-
-
-PICKER_KEY = "AIza" + "Example0Picker0Key0Only0For0Tests00"
-PICKER_CLIENT = "123456789012-picker.apps.googleusercontent.com"
-
-
 def _bootstrap(tmp_path: Path, secrets: dict[str, list[str]] | None = None, **env: str):
     return _run(tmp_path, "gcp-bootstrap.sh", {"secrets": secrets or {}}, **env)
 
 
-def test_bootstrap_stores_the_app_and_the_picker_without_printing_them(tmp_path: Path):
-    pem = _rsa_pem(2048)
-    key_file = tmp_path / "app.pem"
-    key_file.write_text(pem)
-    # Every python3 the script starts records its command line (argv shows in ps).
-    real_python = shutil.which("python3")
-    assert real_python
-    argv_log = tmp_path / "python-argv.log"
-    (tmp_path / "bin").mkdir(exist_ok=True)
-    wrapper = tmp_path / "bin" / "python3"
-    wrapper.write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{argv_log}"\nexec "{real_python}" "$@"\n'
-    )
-    wrapper.chmod(0o755)
-    run = _bootstrap(
-        tmp_path,
-        GITHUB_APP_ID="424242",
-        GITHUB_APP_SLUG="example-relay-sources",
-        GITHUB_APP_KEY_FILE=str(key_file),
-        PICKER_CLIENT_ID=PICKER_CLIENT,
-        PICKER_API_KEY=PICKER_KEY,
-    )
+def test_bootstrap_stores_no_source_secret_and_enables_no_picker_or_drive_api(tmp_path: Path):
+    """Even with the sources' old settings in the environment: nothing of them is checked,
+    stored, granted or enabled, and the output does not mention them."""
+    run = _bootstrap(tmp_path, **STALE_SOURCE_ENV)
     assert run.code == 0, run.output
-    assert argv_log.exists()
-    assert PICKER_KEY not in argv_log.read_text()
-    assert "PRIVATE KEY" not in argv_log.read_text()
-    assert not [c for c in run.state["calls"] if PICKER_KEY in " ".join(c)]
-    stored = run.state["secrets"]
-    assert json.loads(stored["team-relay-github-app"][-1]) == {
-        "app_id": "424242",
-        "slug": "example-relay-sources",
-        "private_key": pem,
-    }
-    assert json.loads(stored["team-relay-picker"][-1]) == {
-        "client_id": PICKER_CLIENT,
-        "api_key": PICKER_KEY,
-        "app_id": "123456789012",
-    }
-    # The relay reads exactly what was stored.
-    app_file = tmp_path / "stored-app.json"
-    app_file.write_text(stored["team-relay-github-app"][-1])
-    assert load_github_app(app_file).slug == "example-relay-sources"
-    picker_file = tmp_path / "stored-picker.json"
-    picker_file.write_text(stored["team-relay-picker"][-1])
-    assert load_picker(picker_file).app_id == "123456789012"
-    for secret in ("team-relay-github-app", "team-relay-picker"):
-        grants = [c for c in run.calls("secrets", "add-iam-policy-binding") if c[2] == secret]
-        assert grants and all(
-            "--member=serviceAccount:team-relay-runtime@example-project.iam.gserviceaccount.com"
-            in c
-            and "--role=roles/secretmanager.secretAccessor" in c
-            for c in grants
-        )
-    for api in ("picker.googleapis.com", "drive.googleapis.com"):
-        assert ["services", "enable", api, "--project=example-project", "--quiet"] in run.state[
-            "calls"
-        ]
-    assert "PRIVATE KEY" not in run.output and pem[40:100] not in run.output
-    assert PICKER_KEY not in run.output
-    assert all("PRIVATE KEY" not in " ".join(c) for c in run.state["calls"])
-    assert all(PICKER_KEY not in " ".join(c) for c in run.state["calls"])
-
-    # Run again with the same values: nothing new is stored.
-    again = _run(
-        tmp_path / "again",
-        "gcp-bootstrap.sh",
-        {"secrets": stored},
-        GITHUB_APP_ID="424242",
-        GITHUB_APP_SLUG="example-relay-sources",
-        GITHUB_APP_KEY_FILE=str(key_file),
-        PICKER_CLIENT_ID=PICKER_CLIENT,
-        PICKER_API_KEY=PICKER_KEY,
-    )
-    assert again.code == 0, again.output
-    assert "secret team-relay-github-app: exists (current)" in again.output
-    assert "secret team-relay-picker: exists (current)" in again.output
-
-
-def test_bootstrap_without_the_settings_skips_both(tmp_path: Path):
-    run = _bootstrap(tmp_path)
-    assert run.code == 0, run.output
-    assert "team-relay-github-app" not in run.state["secrets"]
-    assert "team-relay-picker" not in run.state["secrets"]
-    assert "secret team-relay-github-app: skipped" in run.output
-    assert "secret team-relay-picker: skipped" in run.output
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "partial-app",
-        "partial-picker",
-        "bad-id",
-        "bad-slug",
-        "small",
-        "encrypted",
-        "not-a-key",
-        "bad-client",
-        "bad-key",
-    ],
-)
-def test_bootstrap_refuses_bad_settings_before_changing_anything(tmp_path: Path, case: str):
-    key_file = tmp_path / "app.pem"
-    key_file.write_text(_rsa_pem(2048))
-    app = {
-        "GITHUB_APP_ID": "424242",
-        "GITHUB_APP_SLUG": "example-relay-sources",
-        "GITHUB_APP_KEY_FILE": str(key_file),
-    }
-    picker = {"PICKER_CLIENT_ID": PICKER_CLIENT, "PICKER_API_KEY": PICKER_KEY}
-    env: dict[str, str]
-    if case == "partial-app":
-        env = {k: v for k, v in app.items() if k != "GITHUB_APP_SLUG"}
-    elif case == "partial-picker":
-        env = {"PICKER_API_KEY": PICKER_KEY}
-    elif case == "bad-id":
-        env = {**app, "GITHUB_APP_ID": "abc"}
-    elif case == "bad-slug":
-        env = {**app, "GITHUB_APP_SLUG": "Has Space"}
-    elif case == "small":
-        key_file.write_text(_rsa_pem(1024))
-        env = app
-    elif case == "encrypted":
-        key_file.write_text(_rsa_pem(2048, b"a-password"))
-        env = app
-    elif case == "not-a-key":
-        key_file.write_text(
-            "-----BEGIN RSA PRIVATE KEY-----\nnot a key\n-----END RSA PRIVATE KEY-----\n"
-        )
-        env = app
-    elif case == "bad-client":
-        env = {**picker, "PICKER_CLIENT_ID": "not-a-client-id"}
-    else:
-        env = {**picker, "PICKER_API_KEY": "AIzaTooShort"}
-    run = _bootstrap(tmp_path, **env)
-    assert run.code != 0
-    assert "error:" in run.output
-    assert not [c for c in run.state["calls"] if c[:1] != ["config"]]  # nothing touched
-    assert "PRIVATE KEY" not in run.output and "not a key" not in run.output
-    assert "AIzaTooShort" not in run.output and "Has Space" not in run.output
+    assert set(run.state["secrets"]).isdisjoint(SOURCE_SECRETS)
+    calls = json.dumps(run.state["calls"])
+    for name in (*SOURCE_SECRETS, "picker.googleapis.com", "drive.googleapis.com"):
+        assert name not in calls and name not in run.output
+    for value in STALE_SOURCE_ENV.values():
+        assert value not in calls and value not in run.output
+    assert "GitHub" not in run.output and "Drive" not in run.output

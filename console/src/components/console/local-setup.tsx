@@ -4,13 +4,13 @@ import { useId, useState, useSyncExternalStore, type ReactNode } from 'react'
 
 import { api, type ApiError, type ChangeError } from '@/api/client'
 import { isHosted } from '@/api/key'
-import type { LocalChoice, LocalSetup } from '@/api/types'
+import type { LocalChoice, LocalSetup, PreviousFolder } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { useAcceptance, useBoundaries } from '@/hooks/queries'
 import { useNav } from '@/hooks/team'
-import { acceptedVersion, boundariesSet } from '@/lib/setup'
+import { acceptedVersion, boundariesSet, isAccepted } from '@/lib/setup'
 import { cn } from '@/lib/utils'
 import { Panel } from './primitives'
 import { AcceptBoundaries, SetupPage } from './setup'
@@ -18,8 +18,8 @@ import { FullPage } from './states'
 
 // /team-relay:setup: the Setup page on the member's own Mac, served by the setup page's console
 // server (plugin/src/setup-page.ts) with its own routes (/api/local/*). Each step shows whether it
-// is done, still to do, or not needed: signed in, accept what the team shares, the folders the
-// member's Claude answers from (added only with the Mac's folder chooser), background answering
+// is done, still to do, or not needed: signed in, accept the team's topic, the one list of folders
+// the member's Claude answers from (added only with the Mac's folder chooser), background answering
 // (on unless they turn it off; off and disabled, with the reason, where it cannot run), then Done.
 // Done never fails because of background answering: when turning it on fails at Done, the error
 // shows and "Finish without it" finishes anyway. The hosted console never calls /api/local, and a local
@@ -28,7 +28,9 @@ import { FullPage } from './states'
 export const localSetupKey = ['local-setup'] as const
 
 export const FOLDERS_HINT =
-  'Add every folder you use for your team: your copies of its GitHub projects, your Google Drive for desktop folders and shared documents.'
+  'Add every folder you use for your team, up to 20. Inside a git project, only the files git tracks are read.'
+export const PREVIOUS_TEXT = 'Folders you chose before this change — add the ones you still want with Add folder'
+export const PREVIOUS_KIND: Record<PreviousFolder['kind'], string> = { repo_root: 'repository root', own_folder: 'your own folder' }
 export const BACKGROUND_TEXT = "Answers teammates' questions from your folders even when Claude is closed."
 export const FINISHED_TEXT = 'All set. Go back to Claude.'
 export const BACKGROUND_FAILED_TEXT = 'Background answering could not be turned on. Press Done to try again, or finish without it.'
@@ -168,11 +170,14 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
   const switchId = useId()
   const hintId = useId()
 
+  // What the member chose before one folder list, less what is in the list again.
+  const previous = (setup.previous ?? []).filter((p) => !folders.includes(p.path))
   const team = nav.teams?.teams.find((t) => t.team === setup.signed_in.team)?.name ?? setup.signed_in.team
   const who = setup.signed_in.email ?? setup.signed_in.member
   const accepted = acceptedVersion(null, acceptance.data)
-  const acceptState: StepState = boundariesSet(bounds.data) ? (accepted === bounds.data.version ? 'done' : 'todo') : bounds.data ? 'not_needed' : 'todo'
+  const acceptState: StepState = boundariesSet(bounds.data) ? (isAccepted(accepted, bounds.data.version) ? 'done' : 'todo') : bounds.data ? 'not_needed' : 'todo'
 
+  /** The list as the server now holds it. */
   const keep = (next: string[]) => {
     setFolders(next)
     qc.setQueryData<LocalSetup>(localSetupKey, (old) => (old ? { ...old, folders: next } : old))
@@ -255,15 +260,15 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
             </Note>
           </Step>
 
-          <Step n={2} title="Accept what the team shares" state={acceptState}>
+          <Step n={2} title="Accept the team's topic" state={acceptState}>
             {bounds.isPending ? (
               <Skeleton className="h-16 w-full" />
             ) : boundariesSet(bounds.data) ? (
               <AcceptBoundaries bounds={bounds.data} accepted={accepted} current={bounds.data.version} />
             ) : bounds.data ? (
-              <Note>A team owner hasn&apos;t chosen what the team shares yet. Nothing to accept for now.</Note>
+              <Note>A team owner hasn&apos;t set the team&apos;s topic yet. Nothing to accept for now.</Note>
             ) : (
-              <Note>What the team shares didn&apos;t load. It is read again in a moment.</Note>
+              <Note>The team&apos;s topic didn&apos;t load. It is read again in a moment.</Note>
             )}
           </Step>
 
@@ -291,6 +296,19 @@ export function LocalSetupPage({ setup }: { setup: LocalSetup }) {
             ) : (
               <Note>No folders yet.</Note>
             )}
+            {previous.length > 0 ? (
+              <div className="flex flex-col gap-1" data-previous={previous.length}>
+                <p className="text-[12.5px] leading-relaxed text-subtle">{PREVIOUS_TEXT}</p>
+                {/* Plain text only: an old path is added again only through the Mac's chooser. */}
+                <ul className="flex flex-col gap-0.5 pl-2" aria-label="Folders you chose before">
+                  {previous.map((p) => (
+                    <li key={`${p.kind}:${p.path}`} className="text-[12px] text-subtle [overflow-wrap:anywhere]" data-previous-folder={p.path}>
+                      <span className="font-mono">{p.path}</span> ({PREVIOUS_KIND[p.kind]})
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
             {setup.chooser ? (
               <div className="flex flex-wrap items-center gap-2">
                 <Button size="sm" variant="outline" onClick={() => void add()} disabled={choosing || removing !== null || folders.length >= setup.limits.max_folders}>

@@ -9,7 +9,6 @@ import type {
   ApprovalsSummary,
   Boundaries,
   Directory,
-  GithubListing,
   InboxSummary,
   Join,
   Me,
@@ -18,7 +17,6 @@ import type {
   RequestDetail,
   Roster,
   RosterRole,
-  SourcesConfig,
   TeamBoundaries,
   Teams,
 } from '@/api/types'
@@ -26,7 +24,6 @@ import { emptyActivity, pollActivity, PollError, type ActivityState } from '@/li
 import { askPollMs, readMyRequests } from '@/lib/ask'
 import { readTeamBoundaries } from '@/lib/boundaries'
 import { readAcceptance, readMembersStatus } from '@/lib/setup'
-import { readGithubListing, readSourcesConfig } from '@/lib/sources'
 import { readTeams } from '@/lib/teams'
 import { useTeam } from './team'
 
@@ -206,9 +203,9 @@ export const boundariesKey = (team: string | null) => ['boundaries', team] as co
 
 /**
  * GET /api/boundaries: read on start and every minute (another owner may change them). A
- * console server or relay without the route (404) is not asked again. PICKERS-SPEC §2.5: a
- * document the M10 relay wrote reads with no repositories and no folders; one that breaks the
- * rule is a failed read, never shown.
+ * console server or relay without the route (404) is not asked again. A document an earlier relay
+ * wrote (with GitHub, Drive or members' folders fields) reads as its topic alone; one that breaks
+ * the rule is a failed read, never shown.
  */
 export function useBoundaries() {
   const team = useTeam()
@@ -248,42 +245,6 @@ export function useSetBoundaries() {
     onError: () => {
       void qc.invalidateQueries({ queryKey: boundariesKey(team) })
     },
-  })
-}
-
-// ---------------------------------------------------------------------------------------
-// PICKERS-SPEC §3.5-§3.6: what an owner picks sources from (owners only, read on demand).
-
-export const sourcesConfigKey = (team: string | null) => ['sources-config', team] as const
-export const githubListingKey = (team: string | null) => ['sources-github', team] as const
-
-/**
- * GET /api/sources/config, for an owner's form only: read once (and on "Check again"). A relay
- * without the route (404) has no pickers: the form offers pasting only.
- */
-export function useSourcesConfig(enabled: boolean) {
-  const team = useTeam()
-  return useQuery<SourcesConfig, ApiError>({
-    queryKey: sourcesConfigKey(team),
-    queryFn: () => tracked('sources-config', async () => shaped(readSourcesConfig((await api.sourcesConfig(team)).data))),
-    enabled,
-    staleTime: 5 * 60_000,
-    refetchOnWindowFocus: false,
-  })
-}
-
-/**
- * GET /api/sources/github, for an owner's form while the relay's GitHub App is set up: read once
- * and again on "Check again" or "Try again" (the relay caches it for a minute). Never polled.
- */
-export function useGithubListing(enabled: boolean) {
-  const team = useTeam()
-  return useQuery<GithubListing, ApiError>({
-    queryKey: githubListingKey(team),
-    queryFn: () => tracked('sources-github', async () => shaped(readGithubListing((await api.sourcesGithub(team)).data))),
-    enabled,
-    staleTime: 5 * 60_000,
-    refetchOnWindowFocus: false,
   })
 }
 

@@ -6,9 +6,13 @@
 // shown there, and how to start one where they are. When questions wait for the member's
 // answering session and it is not running, the line says so (M7-SPEC §2), and so it does when
 // answers wait for the member's approval in a channel working session (M8-SPEC §5), and when
-// the relay reports open team invitations for a Google sign-in (M9-SPEC §7.2).
+// the relay reports open team invitations for a Google sign-in (M9-SPEC §7.2). Beside that line
+// it removes an earlier plugin's Google Drive sign-in from the Keychain (drive-token-cleanup.ts),
+// saying so on stderr only, never in the session's context, and waiting for it ~2 s at most.
 
 import { CredentialFileError } from './credentials.js';
+import { SESSION_START_CLEANUP_CAP_MS, removeOldDriveSignInWithin } from './drive-token-cleanup.js';
+import { makeLogger } from './log.js';
 import { MEMBER_RE, NotConnected, RelayClient, RelayError, TEAM_RE, connectionFromEnv } from './relay-client.js';
 import { answeringCommand, detectChannelSession, notChannelNote } from './channel-mode.js';
 import { readSummary, waitingSentence } from './waiting.js';
@@ -16,7 +20,7 @@ import { invitationsSentence, readInvitations } from './invitations.js';
 import { approvalsSentence, readApprovalsState, statePath } from './approvals-state.js';
 import { boundariesSentence, validBoundaries } from './boundary-set.js';
 import { consoleUrl } from './console-url.js';
-import { memberFoldersPath, readTeamSettings, sinceOf, type TeamSettings } from './member-folders.js';
+import { memberFoldersPath, readTeamSettings, type TeamSettings } from './member-folders.js';
 import type { TeamBoundaries } from './boundaries-types.js';
 
 const TRUST =
@@ -49,7 +53,8 @@ async function relayStatusLine(env: NodeJS.ProcessEnv): Promise<string> {
     // M7-SPEC §2: what waits for the answering session, read beside /me within its own 3 s;
     // silence when it cannot be read.
     // M10-SPEC: the team's boundaries, read beside /me within 3 s; silence when they cannot be read.
-    // The sentence says whether the member accepted them (§7.1).
+    // The sentence says whether the member accepted them (§7.1), how many folders they chose and
+    // how many an earlier plugin's file held that are not used now.
     // M11-SPEC §2: what the member accepted is the relay's; silence about boundaries when it cannot be read.
     const [me, summary, invitations, boundaries, accepted] = await Promise.all([
       client.me(),
@@ -66,7 +71,7 @@ async function relayStatusLine(env: NodeJS.ProcessEnv): Promise<string> {
     const invited = invitationsSentence(invitations);
     const bounded =
       boundaries?.boundaries && boundaries.team === me.team && accepted !== null
-        ? boundariesSentence(boundaries.boundaries, boundaries.version, teamSettings(env, me.team), sinceOf(boundaries), accepted, consoleUrl(conn.url))
+        ? boundariesSentence(boundaries.version, teamSettings(env, me.team), accepted, consoleUrl(conn.url))
         : null;
     return `team-relay: you are ${me.member} in team ${me.team}; teammates: ${mates}. Use list_teammates, ask_question and invoke_capability to reach them.${waiting ? ` ${waiting}` : ''}${invited ? ` ${invited}` : ''}${bounded ? ` ${bounded}` : ''} ${TRUST}`;
   } catch (err) {
@@ -100,7 +105,7 @@ async function readBoundaries(client: RelayClient, timeoutMs: number): Promise<T
   }
 }
 
-/** M10-SPEC §7.1: the member's settings for this team (its folders; acceptance is the relay's, M11-SPEC §2). */
+/** The member's folders for this team (acceptance is the relay's, M11-SPEC §2). */
 function teamSettings(env: NodeJS.ProcessEnv, team: string): TeamSettings | { error: string } {
   try {
     return readTeamSettings(memberFoldersPath(env), env, team);
@@ -109,6 +114,8 @@ function teamSettings(env: NodeJS.ProcessEnv, team: string): TeamSettings | { er
   }
 }
 
+// At most ~2 s of the hook's 10 (a locked Keychain does not answer); the daemon runs it too.
+const cleanup = removeOldDriveSignInWithin(SESSION_START_CLEANUP_CAP_MS, { env: process.env, log: makeLogger('session-start') });
 detectChannelSession({ env: process.env, role: 'asker' })
   .then(({ channel }) => sessionStartLine(process.env, channel))
   .then((line) => {
@@ -117,4 +124,4 @@ detectChannelSession({ env: process.env, role: 'asker' })
   .catch(() => {
     process.stdout.write('team-relay: status unavailable.\n');
   })
-  .finally(() => process.exit(0));
+  .finally(() => cleanup.finally(() => process.exit(0)));

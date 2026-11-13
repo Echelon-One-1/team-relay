@@ -7,7 +7,6 @@ import type {
   ApprovalsSummary,
   Boundaries,
   Directory,
-  GithubListing,
   InboxSummary,
   Join,
   LocalChoice,
@@ -18,7 +17,6 @@ import type {
   RequestDetail,
   Roster,
   RosterRole,
-  SourcesConfig,
   TeamBoundaries,
   Teams,
 } from './types'
@@ -65,7 +63,7 @@ export class ApiError extends Error {
   readonly email: string | null
   /** For a relay refusal: the relay's status (401: the stored sign-in was refused). */
   readonly relayStatus: number | null
-  /** For a relay refusal: the relay's error code (github_unavailable, ...), when it is one. */
+  /** For a relay refusal: the relay's error code (version_conflict, ...), when it is one. */
   readonly relayError: string | null
 
   constructor(
@@ -405,10 +403,6 @@ export const api = {
   /** M10 §1: an owner replaces them, from the version they were read at (stale: 409). */
   setBoundaries: (version: number, boundaries: Boundaries, team?: string | null) =>
     sendChange<TeamBoundaries>('PUT', 'api/boundaries', { version, boundaries }, team),
-  /** PICKERS-SPEC §3.5 (owners): whether the GitHub App and the Google Picker are set up. */
-  sourcesConfig: (team?: string | null) => getJson<SourcesConfig>('api/sources/config', team),
-  /** PICKERS-SPEC §3.6 (owners): the repositories of the orgs the relay's GitHub App is installed on. */
-  sourcesGithub: (team?: string | null) => getJson<GithubListing>('api/sources/github', team),
   addMember: (member: string, email: string, team?: string | null) => sendChange<unknown>('POST', 'api/roster', { member, email }, team),
   setRole: (member: string, role: RosterRole, team?: string | null) => sendChange<unknown>('PATCH', `api/roster/${seg(member)}`, { role }, team),
   removeMember: (member: string, team?: string | null) => sendChange<unknown>('DELETE', `api/roster/${seg(member)}`, undefined, team),

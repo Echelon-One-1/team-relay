@@ -11,16 +11,16 @@ wrong types and a bool for a number are refused):
 - ``daemon``: ``version`` a string of at most 32 characters with no control or formatting
   character; ``started_at`` an RFC 3339 time with a zone.
 - ``claude``: ``found``, ``signed_in`` bools.
-- ``folders``: ``repo_roots`` 0..64, ``clones`` 0..10000, ``extra_folders`` 0..64 (counts only:
-  never a path or a folder name).
-- ``drive``: ``connected`` a bool.
+- ``folder_count``: how many folders the member chose on their Mac (local folders only, 13 Nov
+  2026), an integer 0..20, never a bool or a float; never a path or a folder name.
+- ``folders_ok``: a bool; false when the member's folders file cannot be used, and then
+  ``folder_count`` is 0.
 - ``self_test``: ``ok`` a bool, ``at`` an RFC 3339 time with a zone, ``reason`` null or at most
   200 characters with no control or formatting character other than newline and tab.
-- ``sources`` (PICKERS-SPEC §3.3), optional (an older plugin sends none; null is refused):
-  ``boundaries_version`` an integer 0..2^31-1, ``missing`` at most 140 strings of 1-400
-  characters with no control or format character. The service keeps only the keys of items of
-  the team's current boundaries (:func:`relay.boundaries.known_item_keys`), so nothing but the
-  team's own item names is stored.
+
+An older plugin's body (with ``folders``, ``drive`` or ``sources``) is refused as an unknown
+field. A status such a plugin stored earlier still reads: its ``folder_count`` and ``folders_ok``
+are null (:func:`stored_folder_count`, :func:`stored_folders_ok`).
 
 Times are stored and answered in the relay's own form (UTC, milliseconds, ``Z``). A refusal is
 ``400 invalid_body`` naming the field, never the value sent.
@@ -31,11 +31,10 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .boundaries import MAX_MISSING, key_ok
 from .clock import format_time
 from .errors import ApiError
 from .store import Acceptance
@@ -44,6 +43,8 @@ MAX_VERSION = 2**31 - 1
 MAX_DAEMON_VERSION = 32
 MAX_REASON = 200
 MAX_TIME_LENGTH = 40
+# The most folders a member chooses (the plugin's MAX_FOLDERS).
+MAX_FOLDERS = 20
 RFC3339 = re.compile(
     r"(\d{4}-\d{2}-\d{2})[Tt](\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?([Zz]|[+-]\d{2}:\d{2})"
 )
@@ -61,9 +62,6 @@ class _AcceptBody(_Strict):
     version: int = Field(ge=0, le=MAX_VERSION)
 
 
-Count64 = Annotated[int, Field(ge=0, le=64)]
-
-
 class _Daemon(_Strict):
     version: str = Field(max_length=MAX_DAEMON_VERSION)
     started_at: str = Field(max_length=MAX_TIME_LENGTH)
@@ -74,35 +72,18 @@ class _Claude(_Strict):
     signed_in: bool
 
 
-class _Folders(_Strict):
-    repo_roots: Count64
-    clones: int = Field(ge=0, le=10000)
-    extra_folders: Count64
-
-
-class _Drive(_Strict):
-    connected: bool
-
-
 class _SelfTest(_Strict):
     ok: bool
     at: str = Field(max_length=MAX_TIME_LENGTH)
     reason: str | None = Field(max_length=MAX_REASON)
 
 
-class _Sources(_Strict):
-    boundaries_version: int = Field(ge=0, le=MAX_VERSION)
-    missing: list[str] = Field(max_length=MAX_MISSING)
-
-
 class _StatusBody(_Strict):
     daemon: _Daemon
     claude: _Claude
-    folders: _Folders
-    drive: _Drive
+    folder_count: int = Field(ge=0, le=MAX_FOLDERS)
+    folders_ok: bool
     self_test: _SelfTest
-    # Absent from an older plugin's status; when present, never null.
-    sources: _Sources | None = None
 
 
 _FIELDS = frozenset(
@@ -113,19 +94,12 @@ _FIELDS = frozenset(
         "claude",
         "found",
         "signed_in",
-        "folders",
-        "repo_roots",
-        "clones",
-        "extra_folders",
-        "drive",
-        "connected",
+        "folder_count",
+        "folders_ok",
         "self_test",
         "ok",
         "at",
         "reason",
-        "sources",
-        "boundaries_version",
-        "missing",
     }
 )
 
@@ -182,73 +156,54 @@ def parse_accept_body(raw: Any) -> int:
 
 
 def parse_status_body(raw: Any) -> dict[str, Any]:
-    """The status as it is stored: the body checked as the module says, times normalised.
-    ``sources`` as sent (the service narrows ``missing`` to the team's own item keys)."""
-    if isinstance(raw, dict) and "sources" in raw and raw["sources"] is None:
-        raise _invalid("sources", "an object; leave it out when there is nothing to report")
+    """The status as it is stored: the body checked as the module says, times normalised."""
     body = _validate(_StatusBody, raw)
     if not _clean(body.daemon.version):
         raise _invalid("daemon.version", "no control or formatting characters")
+    if not body.folders_ok and body.folder_count != 0:
+        raise _invalid("folder_count", "0 when folders_ok is false")
     reason = body.self_test.reason
     if reason is not None and not _clean(reason, REASON_CONTROLS):
         raise _invalid(
             "self_test.reason", "no control or formatting characters other than newline and tab"
         )
-    if body.sources is not None:
-        for i, key in enumerate(body.sources.missing):
-            if not key_ok(key):
-                raise _invalid(
-                    f"sources.missing.{i}",
-                    "1 to 400 characters, no control or formatting characters",
-                )
-    status: dict[str, Any] = {
+    return {
         "daemon": {
             "version": body.daemon.version,
             "started_at": _time(body.daemon.started_at, "daemon.started_at"),
         },
         "claude": {"found": body.claude.found, "signed_in": body.claude.signed_in},
-        "folders": {
-            "repo_roots": body.folders.repo_roots,
-            "clones": body.folders.clones,
-            "extra_folders": body.folders.extra_folders,
-        },
-        "drive": {"connected": body.drive.connected},
+        "folder_count": body.folder_count,
+        "folders_ok": body.folders_ok,
         "self_test": {
             "ok": body.self_test.ok,
             "at": _time(body.self_test.at, "self_test.at"),
             "reason": reason,
         },
     }
-    if body.sources is not None:
-        status["sources"] = {
-            "boundaries_version": body.sources.boundaries_version,
-            "missing": list(body.sources.missing),
-        }
-    return status
 
 
-def sources_json(status: dict[str, Any], keep: list[str]) -> dict[str, Any] | None:
-    """``MemberSources`` of ``plugin/src/boundaries-types.ts`` from a stored status: its
-    ``boundaries_version`` and ``keep`` (the stored keys narrowed by the caller to the current
-    boundaries' items); None when the status has none (an older plugin's)."""
-    stored = status.get("sources")
-    if not isinstance(stored, dict):
-        return None
-    return {"boundaries_version": int(stored["boundaries_version"]), "missing": list(keep)}
+def stored_folder_count(status: dict[str, Any]) -> int | None:
+    """The folder count a stored status holds; None when it has none (a status an older plugin
+    reported, before 13 Nov 2026) or anything but an integer 0..20."""
+    count = status.get("folder_count")
+    if type(count) is int and 0 <= count <= MAX_FOLDERS:
+        return count
+    return None
 
 
-def stored_missing(status: dict[str, Any]) -> list[str]:
-    """The missing keys a stored status holds (none when it has no ``sources``)."""
-    stored = status.get("sources")
-    if not isinstance(stored, dict):
-        return []
-    return [k for k in stored.get("missing") or [] if isinstance(k, str)]
+def stored_folders_ok(status: dict[str, Any]) -> bool | None:
+    """Whether the member's folders file could be used, as a stored status says; None when it
+    does not say (a status stored before it) or holds anything but a bool."""
+    ok = status.get("folders_ok")
+    return ok if isinstance(ok, bool) else None
 
 
 def status_json(status: dict[str, Any], seen_at: datetime) -> dict[str, Any]:
-    """A stored status as the routes answer it: the five groups in their order, then
-    ``seen_at``. Re-built field by field, so a stored document never hands out more; its
-    ``sources`` never (the member's entry carries them, to whom the owner rule allows)."""
+    """A stored status as the routes answer it: ``daemon``, ``claude``, ``self_test`` in their
+    order, then ``seen_at``. Re-built field by field, so a stored document never hands out
+    more: never the folder count or ``folders_ok`` (the member's entry carries them, to whom
+    the owner rule allows), and nothing an older plugin's status held besides these groups."""
     return {
         "daemon": {
             "version": status["daemon"]["version"],
@@ -258,12 +213,6 @@ def status_json(status: dict[str, Any], seen_at: datetime) -> dict[str, Any]:
             "found": status["claude"]["found"],
             "signed_in": status["claude"]["signed_in"],
         },
-        "folders": {
-            "repo_roots": status["folders"]["repo_roots"],
-            "clones": status["folders"]["clones"],
-            "extra_folders": status["folders"]["extra_folders"],
-        },
-        "drive": {"connected": status["drive"]["connected"]},
         "self_test": {
             "ok": status["self_test"]["ok"],
             "at": status["self_test"]["at"],

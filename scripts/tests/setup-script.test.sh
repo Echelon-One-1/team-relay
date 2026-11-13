@@ -72,7 +72,7 @@ case "\$1" in
     shift
     IFS= read -r input || input=""
     printf '$3 %s <%s>\n' "\$*" "\$input" >>"$C/log"
-    if [ "\$1" = drive ] && [ -f "$C/state/drive-fails" ]; then echo "drive stub: did not connect"; exit 1; fi
+    if [ "\$1" = folders ] && [ -f "$C/state/folders-fails" ]; then exit 1; fi
     if [ "\$1" = daemon ] && [ -f "$C/state/daemon-fails" ]; then exit 1; fi
     if [ "\$1" = status ] && [ -f "$C/state/status-fails" ]; then exit 1; fi ;;
 esac
@@ -469,7 +469,6 @@ claude plugin marketplace list --json <>
 claude plugin install --scope user team-relay@team-relay-dev <>
 setup-cli(private arm64) login --relay ${RELAY} <TTY-MARK>
 setup-cli(private arm64) folders <TTY-MARK>
-setup-cli(private arm64) drive <TTY-MARK>
 setup-cli(private arm64) daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
 setup-cli(private arm64) status --after-setup <TTY-MARK>"
 # The download's own line (a random temporary folder) is checked by node_installed below.
@@ -506,7 +505,6 @@ claude plugin marketplace update team-relay-dev <>
 claude plugin update --scope user team-relay@team-relay-dev <>
 setup-cli(private arm64) login --relay ${RELAY} <TTY-MARK>
 setup-cli(private arm64) folders <TTY-MARK>
-setup-cli(private arm64) drive <TTY-MARK>
 setup-cli(private arm64) daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
 setup-cli(private arm64) status --after-setup <TTY-MARK>"
 if [[ "$STATUS" -eq 0 && "$LOG" == "$want_again" && "$LOG" != *"nodejs.org"* ]]; then
@@ -550,20 +548,15 @@ run_case "$PINNED"
 expect_stopped "only a project-scope install under its key: stops (never another scope or marketplace)" "a part of them is missing"
 check "only a project-scope install under its key: no setup-cli run" log_lacks "setup-cli"
 
-# ---------------------------------------------------------------- Drive does not stop the setup
-new_case drive-fails
-: >"$C/state/drive-fails"
+# ---------------------------------------------------------------- folders (local folders only, 13 Nov 2026)
+# One folders step and no Drive step: setup-cli has no drive step any more.
+check "the script runs no Drive step and says nothing about Google Drive" \
+  bash -c '! grep -Eqi "setup_cli\" drive|google drive" "$1"' _ "$SCRIPT"
+new_case folders-fails
+: >"$C/state/folders-fails"
 run_case "$PINNED"
-if [[ "$STATUS" -eq 0 && "$LOG" == *"setup-cli(private arm64) drive <TTY-MARK>
-setup-cli(private arm64) daemon install --claude $C/bin/claude --plugin team-relay@team-relay-dev <TTY-MARK>
-setup-cli(private arm64) status --after-setup <TTY-MARK>" && "$OUT" == *"Google Drive is not connected yet"* && "$OUT" == *"run the setup line again"* ]]; then
-  ok "a failed Drive step: it says how to retry, and setup goes on to the background answerer and the status"
-else
-  not_ok "a failed Drive step: it says how to retry, and setup goes on to the background answerer and the status" "status=$STATUS
-$OUT
---- log
-$LOG"
-fi
+expect_stopped "a failed folders step: the setup stops, saying so" "Choosing your folders did not finish."
+check "a failed folders step: nothing runs after it" log_lacks "daemon install"
 
 # ---------------------------------------------------------------- installed, but not for this user
 # A project-scope install only: the plugin is installed at user scope (not updated), and setup goes on.

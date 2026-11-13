@@ -1,13 +1,11 @@
-import { Folder, FolderGit2, HardDrive } from 'lucide-react'
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 
 import type { ChangeError } from '@/api/client'
 import type { TeamBoundaries } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Switch } from '@/components/ui/switch'
-import { useBoundaries, useMe, useSetBoundaries } from '@/hooks/queries'
-import { useNav, useTeam } from '@/hooks/team'
+import { useBoundaries, useSetBoundaries } from '@/hooks/queries'
+import { useNav } from '@/hooks/team'
 import { useNow } from '@/hooks/use-now'
 import {
   boundariesProblem,
@@ -19,20 +17,19 @@ import {
   toBoundaries,
   TOPIC_MAX,
   type BoundariesDraft,
-  type BoundariesField,
 } from '@/lib/boundaries'
-import { emailDomain, folderWhere, isWholeDrive, repoName } from '@/lib/sources'
 import { formatAgo, ms } from '@/lib/time'
 import { cn } from '@/lib/utils'
-import { DriveFolders } from './drive-folders'
-import { fieldClass, GithubPicker } from './github-picker'
 
-// M10 §1 and PICKERS-SPEC §7: the team's boundaries, in Team settings. An owner edits and saves
-// them (from the version they were read at; someone else's save in between is a conflict, and
-// the form then shows the latest): the topic, GitHub (picked from the relay's GitHub app, or
-// pasted), Google Drive folders (picked in Google's own picker, or pasted) and members' own
-// folders. A member reads them. Until they are set, answers need each member's approval, as
-// before (M8), and owners are asked to set them.
+// M10 §1, schema v3 (13 Nov 2026): the team's boundaries, in Team settings, are its topic alone.
+// An owner edits and saves it (from the version they read; someone else's save in between is a
+// conflict, and the form then shows the latest). A member reads it. What each member's Claude
+// reads is the folders they choose on their own Mac, never set here. Until a topic is set,
+// answers need each member's approval, as before (M8), and owners are asked to set it.
+
+/** The topic's text box, as the console's other fields. */
+const fieldClass =
+  'h-8 w-full min-w-0 rounded-md border border-input bg-background px-2.5 text-[12.5px] text-foreground shadow-none outline-none transition-colors placeholder:text-faint focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/40 aria-invalid:border-bad'
 
 export const UNSET_LINE = "Until boundaries are set, answers need each member's approval, as before."
 
@@ -53,18 +50,7 @@ function Changed({ data }: { data: TeamBoundaries }) {
   )
 }
 
-function ViewLine({ icon, children, data }: { icon: ReactNode; children: ReactNode; data?: Record<string, string> }) {
-  return (
-    <li className="flex min-w-0 items-center gap-1.5" {...data}>
-      <span aria-hidden className="shrink-0 text-subtle [&_svg]:size-3.5">
-        {icon}
-      </span>
-      <span className="min-w-0 [overflow-wrap:anywhere]">{children}</span>
-    </li>
-  )
-}
-
-/** A member's view: what the team's answerers may read and talk about. */
+/** A member's view: what the team's answerers talk about. */
 function BoundariesView({ data }: { data: TeamBoundaries }) {
   if (!isSet(data)) {
     return (
@@ -73,57 +59,12 @@ function BoundariesView({ data }: { data: TeamBoundaries }) {
       </p>
     )
   }
-  const b = data.boundaries
-  const github = b.github_orgs.length + b.github_repos.length
-  const drive = b.drive_folders.length + b.drives.length
   return (
     <div className="flex flex-col gap-3" data-boundaries-view>
       <dl className="grid grid-cols-1 gap-x-6 gap-y-1 text-[12.5px] sm:grid-cols-[11rem_minmax(0,1fr)] sm:gap-y-3">
         <dt className="text-subtle">Topic</dt>
         <dd className="mb-2 whitespace-pre-line break-words sm:mb-0" data-boundaries-topic>
-          {b.topic}
-        </dd>
-        <dt className="text-subtle">GitHub</dt>
-        <dd className="mb-2 sm:mb-0">
-          {github > 0 ? (
-            <ul className="flex flex-col gap-1" aria-label="GitHub">
-              {b.github_orgs.map((o) => (
-                <ViewLine key={`org:${o}`} icon={<FolderGit2 />} data={{ 'data-org': o }}>
-                  <span className="font-mono">{o}</span> <span className="text-subtle">whole organisation</span>
-                </ViewLine>
-              ))}
-              {b.github_repos.map((r) => (
-                <ViewLine key={`repo:${repoName(r)}`} icon={<FolderGit2 />} data={{ 'data-repo': repoName(r) }}>
-                  <span className="font-mono">{repoName(r)}</span>
-                </ViewLine>
-              ))}
-            </ul>
-          ) : (
-            <span className="text-subtle">None</span>
-          )}
-        </dd>
-        <dt className="text-subtle">Google Drive</dt>
-        <dd className="mb-2 sm:mb-0">
-          {drive > 0 ? (
-            <ul className="flex flex-col gap-1" aria-label="Google Drive">
-              {b.drive_folders.map((f) => (
-                <ViewLine key={`folder:${f.folder_id}`} icon={isWholeDrive(f) ? <HardDrive /> : <Folder />} data={{ 'data-folder': f.folder_id }}>
-                  <span className="font-medium">{f.folder_name}</span> <span className="text-subtle">{folderWhere(f)}</span>
-                </ViewLine>
-              ))}
-              {b.drives.map((d) => (
-                <ViewLine key={`drive:${d.domain}/${d.shared_drive}`} icon={<HardDrive />} data={{ 'data-drive': d.shared_drive }}>
-                  <span className="font-medium">{d.shared_drive}</span> <span className="text-subtle">shared drive, matched by name</span>
-                </ViewLine>
-              ))}
-            </ul>
-          ) : (
-            <span className="text-subtle">None</span>
-          )}
-        </dd>
-        <dt className="text-subtle">Members' own folders</dt>
-        <dd data-member-folders={b.member_folders ? 'allowed' : 'not-allowed'}>
-          {b.member_folders ? 'Allowed: each member may add folders of their own' : 'Not allowed'}
+          {data.boundaries.topic}
         </dd>
       </dl>
       <Changed data={data} />
@@ -134,25 +75,19 @@ function BoundariesView({ data }: { data: TeamBoundaries }) {
 /** An owner's form. `reload` reads the boundaries again (after a conflict) and resolves with them. */
 function BoundariesForm({ data, reload }: { data: TeamBoundaries; reload: () => Promise<TeamBoundaries | undefined> }) {
   const save = useSetBoundaries()
-  const nav = useNav()
-  const me = useMe()
-  const team = useTeam()
   const [base, setBase] = useState(data)
   const [draft, setDraft] = useState<BoundariesDraft>(() => draftFrom(data.boundaries))
-  const [problem, setProblem] = useState<{ field: BoundariesField; message: string } | null>(null)
+  const [problem, setProblem] = useState<string | null>(null)
   const [refusal, setRefusal] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const id = useId()
   const ids = {
     topic: `${id}-topic`,
     topicHint: `${id}-topic-hint`,
-    folders: `${id}-folders`,
-    foldersHint: `${id}-folders-hint`,
     error: `${id}-error`,
   }
   const dirty = !sameDraft(draft, draftFrom(base.boundaries))
   const newer = data.version !== base.version
-  const viewerDomain = emailDomain(nav.teams?.email ?? me.data?.email)
 
   // Another owner's save arrives while nothing is being edited here: show it.
   useEffect(() => {
@@ -212,7 +147,7 @@ function BoundariesForm({ data, reload }: { data: TeamBoundaries; reload: () => 
     )
   }
 
-  const error = problem?.message ?? refusal
+  const error = problem ?? refusal
   const invalid = (yes: boolean) => (yes ? true : undefined)
   const describedBy = (hint: string, yes: boolean) => (yes ? `${ids.error} ${hint}` : hint)
   const topicLength = chars(draft.topic.trim())
@@ -241,42 +176,15 @@ function BoundariesForm({ data, reload }: { data: TeamBoundaries; reload: () => 
           value={draft.topic}
           placeholder="Example Co: our clients and their delivery, our products and tools, engineering and team work."
           onChange={(e) => edit({ topic: e.target.value })}
-          aria-invalid={invalid(problem?.field === 'topic')}
-          aria-describedby={describedBy(ids.topicHint, problem?.field === 'topic')}
+          aria-invalid={invalid(error !== null)}
+          aria-describedby={describedBy(ids.topicHint, error !== null)}
           className={cn(fieldClass, 'h-auto min-h-[4.5rem] resize-y py-1.5 leading-snug')}
           data-focus-first
         />
         <span id={ids.topicHint} className="text-[11px] leading-snug text-faint">
-          What the team talks about. Questions about anything else are declined on their own.
+          What the team talks about. Questions about anything else are declined on their own. Each member chooses the
+          folders their Claude reads on their own computer.
         </span>
-      </div>
-
-      <GithubPicker
-        choice={{ github_orgs: draft.github_orgs, github_repos: draft.github_repos }}
-        onChange={(c) => edit(c)}
-        problem={problem?.field === 'github'}
-        problemId={ids.error}
-      />
-
-      <DriveFolders choice={{ drive_folders: draft.drive_folders, drives: draft.drives }} onChange={(c) => edit(c)} team={team} viewerDomain={viewerDomain} />
-
-      <div className="flex items-start gap-3">
-        <Switch
-          id={ids.folders}
-          checked={draft.member_folders}
-          onCheckedChange={(v) => edit({ member_folders: v })}
-          aria-describedby={ids.foldersHint}
-          className="mt-0.5"
-        />
-        <div className="flex min-w-0 flex-col gap-0.5">
-          <label htmlFor={ids.folders} className="text-[12px] font-medium">
-            Members may add their own folders
-          </label>
-          <span id={ids.foldersHint} className="text-[11px] leading-snug text-faint">
-            Each member picks them on their own computer with /team-relay:folders. Off, members answer only from GitHub and
-            Google Drive above.
-          </span>
-        </div>
       </div>
 
       {error ? (

@@ -2,6 +2,28 @@
 
 Status: spec, approved 10 Nov 2026; corrected after review (§7). Extends M1-M9.
 
+**Correction, 13 Nov 2026 (local folders only; [PICKERS-SPEC.md](PICKERS-SPEC.md) is superseded).**
+A team's boundaries are now its topic alone: the stored document and the `PUT` body are
+`{version, boundaries: {topic}}` (schema v3, `schema/boundaries-vectors.json`), and `GET` answers
+`{team, version, boundaries: {topic} | null, updated_at, updated_by}` with no `since`. A body that
+still holds `github_orgs`, `github_repos`, `drive_folders`, `drives` or `member_folders` is
+`400 invalid_body` naming that field; a document stored before is read as its topic and loses the
+rest on the next save. What a member's answerer may read is no longer the team's: every member,
+owner included, chooses up to 20 folders on their own Mac (one list in `boundaries.local.json`,
+`{"teams": {"<team>": {"folders": [...]}}}`, set with `/team-relay:setup` or `/team-relay:folders
+add|remove|list`). An earlier `repo_roots` and `extra_folders` are never read from: a repo root
+was only searched for clones of the team's own repositories, so taking it whole would widen what is
+read without the member choosing it. They are shown once where folders are chosen (the setup page,
+`/team-relay:folders`, setup-cli's folders step) as "previously chosen", with their kind, for the
+member to add again through the folder chooser or `/team-relay:folders add`; the first save under
+the new scheme removes them from the file. Reading rule: inside a chosen folder, files of a git work tree are read only when git tracks
+them; elsewhere every file (5 MB cap); the credential deny list, the sensitive names and the
+secret-name screen apply everywhere, as before. §2's GitHub and Drive matching, §2a (Google Docs
+through the Drive API, `/team-relay:drive`, `GET /v1/teams/{team}/drive-client`) and the
+`member_folders` switch are removed. Acceptance stays: a member accepts a version once, and an
+acceptance of version 1 to the current one lets their answerer answer on its own (narrowing and
+widening by item are gone with the items).
+
 ## Decisions (maintainer, 10 Nov 2026)
 
 - A team's owner sets its boundaries when setting up the team in the console: GitHub orgs, shared
@@ -50,6 +72,8 @@ empty new lists and the same version; the console's PUT body cap is 160 KiB.)
 
 ## 2. What each member's answerer may read
 
+(Superseded 13 Nov 2026: see the correction at the top. Kept for the history of §7.)
+
 The plugin fetches the team's boundaries when it starts and before each answer (a run uses one
 version). Each member sets, in a local file and a `/team-relay:folders` command:
 - `repo_roots`: where their clones live (e.g. `~/code/example-org`), searched 3 levels deep;
@@ -76,6 +100,8 @@ hint then id. Name matching stays only for legacy `drives` entries. A Mac never 
 Drive API to find a source; one not found locally is skipped and reported as missing by its key.)
 
 ### 2a. Native Google Docs, Sheets and Slides
+
+(Removed 13 Nov 2026 with the Drive sign-in: see the correction at the top.)
 
 - A `.gdoc`/`.gsheet`/`.gslides` link file inside an allowed Drive holds `doc_id` (checked on
   a real drive). The host tool **read_google_file(path)** reads that id and asks the Drive API, as the
@@ -150,6 +176,9 @@ exception for the relay before using it; the deployment this was built for did (
 - Message text kept 7 days (default), then deleted by Firestore TTL; audit keeps hashes 90 days.
 
 ## 6. Member setup (short guide in the repo README)
+
+(Correction, 13 Nov 2026: the member runs `/team-relay:setup`, chooses their folders and accepts
+the topic; there is no Drive step. See the repository README.)
 
 Install the plugin (`team-relay-dev` marketplace), start Claude Code with the channel flag, sign in
 with the work account, accept the invitation, run `/team-relay:folders` to set `repo_roots` and accept

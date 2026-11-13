@@ -1,20 +1,21 @@
-// M11 §6 and "Simpler joining": the three steps' rules (with the Mac's own checks inside the
-// first), the boundaries' "new" marks, the setup line, the invite message, and reading
+// M11 §6 and "Simpler joining": the two steps' rules (with the Mac's own checks inside the
+// first), the folder count an owner reads, the setup line, the invite message, and reading
 // members-status and the acceptance without trusting their shape.
 
 import { describe, expect, it } from 'vitest'
 
-import type { Join, MemberSetupStatus, MemberSources, MemberStatusEntry, TeamBoundaries } from '@/api/types'
+import type { Join, MemberSetupStatus, MemberStatusEntry, TeamBoundaries } from '@/api/types'
+import { vectors } from '@/test/vectors'
 import {
   acceptedVersion,
-  boundaryItems,
-  CLONE_TODO,
   currentVersion,
+  folderCountText,
+  FOLDERS_TODO,
+  FOLDERS_UNREADABLE_TODO,
   inviteMessage,
   hasJoined,
+  isAccepted,
   macChecks,
-  missingNames,
-  missingSources,
   publicOrigin,
   readAcceptance,
   readMembersStatus,
@@ -27,73 +28,52 @@ import {
 
 const NOW = Date.parse('2026-11-10T10:00:00Z')
 
-function status(o: Partial<{ found: boolean; signedIn: boolean; roots: number; drive: boolean; ok: boolean; reason: string | null }> = {}): MemberSetupStatus {
+function status(o: Partial<{ found: boolean; signedIn: boolean; ok: boolean; reason: string | null }> = {}): MemberSetupStatus {
   return {
     daemon: { version: '0.11.0', started_at: new Date(NOW - 3_600_000).toISOString() },
     claude: { found: o.found ?? true, signed_in: o.signedIn ?? true },
-    folders: { repo_roots: o.roots ?? 1, clones: 4, extra_folders: 0 },
-    drive: { connected: o.drive ?? true },
     self_test: { ok: o.ok ?? true, at: new Date(NOW - 60_000).toISOString(), reason: o.reason ?? null },
     seen_at: new Date(NOW - 10_000).toISOString(),
   }
 }
 
-const entry = (s: MemberSetupStatus | null, answering = true, accepted = 3, sources: MemberSources | null = null): MemberStatusEntry => ({
+const entry = (s: MemberSetupStatus | null, answering = true, accepted = 3, folderCount: number | null = 2, foldersOk: boolean | null = true): MemberStatusEntry => ({
   member: 'alice',
   status: s,
   answering,
   accepted_version: accepted,
-  sources,
+  folder_count: folderCount,
+  folders_ok: foldersOk,
 })
-
-const DRIVE_ID = '0AExampleDriveId0PVA'
-const FOLDER_ID = '1ExampleFolderClients0000000000a'
 
 const BOUNDS: TeamBoundaries = {
   team: 'demo',
   version: 3,
-  boundaries: {
-    topic: 'Example Co: orders and payments.',
-    github_orgs: ['Example-Org', 'second-org'],
-    github_repos: [],
-    drive_folders: [],
-    drives: [
-      { domain: 'example.com', shared_drive: 'Team Drive' },
-      { domain: 'example.com', shared_drive: 'Clients' },
-    ],
-    member_folders: true,
-  },
-  since: {
-    github_orgs: { 'example-org': 1, 'second-org': 3 },
-    github_repos: {},
-    drive_folders: {},
-    drives: [
-      { domain: 'example.com', shared_drive: 'Team Drive', since: 1 },
-      { domain: 'example.com', shared_drive: 'Clients', since: 2 },
-    ],
-    member_folders: 3,
-  },
+  boundaries: { topic: 'Example Co: orders and payments.' },
   updated_at: '2026-11-09T10:00:00Z',
   updated_by: 'olga',
 }
+const NONE: TeamBoundaries = { team: 'demo', version: 0, boundaries: null, updated_at: null, updated_by: null }
 
 const done = (steps: ReturnType<typeof setupSteps>) => Object.fromEntries(steps.map((s) => [s.id, s.done]))
-// `b` left out: the team's boundaries (BOUNDS); passed as undefined or null: not read.
-type Read = TeamBoundaries | null | undefined
-const checks = (e: MemberStatusEntry | null, ...b: [Read?]) => Object.fromEntries(macChecks(e, b.length ? b[0] : BOUNDS).map((c) => [c.id, c.done]))
-const todo = (e: MemberStatusEntry | null, id: string, ...b: [Read?]) => macChecks(e, b.length ? b[0] : BOUNDS).find((c) => c.id === id)!.todo
+const checks = (e: MemberStatusEntry | null) => Object.fromEntries(macChecks(e).map((c) => [c.id, c.done]))
+const todo = (e: MemberStatusEntry | null, id: string) => macChecks(e).find((c) => c.id === id)!.todo
 
 describe('setupSteps: two plain steps', () => {
   it('both done for a Mac that is set up and answering, and the current version accepted', () => {
     const steps = setupSteps(entry(status()), BOUNDS, 3, 3)
     expect(steps.map((s) => [s.id, s.title])).toEqual([
       ['mac', 'Set up your Mac'],
-      ['accept', 'Accept what the team shares'],
+      ['accept', "Accept the team's topic"],
     ])
     expect(SETUP_STEPS).toBe(2)
     expect(steps.every((s) => s.done)).toBe(true)
     expect(setupCount(entry(status()), BOUNDS, 3)).toBe(2)
-    expect(setupCount(entry(status(), true, 2), BOUNDS, 3)).toBe(1)
+    // An acceptance of an earlier version holds (the topic widens nothing); one of a later version
+    // (an earlier team under the same id) and none at all do not.
+    expect(setupCount(entry(status(), true, 2), BOUNDS, 3)).toBe(2)
+    expect(setupCount(entry(status(), true, 4), BOUNDS, 3)).toBe(1)
+    expect(setupCount(entry(status(), true, 0), BOUNDS, 3)).toBe(1)
   })
 
   it('joined (the join card goes): the Mac has reported once and the member has accepted once', () => {
@@ -102,11 +82,10 @@ describe('setupSteps: two plain steps', () => {
     expect(hasJoined(entry(status()), BOUNDS, 0)).toBe(false)
     expect(hasJoined(entry(status()), BOUNDS, 3)).toBe(true)
     // Later trouble does not undo joining: the Mac off, an older version accepted.
-    expect(hasJoined(entry(status({ drive: false }), false), BOUNDS, 2)).toBe(true)
+    expect(hasJoined(entry(status({ ok: false }), false, 2, 0), BOUNDS, 2)).toBe(true)
     // Nothing to accept yet (or not read yet): the Mac reporting is enough.
-    const none: TeamBoundaries = { team: 'demo', version: 0, boundaries: null, since: null, updated_at: null, updated_by: null }
-    expect(hasJoined(entry(status()), none, 0)).toBe(true)
-    expect(hasJoined(entry(null), none, 0)).toBe(false)
+    expect(hasJoined(entry(status()), NONE, 0)).toBe(true)
+    expect(hasJoined(entry(null), NONE, 0)).toBe(false)
   })
 
   it('without any status: the only check is running the setup line', () => {
@@ -118,25 +97,45 @@ describe('setupSteps: two plain steps', () => {
     expect(setupSteps(null, BOUNDS, 0, 3)[0]!.checks.map((c) => c.id)).toEqual(['setup'])
   })
 
-  it('the Mac step needs every old check: each reads its own field, and says in one plain sentence what to do', () => {
-    expect(checks(entry(status()))).toEqual({ setup: true, claude: true, answering: true, folders: true, drive: true, self_test: true })
+  it('the Mac step needs every check: each reads its own field, and says in one plain sentence what to do', () => {
+    expect(checks(entry(status()))).toEqual({ setup: true, claude: true, answering: true, folders: true, self_test: true })
     expect(checks(entry(status({ found: false }))).claude).toBe(false)
     expect(todo(entry(status({ found: false })), 'claude')).toBe("Claude Code isn't on your Mac yet. Run the setup line again and say yes when it offers to install it.")
     expect(todo(entry(status({ signedIn: false })), 'claude')).toBe("Claude Code isn't signed in on your Mac. Run the setup line again and sign in when it asks.")
     expect(checks(entry(status(), false)).answering).toBe(false)
     expect(todo(entry(status(), false), 'answering')).toBe("Your Mac isn't answering right now. Make sure it's switched on; if this stays, run the setup line again.")
-    expect(checks(entry(status({ roots: 0 }))).folders).toBe(false)
-    expect(todo(entry(status({ roots: 0 })), 'folders')).toBe(
-      "Your Mac doesn't know where your Example-Org and second-org project folders are yet. Run the setup line again and pick them.",
-    )
-    expect(checks(entry(status({ drive: false }))).drive).toBe(false)
-    expect(todo(entry(status({ drive: false })), 'drive')).toBe("Google Drive isn't connected yet. Run the setup line again and sign in to Google when it asks.")
-    for (const e of [status({ found: false }), status({ roots: 0 }), status({ drive: false })]) {
-      expect(done(setupSteps(entry(e), BOUNDS, 3, 3)).mac).toBe(false)
+    for (const e of [entry(status({ found: false })), entry(status(), true, 3, 0)]) {
+      expect(done(setupSteps(e, BOUNDS, 3, 3)).mac).toBe(false)
     }
     // Never the technical names.
-    const all = macChecks(entry(status({ signedIn: false, roots: 0, drive: false, ok: false, reason: null }), false), BOUNDS).map((c) => c.todo)
+    const all = macChecks(entry(status({ signedIn: false, ok: false, reason: null }), false, 3, 0)).map((c) => c.todo)
     for (const t of all) expect(t).not.toMatch(/daemon|LaunchAgent|plugin|channel|\bCLI\b|\bNode|boundaries|repo root|self-test|command/i)
+  })
+
+  it('folders: a Mac that reported no folder chosen is told to choose them; nothing about sources, clones or Drive', () => {
+    expect(checks(entry(status(), true, 3, 0)).folders).toBe(false)
+    expect(todo(entry(status(), true, 3, 0), 'folders')).toBe(FOLDERS_TODO)
+    expect(FOLDERS_TODO).toBe(
+      "Your Mac has no folders chosen yet, so your Claude can't read anything for teammates. Run the setup line again and choose your folders.",
+    )
+    expect(checks(entry(status(), true, 3, 1)).folders).toBe(true)
+    expect(checks(entry(status(), true, 3, 20)).folders).toBe(true)
+    // Not known (another member's count, which only owners read): never shown as missing.
+    expect(checks(entry(status(), true, 3, null)).folders).toBe(true)
+    for (const c of macChecks(entry(status(), true, 3, 0))) expect(c.todo).not.toMatch(/drive|github|clone|source|repo/i)
+  })
+
+  it("folders: a folders file the Mac can't use says how to see why and fix it; a readable one does not", () => {
+    const bad = entry(status(), true, 3, 0, false)
+    expect(checks(bad).folders).toBe(false)
+    expect(todo(bad, 'folders')).toBe(FOLDERS_UNREADABLE_TODO)
+    expect(FOLDERS_UNREADABLE_TODO).toBe("Your Mac can't read your folders settings. Run /team-relay:folders in Claude to see why and fix them.")
+    expect(done(setupSteps(bad, BOUNDS, 3, 3)).mac).toBe(false)
+    // false wins whatever the count says; true or null (not known) leaves the count to decide.
+    expect(checks(entry(status(), true, 3, 2, false)).folders).toBe(false)
+    expect(todo(entry(status(), true, 3, 0, true), 'folders')).toBe(FOLDERS_TODO)
+    expect(todo(entry(status(), true, 3, 0, null), 'folders')).toBe(FOLDERS_TODO)
+    expect(checks(entry(status(), true, 3, 2, null)).folders).toBe(true)
   })
 
   it('the self-test: a failure says what to do and what to show an owner; not run yet is checking, not failed', () => {
@@ -152,43 +151,19 @@ describe('setupSteps: two plain steps', () => {
     expect(todo(pending, 'self_test')).toBe('Your Mac is checking that everything works. This takes about a minute.')
   })
 
-  it('boundaries not read (still loading, or failed): folders and Drive are not known, never done', () => {
-    const bare = entry(status({ roots: 0, drive: false }))
-    for (const unread of [undefined, null]) {
-      expect(checks(bare, unread)).toMatchObject({ folders: false, drive: false })
-      expect(todo(bare, 'folders', unread)).toBe("We couldn't check this yet, because the team's settings haven't loaded. This page tries again in a moment.")
-      expect(todo(bare, 'drive', unread)).toBe(todo(bare, 'folders', unread))
-    }
-    // Not even a Mac that reports folders and Drive counts as set up while they are not known.
-    expect(checks(entry(status()), undefined)).toMatchObject({ folders: false, drive: false })
-    expect(done(setupSteps(entry(status()), undefined, 3, 3)).mac).toBe(false)
-    // Read and never set: nothing to choose, nothing to connect.
-    const none: TeamBoundaries = { team: 'demo', version: 0, boundaries: null, since: null, updated_at: null, updated_by: null }
-    expect(checks(bare, none)).toMatchObject({ folders: true, drive: true })
-    // A team with no orgs and no drives needs neither.
-    const plain = { ...BOUNDS, boundaries: { ...BOUNDS.boundaries!, github_orgs: [], drives: [] } }
-    expect(checks(bare, plain)).toMatchObject({ folders: true, drive: true })
-  })
-
-  it('single repositories need project folders, picked Drive folders need Google Drive (PICKERS-SPEC)', () => {
-    const bare = entry(status({ roots: 0, drive: false }))
-    const repos = { ...BOUNDS, boundaries: { ...BOUNDS.boundaries!, github_orgs: [], drives: [], github_repos: [{ org: 'labs-org', repo: 'api', id: 1 }] } }
-    expect(checks(bare, repos)).toMatchObject({ folders: false, drive: true })
-    expect(todo(bare, 'folders', repos)).toBe("Your Mac doesn't know where your labs-org project folders are yet. Run the setup line again and pick them.")
-    const folders = {
-      ...BOUNDS,
-      boundaries: { ...BOUNDS.boundaries!, github_orgs: [], drives: [], drive_folders: [{ domain: 'example.com', drive_id: DRIVE_ID, folder_id: FOLDER_ID, folder_name: 'Clients', drive_name: null }] },
-    }
-    expect(checks(bare, folders)).toMatchObject({ folders: true, drive: false })
-    // Whole orgs and the orgs of repositories, each once.
-    const both = { ...BOUNDS, boundaries: { ...BOUNDS.boundaries!, github_repos: [{ org: 'example-org', repo: 'api', id: null }, { org: 'labs-org', repo: 'x', id: 2 }] } }
-    expect(todo(bare, 'folders', both)).toMatch(/your Example-Org, second-org and labs-org project folders/)
-  })
-
   it('boundaries never set: accepting cannot be done', () => {
-    const none: TeamBoundaries = { team: 'demo', version: 0, boundaries: null, since: null, updated_at: null, updated_by: null }
-    expect(setupSteps(entry(status()), none, 0, 0)[1]!.done).toBe(false)
-    expect(setupSteps(entry(status()), BOUNDS, 2, 3)[1]!.done).toBe(false)
+    expect(setupSteps(entry(status()), NONE, 0, 0)[1]!.done).toBe(false)
+    expect(setupSteps(entry(status()), NONE, 1, 0)[1]!.done).toBe(false)
+    expect(setupSteps(entry(status()), BOUNDS, 0, 3)[1]!.done).toBe(false)
+  })
+
+  it('an acceptance holds for any version from 1 up to the current one (as the plugin counts it)', () => {
+    expect(isAccepted(0, 3)).toBe(false)
+    expect(isAccepted(1, 3)).toBe(true)
+    expect(isAccepted(3, 3)).toBe(true)
+    expect(isAccepted(4, 3)).toBe(false)
+    expect(isAccepted(1, 0)).toBe(false)
+    expect(setupSteps(entry(status()), BOUNDS, 1, 3)[1]!.done).toBe(true)
   })
 
   it('the accepted version: the acceptance read wins over members-status; the current version is the newer one seen', () => {
@@ -201,131 +176,12 @@ describe('setupSteps: two plain steps', () => {
   })
 })
 
-describe('boundaryItems: what is new since the viewer accepted (M10 §7.1 since)', () => {
-  const set = BOUNDS as TeamBoundaries & { boundaries: NonNullable<TeamBoundaries['boundaries']> }
-  it('marks what was added after the accepted version', () => {
-    const items = boundaryItems(set, 1)
-    expect(items.orgs).toEqual([
-      { name: 'Example-Org', isNew: false },
-      { name: 'second-org', isNew: true },
-    ])
-    expect(items.drives.map((d) => d.isNew)).toEqual([false, true])
-    expect(items.memberFolders).toEqual({ allowed: true, isNew: true })
-    expect(boundaryItems(set, 2).drives.map((d) => d.isNew)).toEqual([false, false])
-  })
-  it('marks nothing before a first acceptance, and counts an item since does not name as added now', () => {
-    const items = boundaryItems(set, 0)
-    expect([...items.orgs, ...items.drives].some((x) => x.isNew)).toBe(false)
-    expect(items.memberFolders.isNew).toBe(false)
-    const unnamed = boundaryItems({ ...set, since: null }, 2)
-    expect(unnamed.orgs.every((o) => o.isNew)).toBe(true)
-    // Not allowed: never new.
-    expect(boundaryItems({ ...set, boundaries: { ...set.boundaries, member_folders: false } }, 1).memberFolders).toEqual({ allowed: false, isNew: false })
-  })
-})
-
-describe('boundaryItems: repositories and Drive folders (PICKERS-SPEC §7.3)', () => {
-  const picked = {
-    ...BOUNDS,
-    boundaries: {
-      ...BOUNDS.boundaries!,
-      github_repos: [
-        { org: 'labs-org', repo: 'API', id: 1 },
-        { org: 'labs-org', repo: 'web', id: 2 },
-        // Of a whole org: never an item.
-        { org: 'example-org', repo: 'x', id: 3 },
-      ],
-      drive_folders: [
-        { domain: 'example.com', drive_id: DRIVE_ID, folder_id: DRIVE_ID, folder_name: 'Team', drive_name: 'Team' },
-        { domain: 'example.com', drive_id: DRIVE_ID, folder_id: FOLDER_ID, folder_name: 'Clients', drive_name: null },
-      ],
-    },
-    since: { ...BOUNDS.since!, github_repos: { 'labs-org/api': 1, 'labs-org/web': 3 }, drive_folders: { [DRIVE_ID]: 1 } },
-  } as TeamBoundaries & { boundaries: NonNullable<TeamBoundaries['boundaries']> }
-
-  it('lists them with their new marks; an item since does not name is new in the current version', () => {
-    const items = boundaryItems(picked, 2)
-    expect(items.repos).toEqual([
-      { name: 'labs-org/API', isNew: false },
-      { name: 'labs-org/web', isNew: true },
-    ])
-    expect(items.folders).toEqual([
-      { key: `folder:${DRIVE_ID}`, name: 'Team', where: 'a whole shared drive', isNew: false },
-      { key: `folder:${FOLDER_ID}`, name: 'Clients', where: 'in a shared drive', isNew: true },
-    ])
-  })
-})
-
-describe("missing sources: the viewer's own lines, an owner's names (PICKERS-SPEC §7.4, ACC-021, ACC-022)", () => {
-  const b = {
-    ...BOUNDS,
-    version: 5,
-    boundaries: {
-      ...BOUNDS.boundaries!,
-      github_orgs: ['example-org'],
-      github_repos: [{ org: 'labs-org', repo: 'api', id: 1 }],
-      drive_folders: [{ domain: 'example.com', drive_id: DRIVE_ID, folder_id: FOLDER_ID, folder_name: 'Clients', drive_name: 'Example Team Drive' }],
-      drives: [{ domain: 'example.com', shared_drive: 'Old Drive' }],
-    },
-    since: { github_orgs: { 'example-org': 1 }, github_repos: { 'labs-org/api': 5 }, drive_folders: { [FOLDER_ID]: 2 }, drives: [{ domain: 'example.com', shared_drive: 'Old Drive', since: 1 }], member_folders: 3 },
-  } satisfies TeamBoundaries
-  const keys = ['repo:labs-org/api', 'org:example-org', `folder:${FOLDER_ID}`, 'drive:example.com/Old Drive'] as MemberSources['missing']
-
-  it('one line per item: the clone line, the org page, Drive guidance', () => {
-    const { missing, checking } = missingSources(entry(status(), true, 5, { boundaries_version: 5, missing: keys }), b)
-    expect(checking).toEqual([])
-    expect(missing).toEqual([
-      { kind: 'repo', key: 'repo:labs-org/api', name: 'labs-org/api', command: 'git clone https://github.com/labs-org/api.git', todo: CLONE_TODO },
-      {
-        kind: 'org',
-        key: 'org:example-org',
-        name: 'example-org',
-        todo: 'No example-org projects found. Clone the ones you work on into the folder you picked for projects.',
-        link: 'https://github.com/orgs/example-org/repositories',
-      },
-      {
-        kind: 'folder',
-        key: `folder:${FOLDER_ID}`,
-        name: 'Clients (in Example Team Drive)',
-        todo: "Clients (in Example Team Drive) isn't on this Mac. Make sure Google Drive for desktop is signed in with your work account; if it still doesn't show, ask a team owner for access to the shared drive.",
-      },
-      {
-        kind: 'drive',
-        key: 'drive:example.com/Old Drive',
-        name: 'Old Drive',
-        todo: "The shared drive Old Drive isn't on this Mac. Make sure Google Drive for desktop is signed in with your work account; if it still doesn't show, ask a team owner for access to the shared drive.",
-      },
-    ])
-    expect(CLONE_TODO).toBe('Run it in Terminal inside the folder you picked for projects.')
-  })
-
-  it('never a key that is not an item of the current boundaries; nothing without a report', () => {
-    const odd = ['repo:labs-org/gone', '/Users/someone/projects/api', 'org:example-org', 'org:example-org'] as MemberSources['missing']  // e1-guard: allow (synthetic macOS home path in a test)
-    expect(missingSources(entry(status(), true, 5, { boundaries_version: 5, missing: odd }), b).missing.map((m) => m.key)).toEqual(['org:example-org'])
-    expect(missingSources(entry(status(), true, 5, null), b)).toEqual({ missing: [], checking: [] })
-    expect(missingSources(null, b)).toEqual({ missing: [], checking: [] })
-    expect(missingSources(entry(status(), true, 5, { boundaries_version: 5, missing: keys }), undefined)).toEqual({ missing: [], checking: [] })
-  })
-
-  it('a report from an older version: items added since show as checking', () => {
-    const { missing, checking } = missingSources(entry(status(), true, 5, { boundaries_version: 3, missing: ['org:example-org'] }), b)
-    expect(missing.map((m) => m.key)).toEqual(['org:example-org'])
-    expect(checking).toEqual([{ key: 'repo:labs-org/api', name: 'labs-org/api' }])
-  })
-
-  it('missing never undoes "Set up your Mac"', () => {
-    const e = entry(status(), true, 5, { boundaries_version: 5, missing: keys })
-    expect(setupSteps(e, b, 5, 5)[0]!.done).toBe(true)
-  })
-
-  it("an owner reads each member's missing items by name", () => {
-    expect(missingNames(entry(status(), true, 5, { boundaries_version: 5, missing: keys }), b)).toEqual([
-      'labs-org/api',
-      'example-org (whole organisation)',
-      'Clients (in Example Team Drive)',
-      'Old Drive',
-    ])
-    expect(missingNames(entry(status(), true, 5, null), b)).toEqual([])
+describe("a member's folder count, as an owner reads it", () => {
+  it('"1 folder", "N folders"', () => {
+    expect(folderCountText(0)).toBe('0 folders')
+    expect(folderCountText(1)).toBe('1 folder')
+    expect(folderCountText(5)).toBe('5 folders')
+    expect(folderCountText(20)).toBe('20 folders')
   })
 })
 
@@ -376,23 +232,36 @@ describe('reading the answers', () => {
     }
     const out = readMembersStatus(raw)!
     expect(out.members.map((m) => m.member)).toEqual(['alice', 'bob', 'dana'])
-    expect(out.members[2]).toEqual({ member: 'dana', status: null, answering: false, accepted_version: 0, sources: null })
+    expect(out.members[2]).toEqual({ member: 'dana', status: null, answering: false, accepted_version: 0, folder_count: null, folders_ok: null })
     expect(readMembersStatus({ members: 'x', boundaries_version: 1 })).toBeNull()
     expect(readMembersStatus({ ok: true })).toBeNull()
     expect(readMembersStatus(null)).toBeNull()
   })
-  it("members-status: a member's sources are kept only when well formed (keys of the four kinds, at most 140)", () => {
-    const read = (sources: unknown) => readMembersStatus({ boundaries_version: 2, members: [{ member: 'alice', status: null, answering: false, accepted_version: 0, sources }] })!.members[0]!.sources
-    expect(read({ boundaries_version: 2, missing: ['repo:example-org/api', 'org:x', 'repo:example-org/api'] })).toEqual({ boundaries_version: 2, missing: ['repo:example-org/api', 'org:x'] })
-    expect(read({ boundaries_version: 2, missing: [] })).toEqual({ boundaries_version: 2, missing: [] })
+  it("members-status: a member's folder_count is an integer 0..20 (schema/boundaries-vectors.json folder_counts), else null", () => {
+    const read = (folder_count: unknown) =>
+      readMembersStatus({ boundaries_version: 2, members: [{ member: 'alice', status: status(), answering: false, accepted_version: 0, folder_count }] })!.members[0]!.folder_count
+    expect(vectors.folder_counts.valid.length).toBeGreaterThan(0)
+    for (const n of vectors.folder_counts.valid) expect(read(n)).toBe(n)
+    for (const n of vectors.folder_counts.invalid) expect(read(n)).toBeNull()
     expect(read(undefined)).toBeNull()
-    expect(read(null)).toBeNull()
-    expect(read({ boundaries_version: -1, missing: [] })).toBeNull()
-    expect(read({ boundaries_version: 2, missing: 'org:x' })).toBeNull()
-    expect(read({ boundaries_version: 2, missing: ['/Users/someone/api'] })).toBeNull()  // e1-guard: allow (synthetic macOS home path in a test)
-    expect(read({ boundaries_version: 2, missing: ['org:a\u0007b'] })).toBeNull()
-    expect(read({ boundaries_version: 2, missing: [`drive:${'k'.repeat(400)}`] })).toBeNull()
-    expect(read({ boundaries_version: 2, missing: Array.from({ length: 141 }, (_, i) => `org:o${i}`) })).toBeNull()
+  })
+
+  it('members-status: a status never carries folder names, counts by source, or Drive: an older shape keeps only what it reads', () => {
+    const old = {
+      ...status(),
+      folders: { repo_roots: 1, clones: 4, extra_folders: 0 },
+      drive: { connected: true },
+    }
+    const out = readMembersStatus({ boundaries_version: 2, members: [{ member: 'alice', status: old, answering: true, accepted_version: 1, folder_count: 3, sources: { boundaries_version: 2, missing: [] } }] })!
+    expect(out.members[0]).toEqual({ member: 'alice', status: status(), answering: true, accepted_version: 1, folder_count: 3, folders_ok: null })
+  })
+
+  it("members-status: a member's folders_ok is kept only when it is a boolean", () => {
+    const read = (folders_ok: unknown) =>
+      readMembersStatus({ boundaries_version: 2, members: [{ member: 'alice', status: status(), answering: false, accepted_version: 0, folder_count: 0, folders_ok }] })!.members[0]!.folders_ok
+    expect(read(true)).toBe(true)
+    expect(read(false)).toBe(false)
+    for (const v of [null, undefined, 0, 1, 'false', {}]) expect(read(v)).toBeNull()
   })
 
   it('acceptance: {version, accepted_at} or null', () => {

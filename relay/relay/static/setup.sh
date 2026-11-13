@@ -298,16 +298,11 @@ process.exit(s && s.loggedIn === true ? 0 : 1);
   fi
   local setup_cli="$plugin_dir/dist/setup-cli.js"
 
-  # ---------------------------------------------------------------- 4. sign-in, folders, Drive, background answering
+  # ---------------------------------------------------------------- 4. sign-in, folders, background answering
   step "4/5 Connecting you to the team"
   "$NODE" "$setup_cli" login --relay "$RELAY_URL" <"$TTY" || stop "Signing in to the team did not finish."
+  # The folders on this Mac the answers come from, one list (local folders only, 13 Nov 2026).
   "$NODE" "$setup_cli" folders <"$TTY" || stop "Choosing your folders did not finish."
-  # Drive before the background answerer (so its first status already says connected), but a
-  # cancelled or failed Drive sign-in does not stop the setup.
-  if ! "$NODE" "$setup_cli" drive <"$TTY"; then
-    say ""
-    say "Google Drive is not connected yet. The rest of the setup goes on. To connect it later, run the setup line again."
-  fi
   "$NODE" "$setup_cli" daemon install --claude "$CLAUDE" --plugin "$plugin_id" <"$TTY" \
     || stop "Your Mac could not be set to answer your team. Run the setup line again."
   # The background answerer now runs with $NODE: older private copies are no longer used.

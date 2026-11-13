@@ -24,22 +24,22 @@
 // Teammate text is data throughout: it reaches the answerer only inside a nonce-framed block
 // of its prompt, and the working session only quoted and neutralised in a status event.
 //
-// Boundary mode (M10-SPEC §2, §3), for a team whose owner set boundaries: the boundaries are
-// read at start and before every run (a run uses one version), and each run gets the allowed
-// set built from them and the member's folders (boundary-set.ts). The answerer has Read only,
-// in an empty private directory, plus the host's list_files, search_files and read_google_file
-// (boundary-tools.ts); every Read reaches the permission tool, which allows a file in the set at
+// Boundary mode (M10-SPEC §2, §3), for a team whose owner set boundaries (since 13 Nov 2026 the
+// topic alone): the boundaries are read at start and before every run (a run uses one version),
+// and each run gets the allowed set built from the folders the member chose for the team on
+// this Mac (member-folders.ts, boundary-set.ts). The answerer has Read only, in an empty private
+// directory, plus the host's list_files and search_files (boundary-tools.ts); every Read reaches the permission tool, which allows a file in the set at
 // once and denies anything else at once. Nothing waits for the member except a capability call:
 // an off-topic answer becomes a fixed decline, a draft the secret screen (or the read trail)
 // flags becomes a fixed "ask <member> directly" with a one-line note to the member, past the
-// volume limits a fixed "too many questions" goes back, and everything else is sent. What the
-// member answers from is published as shares (names only). Teams without boundaries keep M8.
-// §7.1: the set is built from the team's boundaries narrowed to what the member accepted
-// (member-folders.ts); nothing accepted → the fixed "<member> hasn't set up answering" decline
-// without a run; a version that adds something unaccepted gets one status line. M11-SPEC §2: the
-// accepted version comes from the relay (the member accepts in the console), read before every
-// run (and at start); when it cannot be read the question gets the fixed busy line
-// (nothing is taken as accepted). The local settings file gives only the member's folders. §7.3: an
+// volume limits a fixed "too many questions" goes back, and everything else is sent. No share is
+// published in boundary mode: the names of the member's chosen folders are seen by nobody else
+// (13 Nov 2026). Teams without boundaries keep M8.
+// §7.1: nothing accepted → the fixed "<member> hasn't set up answering" decline without a run.
+// M11-SPEC §2: the accepted version comes from the relay (the member accepts in the console),
+// read before every run (and at start); accepted means a version from 1 to the current one
+// (member-folders.ts hasAccepted); when it cannot be read the question gets the fixed busy line
+// (nothing is taken as accepted). §7.3: an
 // allowed Read is a snapshot (snapshot.ts): the answerer reads a copy in the run's private
 // folder, never a member path. §7.6: while the boundaries were never read, every question gets
 // the fixed busy line, never an approval item.
@@ -64,9 +64,8 @@ import { reviewWithElicitation, summaryText, type Elicit } from './approvals-rev
 import { approvalsSentence, clearApprovalsState, statePath, writeApprovalsState } from './approvals-state.js';
 import { openInBrowser } from './console-open.js';
 import type { Boundaries, TeamBoundaries } from './boundaries-types.js';
-import { buildAllowedSet, denyContext, GitCache, homeDir, setSummary, shareNames, validBoundaries, wideningText, type AllowedSet, type DenyCtx } from './boundary-set.js';
-import { DriveLocator, type ItemIdReader } from './drive-locate.js';
-import { listFiles, readGoogle, searchFiles, type GoogleReader, type ToolOutcome } from './boundary-tools.js';
+import { buildAllowedSet, denyContext, GitCache, setSummary, validBoundaries, type AllowedSet, type DenyCtx } from './boundary-set.js';
+import { listFiles, searchFiles, type ToolOutcome } from './boundary-tools.js';
 import { credentialHit, realOr, within } from './deny-list.js';
 import { defaultManifestPath, discoveryPayload, exposedCapabilities } from './exposed.js';
 import {
@@ -83,7 +82,7 @@ import {
 } from './headless.js';
 import { HostSocket, newToken } from './host-socket.js';
 import { codePointLength, hasLoneSurrogate, loadManifest, validateManifest } from './manifest.js';
-import { acceptedAtVersion, effectiveBoundaries, memberFoldersPath, readTeamSettings, sinceOf, type Effective, type TeamSettings } from './member-folders.js';
+import { hasAccepted, memberFoldersPath, readTeamSettings, type TeamSettings } from './member-folders.js';
 import { envelopeToNotification, neutraliseChannelTags, RecentIds } from './notify.js';
 import { APPROVAL_TEXT, TAKEOVER_TEXT, notifyCommand, type NoticeText } from './notify-desktop.js';
 import { sensitiveName } from './read-trail-core.js';
@@ -105,8 +104,8 @@ export const NOT_SET_UP_REPLY = (member: string) => `${member} hasn't set up ans
 export const NO_CAPABILITY_REPLY = (member: string) => `${member}'s background answerer does not run capabilities; ask ${member} directly.`;
 /** M10-SPEC §3: why a Read outside the allowed set is denied (at once, without asking). */
 export const OUTSIDE_SET =
-  "That file is not one you may read for this team: only files git tracks in the team's GitHub repositories, files in its shared drives " +
-  "and Drive folders, and the member's own added folders. Use mcp__host__list_files or mcp__host__search_files to find what you can read; do not try to reach it another way.";
+  "That file is not one you may read for this team: only files in the folders the member chose (in a git repository, only the files git tracks). " +
+  'Use mcp__host__list_files or mcp__host__search_files to find what you can read; do not try to reach it another way.';
 /** M10-SPEC §7.3: why an allowed file was not copied for the answerer. */
 export const TOO_LARGE_READ = `That file is larger than ${MAX_SNAPSHOT_BYTES / (1024 * 1024)} MB, so it cannot be read. Answer without it, and say so.`;
 export const UNSAFE_READ = 'That file changed or is not a regular file, so it cannot be read now. Answer without it, and say so.';
@@ -165,10 +164,6 @@ export type HostOptions = {
   /** The volume limits and the notice gap (tests make them small). */
   limits?: { perAsker?: number; perHour?: number; noticeGapMs?: number };
   now?: () => number;
-  /** M10-SPEC §2a: reads a Google link file (default: google-drive.ts readGoogleFile). */
-  googleReader?: GoogleReader;
-  /** PICKERS-SPEC §6.2: reads a folder's Drive for desktop id (default: /usr/bin/xattr; tests: a fake). */
-  driveIdReader?: ItemIdReader;
   /**
    * M11-SPEC §1: the background answerer. Holds the lock as `daemon`, answers in boundary mode
    * only, runs no capability and never holds an approval item.
@@ -230,7 +225,7 @@ type Run = {
  * M10-SPEC §7.1: whether the member accepted the team's boundaries, as last worked out.
  * `unknown`: the relay could not say which version the member accepted (M11-SPEC §2).
  */
-type Acceptance = { state: 'accepted' | 'pending' | 'not_accepted' | 'unreadable' | 'unknown'; version: number; adds: string | null };
+type Acceptance = { state: 'accepted' | 'not_accepted' | 'unreadable' | 'unknown'; version: number };
 
 type BoundaryRun = { set: AllowedSet; teamName: string; ctx: DenyCtx };
 
@@ -282,8 +277,6 @@ export class AnswerHost {
   /** M11-SPEC §1: no new run starts (the background answerer is finishing to restart). */
   private finishing = false;
   private readonly gitCache = new GitCache();
-  /** PICKERS-SPEC §6.2: where the team's picked Drive folders are on this Mac (this host's own cache). */
-  private readonly driveLocator: DriveLocator;
 
   constructor(private readonly o: HostOptions) {
     this.env = o.env;
@@ -298,7 +291,6 @@ export class AnswerHost {
     this.perHour = o.limits?.perHour ?? MAX_RUNS_PER_HOUR;
     this.noticeGapMs = o.limits?.noticeGapMs ?? NOTICE_GAP_MS;
     this.queue.onChange((e) => this.onQueueChange(e.type, e.item, e.outcome));
-    this.driveLocator = new DriveLocator({ home: homeDir(o.env), ...(o.driveIdReader ? { readId: o.driveIdReader } : {}) });
   }
 
   get stopped(): boolean {
@@ -350,14 +342,7 @@ export class AnswerHost {
     const s = this.status();
     const sentence = approvalsSentence(s.approvals_pending);
     const set = this.lastSet;
-    // Drive names are owner-written: neutralised like any text that reaches the session.
-    const names = (kind: string, folders?: boolean) =>
-      set
-        ? set.areas
-            .filter((a) => a.kind === kind && (folders === undefined || (a.folder !== undefined && !a.folder.whole_drive) === folders))
-            .map((a) => singleLine(a.name.replace(/^[a-z]+:/, ''), 200))
-        : [];
-    const folders = names('drive', true);
+    const folders = set ? set.areas.map((a) => singleLine(a.name.replace(/^[a-z]+:/, ''), 200)) : [];
     return {
       answering_automatically: s.answering,
       ...(s.why_not ? { answering_note: s.why_not } : {}),
@@ -368,10 +353,7 @@ export class AnswerHost {
             boundaries_version: this.boundaries?.version ?? null,
             answering_from: set
               ? {
-                  github_repositories: names('github'),
-                  shared_drives: names('drive', false),
-                  ...(folders.length ? { drive_folders: folders } : {}),
-                  your_folders: names('folder'),
+                  your_folders: folders,
                   files: set.files.size,
                   summary: singleLine(setSummary(set), 600),
                 }
@@ -407,10 +389,10 @@ export class AnswerHost {
     return this.boundaries;
   }
 
-  /** The member's folders for the team (M11-SPEC §2: any `accepted` in the file is ignored). */
+  /** The member's folders for the team (member-folders.ts). */
   private teamSettings(): TeamSettings | { error: string } {
     try {
-      return { ...readTeamSettings(memberFoldersPath(this.env), this.env, this.o.me.team), accepted: null };
+      return readTeamSettings(memberFoldersPath(this.env), this.env, this.o.me.team);
     } catch (err) {
       return { error: describeError(err) };
     }
@@ -433,45 +415,38 @@ export class AnswerHost {
   }
 
   /**
-   * M10-SPEC §7.1: the team's boundaries narrowed to what the member accepted (M11-SPEC §2: the
-   * version the relay holds), and what is waiting to be accepted. Null when the member's folders
+   * Whether the member accepted the team's boundaries (M11-SPEC §2: the version the relay holds,
+   * from 1 to the current one), with their folders for the team. Null when the member's folders
    * file cannot be used (nothing is answered then); 'unknown' when the relay could not say what
    * was accepted (the question gets the busy line).
    */
-  private async effective(tb: TeamBoundaries): Promise<{ eff: Effective; settings: TeamSettings } | 'unknown' | null> {
-    const since = sinceOf(tb);
+  private async effective(tb: TeamBoundaries): Promise<{ accepted: boolean; settings: TeamSettings } | 'unknown' | null> {
     const settings = this.teamSettings();
     if ('error' in settings) {
       this.o.log(`your folders file cannot be used (${settings.error}); questions are declined until it is fixed`);
-      this.acceptance = { state: 'unreadable', version: tb.version, adds: null };
+      this.acceptance = { state: 'unreadable', version: tb.version };
       return null;
     }
     const version = await this.acceptedVersion();
     if (version === null) {
-      this.acceptance = { state: 'unknown', version: tb.version, adds: null };
+      this.acceptance = { state: 'unknown', version: tb.version };
       return 'unknown';
     }
-    const eff = effectiveBoundaries(tb.boundaries!, acceptedAtVersion(tb.boundaries!, version, since), since);
-    const adds = eff.pending ? wideningText(eff.pending) : null;
-    this.acceptance = { state: eff.notAccepted ? 'not_accepted' : eff.pending ? 'pending' : 'accepted', version: tb.version, adds };
-    return { eff, settings };
+    const accepted = hasAccepted(version, tb.version);
+    this.acceptance = { state: accepted ? 'accepted' : 'not_accepted', version: tb.version };
+    return { accepted, settings };
   }
 
-  /**
-   * M10-SPEC §7.1: one status line per new version that the member has not fully accepted
-   * (names only: org names, quoted drive names).
-   */
+  /** M10-SPEC §7.1: one status line per version the member has not accepted (or cannot use their folders file). */
   private noteAcceptance(tb: TeamBoundaries): void {
     const a = this.acceptance;
     if (!a || a.state === 'accepted' || a.state === 'unknown' || this.acceptanceNoted === tb.version || this.stopped) return;
     this.acceptanceNoted = tb.version;
     const team = this.o.me.team;
     const text =
-      a.state === 'pending'
-        ? `team-relay: ${team}'s boundaries changed (version ${tb.version} adds ${a.adds ?? 'nothing'}); accept them in the console: ${this.console}. Until then your automatic answers come only from what you accepted.`
-        : a.state === 'not_accepted'
-          ? `team-relay: ${team} has boundaries (version ${tb.version}) you have not accepted yet, so teammates' questions to you are declined. Open the console to see and accept them: ${this.console}`
-          : `team-relay: your folders file cannot be used, so teammates' questions to you are declined. Run /team-relay:folders to see why.`;
+      a.state === 'not_accepted'
+        ? `team-relay: ${team} has boundaries (version ${tb.version}) you have not accepted yet, so teammates' questions to you are declined. Open the console to see and accept them: ${this.console}`
+        : `team-relay: your folders file cannot be used, so teammates' questions to you are declined. Run /team-relay:folders to see why.`;
     void Promise.resolve(this.o.push(text)).catch(() => {});
   }
 
@@ -480,8 +455,7 @@ export class AnswerHost {
     const a = this.acceptance;
     if (!a) return {};
     const say: Record<Acceptance['state'], string> = {
-      accepted: 'You accepted these boundaries; answers come from them.',
-      pending: `Version ${a.version} adds ${a.adds ?? 'nothing'}, which you have not accepted: accept it in the console (${this.console}). Until then answers come only from what you accepted.`,
+      accepted: 'You accepted these boundaries; answers come from the folders you chose.',
       not_accepted: `You have not accepted your team's boundaries yet, so teammates' questions are declined: accept them in the console (${this.console}).`,
       unreadable: "Your folders file cannot be used, so teammates' questions are declined: run /team-relay:folders.",
       unknown: "Which boundaries you accepted could not be read from the relay just now, so teammates' questions get a busy reply until it can.",
@@ -489,21 +463,19 @@ export class AnswerHost {
     return { boundaries_acceptance: a.state, boundaries_acceptance_note: singleLine(say[a.state], 800) };
   }
 
-  private async allowedSet(tb: TeamBoundaries, eff: Effective, settings: TeamSettings): Promise<AllowedSet> {
+  private async allowedSet(tb: TeamBoundaries, settings: TeamSettings): Promise<AllowedSet> {
     const set = await buildAllowedSet({
       version: tb.version,
-      boundaries: eff.boundaries,
-      member: { repo_roots: settings.repo_roots, extra_folders: settings.extra_folders },
+      member: { folders: settings.folders },
       env: this.env,
       cache: this.gitCache,
-      locator: this.driveLocator,
     });
     for (const n of set.notes) this.o.log(n);
     this.lastSet = set;
     return set;
   }
 
-  /** Publish what the member answers from, when it changed (M10-SPEC §2: names only). */
+  /** Publish the shared folder's name when it changed (folder mode only; boundary mode publishes none). */
   private async publishShares(names: string[]): Promise<void> {
     if (this.stopped || (names.length === this.shares.length && names.every((n, i) => n === this.shares[i]))) return;
     this.shares = names;
@@ -563,13 +535,15 @@ export class AnswerHost {
     if (tb?.boundaries) {
       const e = await this.effective(tb);
       if (this.stopped) return;
-      const set = e && e !== 'unknown' && !e.eff.notAccepted ? await this.allowedSet(tb, e.eff, e.settings) : null;
+      const set = e && e !== 'unknown' && e.accepted ? await this.allowedSet(tb, e.settings) : null;
       if (this.stopped) return;
       if (!set) this.lastSet = null;
       this.announceBoundaries(tb, set);
       this.noteAcceptance(tb);
-      this.shares = set ? shareNames(set) : [];
-      this.sharing = this.shares.length > 0;
+      // Spec decision 5 (13 Nov 2026): nobody else sees a member's folder names, so nothing is
+      // published as shares in boundary mode.
+      this.shares = [];
+      this.sharing = false;
       await this.publish(this.shares, { attempts: 2, signal: this.controller.signal });
       this.o.log(
         set
@@ -612,7 +586,7 @@ export class AnswerHost {
     const text = set
       ? `team-relay: This session now answers teammates automatically within your team's boundaries (version ${tb.version}): ${singleLine(setSummary(set), 600)}. ` +
         'Reads of anything else are denied without asking, off-topic questions are declined, and nothing waits for your approval except a capability call. ' +
-        'Change where your clones are with /team-relay:folders.'
+        'Change your folders with /team-relay:folders.'
       : `team-relay: This session now answers teammates for you, but declines their questions until you accept your team's boundaries in the console: ${this.console}`;
     void Promise.resolve(this.o.push(text)).catch(() => {});
     this.notifyDesktop(TAKEOVER_TEXT);
@@ -928,7 +902,7 @@ export class AnswerHost {
     }
     let boundary: BoundaryRun | null = null;
     if (tb.boundaries) {
-      // §7.1: the boundaries narrowed to what the member accepted; nothing accepted, nothing answered.
+      // §7.1: nothing accepted, nothing answered.
       const e = await this.effective(tb);
       if (this.stopped) return false;
       this.noteAcceptance(tb);
@@ -938,7 +912,7 @@ export class AnswerHost {
         this.finish(job);
         return false;
       }
-      if (!e || e.eff.notAccepted) {
+      if (!e || !e.accepted) {
         this.lastSet = null;
         await this.publishShares([]);
         try {
@@ -950,10 +924,10 @@ export class AnswerHost {
         this.finish(job);
         return false;
       }
-      const set = await this.allowedSet(tb, e.eff, e.settings);
+      const set = await this.allowedSet(tb, e.settings);
       if (this.stopped) return false;
       boundary = { set, teamName: this.o.me.name?.trim() || this.o.me.team, ctx: denyContext(this.env) };
-      await this.publishShares(shareNames(set));
+      await this.publishShares([]);
     } else if (this.o.background) {
       // M11-SPEC §1: never folder mode: a team without boundaries is not set up for answering.
       this.lastSet = null;
@@ -1079,7 +1053,7 @@ export class AnswerHost {
     if (this.current !== run) throw new Error('this answer is over');
     const p = isPlainObject(params) ? params : {};
     if (method === 'reply') return this.onReply(run, p);
-    if (method === 'list_files' || method === 'search_files' || method === 'read_google_file') return this.onFileTool(run, method, p);
+    if (method === 'list_files' || method === 'search_files') return this.onFileTool(run, method, p);
     if (method === 'request_approval') {
       // M10-SPEC §3: nothing waits for the member in boundary mode (the tool is not even listed).
       if (run.boundary) return { ok: false, message: 'request_approval is not available for this team: answer, or say you cannot.' };
@@ -1099,15 +1073,7 @@ export class AnswerHost {
     if (!b) return { ok: false, message: `${method} is not available here.` };
     let out: ToolOutcome;
     if (method === 'list_files') out = listFiles(b.set, p);
-    else if (method === 'search_files') out = await searchFiles(b.set, p, { ctx: b.ctx, now: this.now });
-    else {
-      out = await readGoogle(b.set, p, b.ctx, {
-        home: homeDir(this.env),
-        cwd: run.cwd,
-        relay: this.o.client,
-        ...(this.o.googleReader ? { reader: this.o.googleReader } : {}),
-      });
-    }
+    else out = await searchFiles(b.set, p, { ctx: b.ctx, now: this.now });
     if (!out.ok) this.o.log(`${method} for ${run.item.request_id} refused: ${singleLine(out.message, 200)}`);
     return out;
   }

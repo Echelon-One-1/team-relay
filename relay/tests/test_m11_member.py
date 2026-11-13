@@ -11,12 +11,15 @@ read, ``member-self`` to accept, always for the viewer; no route names another m
 version and ``not_set`` checks, the strict body, the audit (the version, never text), the write
 budget; ``PUT me/status`` (the member itself only, never a delegate), its strict schema, the
 relay's ``seen_at`` and the 20-second rule; ``GET members/status`` (``answering`` within 180 s,
-``accepted_version``, active members only). The Firestore half needs the emulator
+``accepted_version``, active members only, and, local folders only since 13 Nov 2026, each
+member's ``folder_count`` and ``folders_ok``: to an owner for everyone, to anyone else only
+their own; a status an older plugin stored reads with nulls). The Firestore half needs the emulator
 (scripts/test-relay.sh)."""
 
 from __future__ import annotations
 
 import copy
+import json
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -34,7 +37,6 @@ from relay.store import (
     AcceptanceChange,
     AuditEntry,
     BoundariesChange,
-    DriveBoundary,
     MemberStatus,
     Quota,
     QuotaExceeded,
@@ -49,6 +51,7 @@ from relay.store_memory import MemoryStore
 
 from .conftest import (
     EMAILS,
+    REPO_ROOT,
     START,
     Api,
     FakeClock,
@@ -64,23 +67,28 @@ pytestmark = pytest.mark.anyio
 
 NOW = START
 STAMP = "2026-09-23T12:00:00.000Z"
-DRIVE = DriveBoundary(domain="example.com", shared_drive="Example Team Drive")
-# PICKERS-SPEC §3.2: every field required; no legacy drive (a PUT cannot add one).
-EXAMPLE = {
-    "topic": "Example Org: our clients, products and engineering.",
-    "github_orgs": ["Example-Org"],
-    "github_repos": [],
-    "drive_folders": [],
-    "drives": [],
-    "member_folders": False,
-}
+EXAMPLE = {"topic": "Example Org: our clients, products and engineering."}
 STATUS: dict[str, Any] = {
     "daemon": {"version": "0.11.0", "started_at": "2026-09-23T11:59:00.000Z"},
+    "claude": {"found": True, "signed_in": True},
+    "folder_count": 5,
+    "folders_ok": True,
+    "self_test": {"ok": True, "at": "2026-09-23T11:59:30.000Z", "reason": None},
+}
+# What a status entry of members/status shows: never the folder count or folders_ok.
+SHOWN = {k: v for k, v in STATUS.items() if k not in ("folder_count", "folders_ok")}
+# A status an older plugin reported, as an earlier relay stored it (before 13 Nov 2026).
+OLD_STATUS: dict[str, Any] = {
+    "daemon": {"version": "0.10.0", "started_at": "2026-09-23T11:59:00.000Z"},
     "claude": {"found": True, "signed_in": True},
     "folders": {"repo_roots": 2, "clones": 37, "extra_folders": 0},
     "drive": {"connected": True},
     "self_test": {"ok": True, "at": "2026-09-23T11:59:30.000Z", "reason": None},
+    "sources": {"boundaries_version": 1, "missing": ["repo:example-org/api"]},
 }
+FOLDER_COUNTS = json.loads(
+    (REPO_ROOT / "schema" / "boundaries-vectors.json").read_text(encoding="utf-8")
+)["folder_counts"]
 
 
 @pytest.fixture(params=["memory", "firestore"])
@@ -100,18 +108,7 @@ async def store(request: pytest.FixtureRequest) -> AsyncIterator[Store]:
 
 
 def boundaries(version: int) -> TeamBoundaries:
-    return TeamBoundaries(
-        version=version,
-        topic="Our work",
-        github_orgs=["Example-Org"],
-        drives=[DRIVE],
-        member_folders=False,
-        updated_at=NOW,
-        updated_by="owner1",
-        org_since={"example-org": 1},
-        drive_since={DRIVE: 1},
-        member_folders_since=None,
-    )
+    return TeamBoundaries(version=version, topic="Our work", updated_at=NOW, updated_by="owner1")
 
 
 def put_boundaries(new: TeamBoundaries):
@@ -166,9 +163,7 @@ def accepting(team: str, member: str, version: int):
 
 
 def reporting(status: dict[str, Any], seen: Any = NOW):
-    def fn(
-        current: MemberStatus | None, entry: RosterEntry | None, bounds: TeamBoundaries | None
-    ) -> StatusChange[str]:
+    def fn(current: MemberStatus | None, entry: RosterEntry | None) -> StatusChange[str]:
         if entry is None or not entry.active:
             raise ApiError(404, "not_found")
         return StatusChange(result="written", status=MemberStatus(status=status, seen_at=seen))
@@ -267,7 +262,7 @@ async def test_a_status_is_overwritten_and_read_back(store: Store):
     assert await store.get_member_statuses(team, ["member1"]) == {}
     assert await store.set_member_status(team, "member1", reporting(STATUS)) == "written"
     changed = copy.deepcopy(STATUS)
-    changed["folders"]["clones"] = 38
+    changed["folder_count"] = 6
     later = NOW + timedelta(seconds=60)
     await store.set_member_status(team, "member1", reporting(changed, later))
     assert await store.get_member_statuses(team, ["member1", "owner1"]) == {
@@ -279,23 +274,15 @@ async def test_the_status_function_sees_the_status_it_replaces(store: Store):
     team = await team_with_member(store)
     seen: list[Any] = []
 
-    def peek(current, entry, bounds):
-        seen.append(
-            (
-                current.seen_at if current else None,
-                entry.member if entry else None,
-                bounds.version if bounds else None,
-            )
-        )
+    def peek(current, entry):
+        seen.append((current.seen_at if current else None, entry.member if entry else None))
         return StatusChange(result=None)
 
     await store.set_member_status(team, "member1", peek)
     await store.set_member_status(team, "member1", reporting(STATUS))
     await store.set_member_status(team, "member1", peek)
-    # PICKERS-SPEC §3.3: the team's boundaries are read in the same transaction.
-    await store.set_boundaries(team, "owner1", put_boundaries(boundaries(1)))
     await store.set_member_status(team, "nobody", peek)
-    assert seen == [(None, "member1", None), (NOW, "member1", None), (None, None, 1)]
+    assert seen == [(None, "member1"), (NOW, "member1"), (None, None)]
     assert await store.get_member_statuses(team, ["nobody"]) == {}
 
 
@@ -571,10 +558,7 @@ async def test_a_member_self_delegate_reaches_nothing_else(console: Api):
         for method in sorted(route.methods):
             kwargs = {} if method == "GET" else {"json": {}}
             r = await api.delegated(method, path, EMAILS["alice"], **kwargs)
-            if method == "GET" and route.path == "/v1/teams/{team}/sources/github":
-                # Reached: this relay has no GitHub app (PICKERS-SPEC §3.6).
-                assert r.json()["error"] == "github_not_configured", r.text
-            elif method == "GET" and route.path in DELEGATE_ROUTES:
+            if method == "GET" and route.path in DELEGATE_ROUTES:
                 assert r.status_code == 200, (method, route.path, r.text)
             elif (method, route.path) in MEMBER_SELF_MUTATIONS:
                 # Reached: the empty body is what is refused.
@@ -615,35 +599,188 @@ async def members_status(api: Api, member: str = "alice") -> dict[str, Any]:
 async def test_a_member_reports_and_every_member_reads_it(api: Api):
     r = await put_status(api, "bob", STATUS)
     assert r.status_code == 200, r.text
+    # The answer: the status as stored, with the caller's own count.
     assert r.json() == {**STATUS, "seen_at": STAMP}
-    expected = {
-        "members": [
-            {
-                "member": "alice",
-                "status": None,
-                "answering": False,
-                "accepted_version": 0,
-                "sources": None,
-            },
-            {
-                "member": "bob",
-                "status": {**STATUS, "seen_at": STAMP},
-                "answering": True,
-                "accepted_version": 0,
-                "sources": None,
-            },
-            {
-                "member": "carol",
-                "status": None,
-                "answering": False,
-                "accepted_version": 0,
-                "sources": None,
-            },
-        ],
-        "boundaries_version": 0,
+
+    def expected(bob_count: int | None, bob_ok: bool | None) -> dict[str, Any]:
+        return {
+            "members": [
+                {
+                    "member": "alice",
+                    "status": None,
+                    "answering": False,
+                    "accepted_version": 0,
+                    "folder_count": None,
+                    "folders_ok": None,
+                },
+                {
+                    "member": "bob",
+                    "status": {**SHOWN, "seen_at": STAMP},
+                    "answering": True,
+                    "accepted_version": 0,
+                    "folder_count": bob_count,
+                    "folders_ok": bob_ok,
+                },
+                {
+                    "member": "carol",
+                    "status": None,
+                    "answering": False,
+                    "accepted_version": 0,
+                    "folder_count": None,
+                    "folders_ok": None,
+                },
+            ],
+            "boundaries_version": 0,
+        }
+
+    # alice is an owner: bob's count; bob: his own; carol (a member): not bob's.
+    assert await members_status(api, "alice") == expected(5, True)
+    assert await members_status(api, "bob") == expected(5, True)
+    assert await members_status(api, "carol") == expected(None, None)
+
+
+async def test_an_owner_sees_every_count_and_a_member_only_their_own(api: Api):
+    assert (await put_status(api, "alice", {**STATUS, "folder_count": 0})).status_code == 200
+    assert (await put_status(api, "bob", {**STATUS, "folder_count": 20})).status_code == 200
+    assert (await put_status(api, "carol", {**STATUS, "folder_count": 1})).status_code == 200
+
+    def counts(body: dict[str, Any]) -> dict[str, int | None]:
+        return {m["member"]: m["folder_count"] for m in body["members"]}
+
+    assert counts(await members_status(api, "alice")) == {"alice": 0, "bob": 20, "carol": 1}
+    assert counts(await members_status(api, "bob")) == {"alice": None, "bob": 20, "carol": None}
+    assert counts(await members_status(api, "carol")) == {"alice": None, "bob": None, "carol": 1}
+    # A delegate reads as the member it names: an owner sees all, a member only their own.
+    r = await api.delegated("GET", "/members/status", EMAILS["alice"])
+    assert counts(r.json()) == {"alice": 0, "bob": 20, "carol": 1}
+    r = await api.delegated("GET", "/members/status", EMAILS["carol"])
+    assert counts(r.json()) == {"alice": None, "bob": None, "carol": 1}
+    # A delegate for a member who is not an owner (bob): his own count and folders_ok only.
+    r = await api.delegated("GET", "/members/status", EMAILS["bob"])
+    assert r.status_code == 200, r.text
+    assert counts(r.json()) == {"alice": None, "bob": 20, "carol": None}
+    assert {m["member"]: m["folders_ok"] for m in r.json()["members"]} == {
+        "alice": None,
+        "bob": True,
+        "carol": None,
     }
-    for member in ("alice", "bob", "carol"):
-        assert await members_status(api, member) == expected
+    # The status groups never carry a count, a folder or a path.
+    for body in (await members_status(api, "alice"), await members_status(api, "carol")):
+        for entry in body["members"]:
+            assert set(entry["status"]) == {"daemon", "claude", "self_test", "seen_at"}
+
+
+async def test_a_status_an_older_plugin_stored_reads_with_a_null_count(api: Api):
+    """Written by an earlier relay (folders, drive and sources groups, no count): still listed,
+    its groups but those dropped, the count null even for an owner."""
+
+    def fn(current: MemberStatus | None, entry: RosterEntry | None) -> StatusChange[None]:
+        return StatusChange(result=None, status=MemberStatus(status=OLD_STATUS, seen_at=NOW))
+
+    await api.store.set_member_status(api.team, "bob", fn)
+    for member in ("alice", "bob"):
+        bob = (await members_status(api, member))["members"][1]
+        assert bob["member"] == "bob" and bob["folder_count"] is None
+        assert bob["folders_ok"] is None
+        assert bob["answering"] is True
+        assert bob["status"] == {
+            "daemon": OLD_STATUS["daemon"],
+            "claude": OLD_STATUS["claude"],
+            "self_test": OLD_STATUS["self_test"],
+            "seen_at": STAMP,
+        }
+    # The member's plugin reports again: the new count replaces the old status whole.
+    api.clock.advance(20)
+    assert (await put_status(api, "bob", STATUS)).status_code == 200
+    stored = (await api.store.get_member_statuses(api.team, ["bob"]))["bob"].status
+    assert stored == STATUS
+    assert (await members_status(api, "alice"))["members"][1]["folder_count"] == 5
+
+
+async def test_folders_ok_is_stored_and_shown_like_the_count(api: Api):
+    """folders_ok false: the member's folders file cannot be used, and the count is then 0."""
+    r = await put_status(api, "carol", {**STATUS, "folder_count": 0, "folders_ok": False})
+    assert r.status_code == 200, r.text
+    assert (r.json()["folder_count"], r.json()["folders_ok"]) == (0, False)
+    stored = (await api.store.get_member_statuses(api.team, ["carol"]))["carol"].status
+    assert stored["folders_ok"] is False and stored["folder_count"] == 0
+    assert (await put_status(api, "bob", STATUS)).status_code == 200
+
+    def oks(body: dict[str, Any]) -> dict[str, bool | None]:
+        return {m["member"]: m["folders_ok"] for m in body["members"]}
+
+    assert oks(await members_status(api, "alice")) == {"alice": None, "bob": True, "carol": False}
+    assert oks(await members_status(api, "carol")) == {"alice": None, "bob": None, "carol": False}
+    assert oks(await members_status(api, "bob")) == {"alice": None, "bob": True, "carol": None}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {**STATUS, "folders_ok": None},
+        {**STATUS, "folders_ok": 1},
+        {**STATUS, "folders_ok": "true"},
+        {k: v for k, v in STATUS.items() if k != "folders_ok"},
+        {**STATUS, "folders_ok": False, "folder_count": 3},
+    ],
+    ids=["null", "int", "string", "missing", "false with a count"],
+)
+async def test_an_invalid_folders_ok_is_400(api: Api, body: dict[str, Any]):
+    r = await put_status(api, "bob", body)
+    assert (r.status_code, r.json()["error"]) == (400, "invalid_body"), r.text
+    assert r.json()["detail"].split(":", 1)[0] in ("folders_ok", "folder_count")
+    assert await api.store.get_member_statuses(api.team, ["bob"]) == {}
+
+
+async def test_a_stored_status_without_a_bool_folders_ok_reads_null(api: Api):
+    """A status stored before folders_ok (an int count only), or holding a non-bool: null."""
+    for value in (None, 1, "yes"):
+        stored = {k: v for k, v in STATUS.items() if k != "folders_ok"}
+        if value is not None:
+            stored["folders_ok"] = value
+
+        def fn(current, entry, stored=stored) -> StatusChange[None]:
+            return StatusChange(result=None, status=MemberStatus(status=stored, seen_at=NOW))
+
+        await api.store.set_member_status(api.team, "bob", fn)
+        bob = (await members_status(api, "alice"))["members"][1]
+        assert (bob["folder_count"], bob["folders_ok"]) == (5, None), value
+
+
+@pytest.mark.parametrize("count", FOLDER_COUNTS["valid"])
+async def test_every_valid_folder_count_vector_is_stored(api: Api, count: Any):
+    r = await put_status(api, "bob", {**STATUS, "folder_count": count})
+    assert r.status_code == 200, r.text
+    assert r.json()["folder_count"] == count
+    stored = (await api.store.get_member_statuses(api.team, ["bob"]))["bob"].status
+    assert type(stored["folder_count"]) is int and stored["folder_count"] == count
+    assert (await members_status(api, "alice"))["members"][1]["folder_count"] == count
+
+
+@pytest.mark.parametrize("count", FOLDER_COUNTS["invalid"], ids=repr)
+async def test_every_invalid_folder_count_vector_is_400(api: Api, count: Any):
+    r = await put_status(api, "bob", {**STATUS, "folder_count": count})
+    assert (r.status_code, r.json()["error"]) == (400, "invalid_body"), r.text
+    assert r.json()["detail"].startswith("folder_count: ")
+    assert await api.store.get_member_statuses(api.team, ["bob"]) == {}
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"folders": {"repo_roots": 2, "clones": 37, "extra_folders": 0}},
+        {"drive": {"connected": True}},
+        {"sources": {"boundaries_version": 1, "missing": []}},
+    ],
+)
+async def test_an_older_plugins_body_is_400_unknown_field(api: Api, extra: dict[str, Any]):
+    r = await put_status(api, "bob", {**STATUS, **extra})
+    assert (r.status_code, r.json()["error"]) == (400, "invalid_body"), r.text
+    assert r.json()["detail"].endswith("unknown field")
+    # The whole older body (no count): refused too.
+    r = await put_status(api, "bob", OLD_STATUS)
+    assert (r.status_code, r.json()["error"]) == (400, "invalid_body"), r.text
+    assert await api.store.get_member_statuses(api.team, ["bob"]) == {}
 
 
 async def test_the_status_carries_the_accepted_and_current_versions(api: Api):
@@ -722,10 +859,8 @@ def _without(path: str) -> dict[str, Any]:
 VALID_EDGES = [
     _with("daemon.version", ""),
     _with("daemon.version", "v" * 32),
-    _with("folders.repo_roots", 64),
-    _with("folders.clones", 10000),
-    _with("folders.extra_folders", 64),
-    _with("folders.repo_roots", 0),
+    _with("folder_count", 0),
+    _with("folder_count", 20),
     _with("self_test.reason", "r" * 200),
     _with("self_test.reason", "claude auth status failed\nexit 1"),
     _with("self_test.ok", False),
@@ -754,26 +889,26 @@ INVALID = [
     _with("claude.found", 1),
     _with("claude.signed_in", "true"),
     _with("claude.signed_in", None),
-    _with("folders.repo_roots", 65),
-    _with("folders.repo_roots", -1),
-    _with("folders.repo_roots", True),
-    _with("folders.repo_roots", 2.0),
-    _with("folders.clones", 10001),
-    _with("folders.extra_folders", 65),
-    _with("drive.connected", "yes"),
+    _with("folder_count", 21),
+    _with("folder_count", -1),
+    _with("folder_count", True),
+    _with("folder_count", 2.0),
+    _with("folder_count", "5"),
+    _with("folder_count", None),
+    _with("folder_count", [5]),
     _with("self_test.ok", None),
     _with("self_test.at", "now"),
     _with("self_test.reason", "r" * 201),
     _with("self_test.reason", "bell\x07"),
     _with("self_test.reason", 3),
     _with("daemon.path", "/Users/someone"),  # e1-guard: allow (synthetic test path)
-    _with("folders.names", ["code"]),
+    _with("folders", ["code"]),
+    _with("drive", {"connected": True}),
     _with("question", "What is the deploy log?"),
     _without("daemon"),
     _without("daemon.started_at"),
     _without("claude.signed_in"),
-    _without("folders.clones"),
-    _without("drive.connected"),
+    _without("folder_count"),
     _without("self_test.reason"),
     _with("seen_at", "2026-09-23T12:00:00Z"),
 ]

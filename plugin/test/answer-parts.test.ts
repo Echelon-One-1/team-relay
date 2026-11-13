@@ -171,7 +171,7 @@ describe('boundary mode: the child (M10-SPEC §3)', () => {
     const s = childSettings({ scope: scopeOk, boundaries: true, denyFiles: [], denyDirs: ['/tmp/trh-x'], readTrailHook: { node: '/n', script: '/d/read-trail.js', config: '/r/rt.json' } }) as {
       permissions: { allow: string[]; deny: string[] };
     };
-    expect(s.permissions.allow).toEqual(['mcp__host__reply', 'mcp__host__list_files', 'mcp__host__search_files', 'mcp__host__read_google_file']);
+    expect(s.permissions.allow).toEqual(['mcp__host__reply', 'mcp__host__list_files', 'mcp__host__search_files']);
     expect(s.permissions.deny.slice(0, 10)).toEqual([...CHILD_DISALLOWED_LIST, 'Glob', 'Grep']);
     expect(s.permissions.deny).toContain('Read(//tmp/trh-x/**)');
   });
@@ -179,7 +179,7 @@ describe('boundary mode: the child (M10-SPEC §3)', () => {
   it('the host server is told to list the boundary tools', () => {
     const cfg = childMcpConfig({ node: '/n', answerTools: '/d/answer-tools.js', socket: '/s', token: 't', boundaries: true }) as { mcpServers: { host: { env: Record<string, string> } } };
     expect(cfg.mcpServers.host.env).toEqual({ TEAM_RELAY_HOST_SOCKET: '/s', TEAM_RELAY_HOST_TOKEN: 't', TEAM_RELAY_HOST_MODE: 'boundaries' });
-    expect(toolsFor('boundaries').map((t) => t.name)).toEqual(['reply', 'list_files', 'search_files', 'read_google_file', 'permission']);
+    expect(toolsFor('boundaries').map((t) => t.name)).toEqual(['reply', 'list_files', 'search_files', 'permission']);
     expect(toolsFor(undefined)).toBe(ANSWER_TOOLS);
     const reply = BOUNDARY_TOOLS[0].inputSchema.properties as Record<string, unknown>;
     expect(Object.keys(reply)).toEqual(['text', 'data', 'off_topic']);

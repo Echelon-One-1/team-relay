@@ -4,17 +4,13 @@
 //
 //   list_files(area?, glob?)                          paths in the set (absolute, for Read)
 //   search_files(pattern, area?, glob?, max_results?) lines matching an RE2 pattern
-//   read_google_file(path)                            a Google Doc/Sheet/Slides link file in an allowed shared drive or
-//                                                     picked Drive folder, exported
 //
 // Every file is checked again before it is opened (its canonical path must still be itself and
-// in the set) and opened as a Read snapshot opens it (snapshot.ts openAllowed), searches are capped in results, bytes and time, and a matching line, like an
-// exported Google file, that the secret screen flags is withheld.
+// in the set) and opened as a Read snapshot opens it (snapshot.ts openAllowed), searches are capped in results, bytes and time, and a matching line that the secret screen
+// flags is withheld.
 
-import { join } from 'node:path';
 import { RE2JS } from 're2js';
-import { areaRelative, canonical, inSet, isGoogleLinkName, type AllowedSet, type Area, type DenyCtx } from './boundary-set.js';
-import { isGoogleLinkFile, readGoogleFile, type GoogleFileArea, type ReadGoogleFileDeps } from './google-drive.js';
+import { areaRelative, canonical, type AllowedSet, type Area, type DenyCtx } from './boundary-set.js';
 import { screenSecrets } from './secret-screen.js';
 import { openAllowed, readCapped } from './snapshot.js';
 
@@ -39,8 +35,8 @@ function areaList(set: AllowedSet) {
 function pickAreas(set: AllowedSet, area: unknown): Area[] | string {
   if (area === undefined || area === null || area === '') return set.areas;
   if (typeof area !== 'string' || area.length > 300) return 'area must be one of the area names list_files shows';
-  // A name, the name without its kind, or (for a repository) the repository's own name.
-  const found = set.areas.filter((a) => a.name === area || a.name.replace(/^[a-z]+:/, '') === area || (a.repo !== undefined && a.repo.repo === area));
+  // A name, or the name without its kind.
+  const found = set.areas.filter((a) => a.name === area || a.name.replace(/^[a-z]+:/, '') === area);
   if (found.length === 0) return `there is no area ${JSON.stringify(area.slice(0, 100))}; the areas are: ${set.areas.map((a) => a.name).join(', ') || '(none)'}`;
   return found;
 }
@@ -176,7 +172,6 @@ export async function searchFiles(set: AllowedSet, args: Record<string, unknown>
       stopped = 'stopped: too much text searched; narrow it with area or glob';
       break;
     }
-    if (isGoogleLinkName(path)) continue; // read those with read_google_file
     const text = await readInSet(set, path, budget, opts);
     if (text === null) {
       skipped++;
@@ -195,53 +190,4 @@ export async function searchFiles(set: AllowedSet, args: Record<string, unknown>
     ok: true,
     result: { results, files_searched: searched, ...(skipped ? { files_skipped: skipped } : {}), ...(stopped ? { truncated: true, note: stopped } : {}) },
   };
-}
-
-export type GoogleReader = (linkPath: string, area: GoogleFileArea, deps: ReadGoogleFileDeps) => ReturnType<typeof readGoogleFile>;
-
-/**
- * What read_google_file is told about the file's area: a legacy drive by name, or (PICKERS-SPEC
- * §6.2) a picked folder's root and the drive id read locally from its shared drive root.
- */
-function googleArea(area: Area): GoogleFileArea | null {
-  if (area.kind !== 'drive') return null;
-  if (area.folder) return { domain: area.folder.domain, root: area.root, drive_root_id: area.folder.drive_root_id, folder_id: area.folder.folder_id };
-  if (area.drive) return { domain: area.drive.domain, shared_drive: area.drive.shared_drive };
-  return null;
-}
-
-export async function readGoogle(
-  set: AllowedSet,
-  args: Record<string, unknown>,
-  ctx: DenyCtx,
-  deps: ReadGoogleFileDeps & { home: string; cwd: string; reader?: GoogleReader },
-): Promise<ToolOutcome> {
-  const raw = args.path;
-  if (typeof raw !== 'string' || raw.length === 0 || raw.length > 4096) return { ok: false, message: 'path must be the absolute path of a .gdoc, .gsheet or .gslides file from list_files' };
-  const given = raw.startsWith('/') ? raw : join(deps.cwd, raw);
-  if (!isGoogleLinkFile(given)) return { ok: false, message: 'read_google_file reads only Google Docs, Sheets and Slides (.gdoc, .gsheet, .gslides); use Read for other files' };
-  const real = await inSet(set, given, ctx);
-  const area = real ? set.files.get(real) : undefined;
-  const target = area ? googleArea(area) : null;
-  if (!real || !target) {
-    return { ok: false, message: "That file is outside the team's shared drive, so it cannot be read." };
-  }
-  const { reader, home: _home, cwd: _cwd, ...rest } = deps;
-  const res = await (reader ?? readGoogleFile)(real, target, {
-    cloudStorageRoot: join(deps.home, 'Library', 'CloudStorage'),
-    ...rest,
-  });
-  if (!res.ok) return { ok: false, message: `This Google file cannot be read (${res.reason}). Answer without it, and say so.` };
-  // M10-SPEC §2a: the exported text goes through the secret screen too, line by line (a
-  // flagged line is withheld; the draft is screened again as a whole).
-  let withheld = 0;
-  const text = res.text
-    .split('\n')
-    .map((line) => {
-      if (!screenSecrets(line).length) return line;
-      withheld++;
-      return WITHHELD_LINE;
-    })
-    .join('\n');
-  return { ok: true, result: { path: real, mime: res.mime, truncated: res.truncated, ...(withheld ? { lines_withheld: withheld } : {}), text } };
 }

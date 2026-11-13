@@ -11,24 +11,12 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
   if (typeof require !== "undefined") return require.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
-var __esm = (fn, res, err) => function __init() {
-  if (err) throw err[0];
-  try {
-    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
-  } catch (e) {
-    throw err = [e], e;
-  }
-};
 var __commonJS = (cb, mod) => function __require2() {
   try {
     return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
   } catch (e) {
     throw mod = 0, e;
   }
-};
-var __export = (target, all) => {
-  for (var name in all)
-    __defProp(target, name, { get: all[name], enumerable: true });
 };
 var __copyProps = (to, from, except, desc) => {
   if (from && typeof from === "object" || typeof from === "function") {
@@ -46,837 +34,6 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
-
-// src/relay-client-core.ts
-function parseRelayUrl(raw) {
-  if (!raw) throw new Error("RELAY_URL must be set");
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error("RELAY_URL is not a valid URL");
-  }
-  if (url.username || url.password) throw new Error("RELAY_URL must not carry credentials");
-  if (url.search || url.hash) throw new Error("RELAY_URL must not carry a query or fragment");
-  if (url.protocol === "https:") return url;
-  if (url.protocol === "http:" && LOOPBACK.has(url.hostname)) return url;
-  throw new Error("RELAY_URL must be https (plain http is allowed only to localhost)");
-}
-var TEAM_RE, MEMBER_RE, LOOPBACK;
-var init_relay_client_core = __esm({
-  "src/relay-client-core.ts"() {
-    "use strict";
-    TEAM_RE = /^[a-z][a-z0-9_-]{1,31}$/;
-    MEMBER_RE = /^[a-z][a-z0-9_]{1,31}$/;
-    LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
-  }
-});
-
-// src/credentials.ts
-import {
-  chmodSync,
-  closeSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  unlinkSync,
-  writeSync
-} from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
-function credentialsPath(env2 = process.env) {
-  const explicit = env2.RELAY_CREDENTIALS_FILE?.trim();
-  if (explicit) {
-    if (!isAbsolute(explicit)) throw new CredentialFileError("RELAY_CREDENTIALS_FILE must be an absolute path");
-    return explicit;
-  }
-  const xdg = env2.XDG_CONFIG_HOME?.trim();
-  const base = xdg && isAbsolute(xdg) ? xdg : join(env2.HOME?.trim() || homedir(), ".config");
-  return join(base, CREDENTIALS_DIR, CREDENTIALS_FILE);
-}
-function uid() {
-  return typeof process.getuid === "function" ? process.getuid() : null;
-}
-function checkOwnedPrivate(st, what, kind) {
-  if (st.isSymbolicLink()) throw new CredentialFileError(`${what} is a symbolic link; refusing to use it`);
-  if (kind === "file" ? !st.isFile() : !st.isDirectory()) throw new CredentialFileError(`${what} is not a ${kind}; refusing to use it`);
-  const me = uid();
-  if (me !== null && st.uid !== me) throw new CredentialFileError(`${what} is owned by another user; refusing to use it`);
-  if ((st.mode & 63) !== 0) {
-    const mode = (st.mode & 511).toString(8).padStart(3, "0");
-    throw new CredentialFileError(
-      `${what} has mode ${mode}, readable or writable by others; refusing to use it (run /team-relay:logout and /team-relay:login again, or chmod ${kind === "file" ? "600" : "700"} it)`
-    );
-  }
-}
-function normaliseRelayUrl(raw) {
-  const url = parseRelayUrl(raw);
-  const path = url.pathname.replace(/\/+$/, "");
-  return `${url.protocol}//${url.host}${path}`;
-}
-function parseStoredCredential(raw) {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new CredentialFileError("the credential file is not a JSON object");
-  const c = raw;
-  const { relay_url, team, member, credential, expires_at, email } = c;
-  if (typeof relay_url !== "string") throw new CredentialFileError("the credential file has no relay_url");
-  let url;
-  try {
-    url = normaliseRelayUrl(relay_url);
-  } catch {
-    throw new CredentialFileError("the credential file has an invalid relay_url");
-  }
-  if (typeof team !== "string" || !TEAM_RE.test(team)) throw new CredentialFileError("the credential file has an invalid team");
-  if (typeof member !== "string" || !MEMBER_RE.test(member)) throw new CredentialFileError("the credential file has an invalid member");
-  if (typeof credential !== "string" || !CREDENTIAL_RE.test(credential)) throw new CredentialFileError("the credential file has an invalid credential");
-  if (expires_at !== void 0 && expires_at !== null && (typeof expires_at !== "string" || !RFC3339.test(expires_at))) {
-    throw new CredentialFileError("the credential file has an invalid expires_at");
-  }
-  if (email !== void 0 && email !== null && (typeof email !== "string" || email.length > 254 || !EMAIL_RE.test(email))) {
-    throw new CredentialFileError("the credential file has an invalid email");
-  }
-  return {
-    relay_url: url,
-    team,
-    member,
-    credential,
-    expires_at: typeof expires_at === "string" ? expires_at : null,
-    ...typeof email === "string" ? { email } : {}
-  };
-}
-function readCredential(path) {
-  let st;
-  try {
-    st = lstatSync(path);
-  } catch (err) {
-    if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
-    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
-  }
-  checkOwnedPrivate(lstatSync(dirname(path)), "the credential directory", "directory");
-  checkOwnedPrivate(st, "the credential file", "file");
-  if (st.size > MAX_FILE_BYTES) throw new CredentialFileError("the credential file is too large");
-  let text;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (err) {
-    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
-  }
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new CredentialFileError("the credential file is not valid JSON");
-  }
-  return parseStoredCredential(json);
-}
-function credentialFileExists(path) {
-  try {
-    lstatSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function credentialFingerprint(path) {
-  try {
-    const st = lstatSync(path);
-    return `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}`;
-  } catch {
-    return null;
-  }
-}
-var CREDENTIAL_RE, EMAIL_RE, CREDENTIALS_DIR, CREDENTIALS_FILE, MAX_FILE_BYTES, CredentialFileError, RFC3339;
-var init_credentials = __esm({
-  "src/credentials.ts"() {
-    "use strict";
-    init_relay_client_core();
-    CREDENTIAL_RE = /^trc_[A-Za-z0-9_-]{43}$/;
-    EMAIL_RE = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})+$/;
-    CREDENTIALS_DIR = "team-relay";
-    CREDENTIALS_FILE = "credentials.json";
-    MAX_FILE_BYTES = 16 * 1024;
-    CredentialFileError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "CredentialFileError";
-      }
-    };
-    RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
-  }
-});
-
-// src/relay-default.ts
-import { readFileSync as readFileSync2 } from "node:fs";
-import { fileURLToPath } from "node:url";
-function defaultRelayFile() {
-  return fileURLToPath(new URL("../relay.default.json", import.meta.url));
-}
-function defaultRelayUrl(file2 = defaultRelayFile()) {
-  try {
-    const raw = JSON.parse(readFileSync2(file2, "utf8"));
-    if (typeof raw.relay_url !== "string") return null;
-    parseRelayUrl(raw.relay_url);
-    return raw.relay_url;
-  } catch {
-    return null;
-  }
-}
-var init_relay_default = __esm({
-  "src/relay-default.ts"() {
-    "use strict";
-    init_relay_client_core();
-  }
-});
-
-// src/relay-client.ts
-var relay_client_exports = {};
-__export(relay_client_exports, {
-  CLIENT_IP_HASH_RE: () => CLIENT_IP_HASH_RE,
-  DEFAULT_BACKOFF: () => DEFAULT_BACKOFF,
-  GCLOUD_AUDIENCE: () => GCLOUD_AUDIENCE,
-  MEMBER_RE: () => MEMBER_RE,
-  MESSAGE_ID_RE: () => MESSAGE_ID_RE,
-  METADATA_BASE: () => METADATA_BASE,
-  NotConnected: () => NotConnected,
-  REQUEST_ID_RE: () => REQUEST_ID_RE,
-  RETRY_AFTER_MAX_S: () => RETRY_AFTER_MAX_S,
-  RelayClient: () => RelayClient,
-  RelayError: () => RelayError,
-  RelayNetworkError: () => RelayNetworkError,
-  SIGN_IN_AGAIN: () => SIGN_IN_AGAIN,
-  TEAM_RE: () => TEAM_RE,
-  TOKEN_REFRESH_MARGIN_MS: () => TOKEN_REFRESH_MARGIN_MS,
-  authModeFromEnv: () => authModeFromEnv,
-  backoffDelay: () => backoffDelay,
-  checkGcloudAccount: () => checkGcloudAccount,
-  configValue: () => configValue,
-  connectionFromEnv: () => connectionFromEnv,
-  credentialTokenProvider: () => credentialTokenProvider,
-  credentialsFromEnv: () => credentialsFromEnv,
-  gcloudTokenProvider: () => gcloudTokenProvider,
-  isCredentialProvider: () => isCredentialProvider,
-  isRetryable: () => isRetryable,
-  jwtExpiryMs: () => jwtExpiryMs,
-  metadataTokenProvider: () => metadataTokenProvider,
-  parseRelayUrl: () => parseRelayUrl,
-  parseRetryAfter: () => parseRetryAfter,
-  relayClientFromEnv: () => relayClientFromEnv,
-  staticTokenProvider: () => staticTokenProvider,
-  tokenProviderFromEnv: () => tokenProviderFromEnv
-});
-import { execFile } from "node:child_process";
-import { readFileSync as readFileSync3 } from "node:fs";
-function parseRetryAfter(v) {
-  const t = v?.trim();
-  if (!t || !/^[0-9]{1,10}$/.test(t)) return void 0;
-  return Math.min(RETRY_AFTER_MAX_S, Number(t));
-}
-function isRetryable(err) {
-  if (err instanceof RelayNetworkError) return true;
-  if (err instanceof RelayError) return err.status >= 500 || err.status === 429;
-  return false;
-}
-function backoffDelay(attempt, b = DEFAULT_BACKOFF, random = Math.random) {
-  const exp = Math.min(b.maxMs, b.baseMs * 2 ** Math.min(attempt, 30));
-  return Math.round(exp / 2 + random() * (exp / 2));
-}
-function configValue(v) {
-  if (v === void 0) return void 0;
-  const t = v.trim();
-  if (!t || /^\$\{user_config\.[A-Za-z0-9_]+\}$/.test(t)) return void 0;
-  return t;
-}
-function staticTokenProvider(read) {
-  return Object.assign(typeof read === "string" ? () => read : read, { kind: "static" });
-}
-function tokenProviderFromEnv(env2) {
-  const file2 = configValue(env2.RELAY_TOKEN_FILE);
-  if (file2) {
-    return staticTokenProvider(() => {
-      let raw;
-      try {
-        raw = readFileSync3(file2, "utf8");
-      } catch (err) {
-        throw new Error(`cannot read RELAY_TOKEN_FILE (${err.code ?? "error"})`);
-      }
-      const token2 = raw.replace(/[\r\n]+$/, "");
-      if (!token2) throw new Error("RELAY_TOKEN_FILE is empty");
-      return token2;
-    });
-  }
-  const token = configValue(env2.RELAY_TOKEN);
-  if (!token) throw new Error('RELAY_AUTH is "token", so RELAY_TOKEN or RELAY_TOKEN_FILE must be set');
-  return staticTokenProvider(token);
-}
-function checkGcloudAccount(account) {
-  if (account.length > 254 || !ACCOUNT_RE.test(account)) {
-    throw new Error("RELAY_GCLOUD_ACCOUNT must be an account email address");
-  }
-  return account;
-}
-function jwtExpiryMs(token) {
-  const payload = token.split(".")[1];
-  if (!payload) return null;
-  try {
-    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return typeof claims.exp === "number" && Number.isFinite(claims.exp) ? claims.exp * 1e3 : null;
-  } catch {
-    return null;
-  }
-}
-function scrub(text) {
-  return text.replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/ya29\.[A-Za-z0-9_.-]+/g, "[redacted]").replace(/[\x00-\x1f\x7f]+/g, " ").trim().slice(0, 200);
-}
-function gcloudTokenProvider(opts = {}) {
-  const now = opts.now ?? Date.now;
-  const env2 = opts.env ?? process.env;
-  const timeoutMs = opts.timeoutMs ?? 3e4;
-  const args = ["auth", "print-identity-token"];
-  if (opts.account !== void 0) args.push(`--account=${checkGcloudAccount(opts.account)}`);
-  let cached = null;
-  let inflight = null;
-  const mint = () => new Promise((resolve, reject) => {
-    execFile(
-      "gcloud",
-      args,
-      { env: env2, timeout: timeoutMs, maxBuffer: GCLOUD_OUTPUT_LIMIT, shell: false, windowsHide: true, encoding: "utf8" },
-      (err, stdout, stderr) => {
-        if (err) {
-          const e = err;
-          if (e.code === "ENOENT") return reject(new Error("gcloud was not found on PATH (RELAY_AUTH=google needs the Google Cloud CLI)"));
-          if (e.killed) return reject(new Error("gcloud auth print-identity-token timed out"));
-          const why = scrub(String(stderr ?? "").split("\n").find((l) => l.trim()) ?? "");
-          return reject(new Error(`gcloud auth print-identity-token failed${why ? `: ${why}` : ""}`));
-        }
-        const token = String(stdout).trim();
-        if (!JWT_RE.test(token)) return reject(new Error("gcloud auth print-identity-token did not print an ID token"));
-        resolve(token);
-      }
-    );
-  });
-  const provider = Object.assign(async () => {
-    if (cached && now() < cached.until) return cached.token;
-    inflight ??= mint().then((token) => {
-      const exp = jwtExpiryMs(token);
-      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
-      return token;
-    }).finally(() => {
-      inflight = null;
-    });
-    return inflight;
-  }, {
-    invalidate: () => {
-      cached = null;
-    }
-  });
-  return provider;
-}
-function metadataTokenProvider(opts) {
-  const now = opts.now ?? Date.now;
-  const doFetch = opts.fetch ?? ((u, i) => fetch(u, i));
-  const timeoutMs = opts.timeoutMs ?? 5e3;
-  if (!opts.audience) throw new Error("RELAY_AUTH=metadata needs RELAY_URL as the token audience");
-  const url = new URL(METADATA_IDENTITY_PATH, opts.base ?? METADATA_BASE);
-  url.searchParams.set("audience", opts.audience);
-  url.searchParams.set("format", "full");
-  const target = url.toString();
-  let cached = null;
-  let inflight = null;
-  const mint = async () => {
-    let res;
-    try {
-      res = await doFetch(target, {
-        method: "GET",
-        headers: { "Metadata-Flavor": "Google" },
-        redirect: "error",
-        signal: AbortSignal.timeout(timeoutMs)
-      });
-    } catch {
-      throw new Error("the metadata server did not answer (RELAY_AUTH=metadata runs only on Google Cloud)");
-    }
-    const text = await res.text().catch(() => "");
-    if (!res.ok) throw new Error(`the metadata server refused an identity token (${res.status})`);
-    const token = text.trim();
-    if (token.length > METADATA_OUTPUT_LIMIT || !JWT_RE.test(token)) throw new Error("the metadata server did not return an ID token");
-    return token;
-  };
-  return Object.assign(async () => {
-    if (cached && now() < cached.until) return cached.token;
-    inflight ??= mint().then((token) => {
-      const exp = jwtExpiryMs(token);
-      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
-      return token;
-    }).finally(() => {
-      inflight = null;
-    });
-    return inflight;
-  }, {
-    invalidate: () => {
-      cached = null;
-    }
-  });
-}
-function authModeFromEnv(env2) {
-  const explicit = configValue(env2.RELAY_AUTH);
-  if (explicit === void 0) return credentialFileExists(credentialsPath(env2)) ? "credential" : "google";
-  if (explicit !== "credential" && explicit !== "google" && explicit !== "token" && explicit !== "metadata") {
-    throw new Error('RELAY_AUTH must be "credential", "google" or "token" (or "metadata" on Google Cloud)');
-  }
-  return explicit;
-}
-function credentialTokenProvider(path, bound) {
-  const relay = normaliseRelayUrl(bound.relay_url);
-  return Object.assign(
-    () => {
-      const stored = readCredential(path);
-      if (!stored) throw new NotConnected();
-      if (stored.relay_url !== relay || stored.team !== bound.team) {
-        throw new NotConnected("you signed in to another relay or team since this started: restart it");
-      }
-      return stored.credential;
-    },
-    { kind: "credential", path }
-  );
-}
-function isCredentialProvider(p) {
-  return p.kind === "credential";
-}
-function connectionFromEnv(env2, gcloud = {}) {
-  const explicitMode = configValue(env2.RELAY_AUTH) !== void 0;
-  const mode = authModeFromEnv(env2);
-  if (mode === "credential") {
-    const path = credentialsPath(env2);
-    const stored = readCredential(path);
-    if (!stored) throw new NotConnected();
-    const envUrl = configValue(env2.RELAY_URL);
-    if (envUrl !== void 0) {
-      let same = false;
-      try {
-        same = normaliseRelayUrl(envUrl) === stored.relay_url;
-      } catch {
-        same = false;
-      }
-      if (!same) {
-        throw new Error("RELAY_URL is not the relay you signed in to: unset it, or run /team-relay:logout and then /team-relay:login to sign in to it");
-      }
-    }
-    const envTeam = configValue(env2.RELAY_TEAM);
-    if (envTeam !== void 0 && envTeam !== stored.team) {
-      throw new Error("RELAY_TEAM is not the team you signed in to: unset it, or run /team-relay:login again");
-    }
-    return { mode, url: stored.relay_url, team: stored.team, member: stored.member, token: credentialTokenProvider(path, stored) };
-  }
-  const team = configValue(env2.RELAY_TEAM);
-  if (!team) {
-    if (!explicitMode) throw new NotConnected();
-    throw new Error("RELAY_TEAM must be set");
-  }
-  const url = configValue(env2.RELAY_URL) ?? (mode === "google" ? defaultRelayUrl() : null) ?? "";
-  let token;
-  if (mode === "token") token = tokenProviderFromEnv(env2);
-  else if (mode === "metadata") token = metadataTokenProvider({ audience: configValue(env2.RELAY_URL) ?? "" });
-  else {
-    const account = configValue(env2.RELAY_GCLOUD_ACCOUNT);
-    token = gcloudTokenProvider({ env: env2, ...gcloud, ...account !== void 0 ? { account } : {} });
-  }
-  return { mode, url, team, token };
-}
-function credentialsFromEnv(env2, gcloud = {}) {
-  const mode = authModeFromEnv(env2);
-  if (mode === "credential") return connectionFromEnv(env2, gcloud).token;
-  if (mode === "token") return tokenProviderFromEnv(env2);
-  if (mode === "metadata") return metadataTokenProvider({ audience: configValue(env2.RELAY_URL) ?? "" });
-  const account = configValue(env2.RELAY_GCLOUD_ACCOUNT);
-  return gcloudTokenProvider({ env: env2, ...gcloud, ...account !== void 0 ? { account } : {} });
-}
-function relayClientFromEnv(env2, extra = {}) {
-  const c = connectionFromEnv(env2);
-  return new RelayClient({ url: c.url, team: c.team, token: c.token, ...extra });
-}
-var REQUEST_ID_RE, MESSAGE_ID_RE, RelayError, RETRY_AFTER_MAX_S, RelayNetworkError, DEFAULT_BACKOFF, GCLOUD_AUDIENCE, TOKEN_REFRESH_MARGIN_MS, JWT_RE, ACCOUNT_RE, GCLOUD_OUTPUT_LIMIT, METADATA_BASE, METADATA_IDENTITY_PATH, METADATA_OUTPUT_LIMIT, NotConnected, SIGN_IN_AGAIN, CLIENT_IP_HASH_RE, ON_BEHALF_OF_RE, defaultSleep, RelayClient;
-var init_relay_client = __esm({
-  "src/relay-client.ts"() {
-    "use strict";
-    init_credentials();
-    init_relay_client_core();
-    init_relay_default();
-    REQUEST_ID_RE = /^rq_[0-9a-f]{32}$/;
-    MESSAGE_ID_RE = /^msg_[0-9a-f]{32}$/;
-    RelayError = class extends Error {
-      status;
-      code;
-      detail;
-      /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
-      retryAfter;
-      constructor(status, code, detail, retryAfter) {
-        super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
-        this.name = "RelayError";
-        this.status = status;
-        this.code = code;
-        this.detail = detail;
-        this.retryAfter = retryAfter;
-      }
-    };
-    RETRY_AFTER_MAX_S = 3600;
-    RelayNetworkError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "RelayNetworkError";
-      }
-    };
-    DEFAULT_BACKOFF = { baseMs: 1e3, maxMs: 3e4 };
-    GCLOUD_AUDIENCE = "32555940559.apps.googleusercontent.com";
-    TOKEN_REFRESH_MARGIN_MS = 5 * 6e4;
-    JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
-    ACCOUNT_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
-    GCLOUD_OUTPUT_LIMIT = 64 * 1024;
-    METADATA_BASE = "http://metadata.google.internal";
-    METADATA_IDENTITY_PATH = "/computeMetadata/v1/instance/service-accounts/default/identity";
-    METADATA_OUTPUT_LIMIT = 16 * 1024;
-    NotConnected = class extends Error {
-      constructor(message = "Not connected: run /team-relay:login") {
-        super(message);
-        this.name = "NotConnected";
-      }
-    };
-    SIGN_IN_AGAIN = "the relay refused your sign-in (signed out, expired, or no longer on the team): run /team-relay:login again";
-    CLIENT_IP_HASH_RE = /^[0-9a-f]{64}$/;
-    ON_BEHALF_OF_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,253}$/;
-    defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    RelayClient = class _RelayClient {
-      team;
-      opts;
-      base;
-      token;
-      backoff;
-      attempts;
-      timeoutMs;
-      sleep;
-      random;
-      userAgent;
-      constructor(opts) {
-        if (!TEAM_RE.test(opts.team)) throw new Error("RELAY_TEAM is not a valid team id");
-        this.opts = opts;
-        this.team = opts.team;
-        const base = parseRelayUrl(opts.url);
-        if (!base.pathname.endsWith("/")) base.pathname += "/";
-        this.base = base;
-        this.token = opts.token;
-        this.backoff = opts.backoff ?? DEFAULT_BACKOFF;
-        this.attempts = Math.max(1, opts.attempts ?? 4);
-        this.timeoutMs = opts.timeoutMs ?? 3e4;
-        this.sleep = opts.sleep ?? defaultSleep;
-        this.random = opts.random ?? Math.random;
-        this.userAgent = opts.userAgent ?? "team-relay-plugin/0.1.0";
-      }
-      /**
-       * The same relay, sign-in and settings for another team (M9-SPEC §5: the hosted console's
-       * delegate reads any team its viewer is on). The team id is checked like RELAY_TEAM.
-       */
-      withTeam(team) {
-        if (team === this.team) return this;
-        return new _RelayClient({ ...this.opts, team });
-      }
-      /**
-       * True when this client signs in with a stored device credential or a static token, which
-       * are bound to one team (no Google identity for the account routes).
-       */
-      get boundToTeam() {
-        return isCredentialProvider(this.token) || this.token.kind === "static";
-      }
-      /** The relay's base URL (without a trailing slash). */
-      get url() {
-        return this.base.toString().replace(/\/$/, "");
-      }
-      teamPath(...parts) {
-        return ["v1", "teams", this.team, ...parts].map(encodeURIComponent).join("/");
-      }
-      async once(method, path, body, timeoutMs, signal, onBehalfOf, clientIpHash) {
-        const url = new URL(path, this.base);
-        const headers = {
-          Accept: "application/json",
-          Authorization: `Bearer ${await this.token()}`,
-          "User-Agent": this.userAgent
-        };
-        if (onBehalfOf !== void 0) {
-          if (!ON_BEHALF_OF_RE.test(onBehalfOf)) throw new Error("X-Relay-On-Behalf-Of must be a lower-case email address");
-          headers["X-Relay-On-Behalf-Of"] = onBehalfOf;
-        }
-        if (clientIpHash !== void 0) {
-          if (!CLIENT_IP_HASH_RE.test(clientIpHash)) throw new Error("X-Relay-Client-IP-Hash must be 64 lower-case hex characters");
-          headers["X-Relay-Client-IP-Hash"] = clientIpHash;
-        }
-        let payload;
-        if (body !== void 0) {
-          headers["Content-Type"] = "application/json";
-          payload = JSON.stringify(body);
-        }
-        const timeout = AbortSignal.timeout(timeoutMs);
-        const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-        let res;
-        try {
-          res = await fetch(url, { method, headers, body: payload, signal: combined, redirect: "error" });
-        } catch (err) {
-          if (signal?.aborted) throw err;
-          const e = err;
-          const why = e.cause?.code ?? e.cause?.message ?? (e.name === "TimeoutError" ? "timed out" : e.name);
-          throw new RelayNetworkError(`relay unreachable (${String(why).slice(0, 120)})`);
-        }
-        let text;
-        try {
-          text = await res.text();
-        } catch {
-          throw new RelayNetworkError("relay response was cut off");
-        }
-        let json = void 0;
-        if (text) {
-          try {
-            json = JSON.parse(text);
-          } catch {
-            if (res.ok) throw new RelayNetworkError(`relay answered ${res.status} with a body that is not JSON`);
-          }
-        }
-        if (!res.ok) {
-          const obj = json && typeof json === "object" ? json : {};
-          const code = typeof obj.error === "string" ? obj.error : `http_${res.status}`;
-          const detail = typeof obj.detail === "string" ? obj.detail.slice(0, 500) : "";
-          throw new RelayError(res.status, code, detail, parseRetryAfter(res.headers.get("retry-after")));
-        }
-        return json;
-      }
-      /**
-       * One call with retry and exponential backoff on network errors, 5xx and 429. A 401 with
-       * a refreshable identity drops the cached token and retries once at once (M2-SPEC §2).
-       */
-      async call(method, path, body, opts = {}) {
-        const attempts = Math.max(1, opts.attempts ?? this.attempts);
-        const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
-        let refreshed = false;
-        for (let attempt = 0; ; ) {
-          try {
-            return await this.once(method, path, body, timeoutMs, opts.signal, opts.onBehalfOf, opts.clientIpHash);
-          } catch (err) {
-            if (opts.signal?.aborted) throw err;
-            if (err instanceof RelayError && err.status === 401 && !refreshed && this.token.invalidate) {
-              refreshed = true;
-              this.token.invalidate();
-              continue;
-            }
-            if (err instanceof RelayError && err.status === 401 && isCredentialProvider(this.token)) {
-              throw new RelayError(401, err.code, SIGN_IN_AGAIN);
-            }
-            if (attempt + 1 >= attempts || !isRetryable(err)) throw err;
-            await this.sleep(backoffDelay(attempt, this.backoff, this.random));
-            attempt++;
-          }
-        }
-      }
-      me(opts) {
-        return this.call("GET", this.teamPath("me"), void 0, opts);
-      }
-      publishManifest(member, manifest, opts) {
-        if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
-        return this.call(
-          "PUT",
-          this.teamPath("members", member, "manifest"),
-          manifest,
-          opts
-        );
-      }
-      directory(opts) {
-        return this.call("GET", this.teamPath("directory"), void 0, opts);
-      }
-      /**
-       * M7-SPEC §1: what waits in this member's inbox for their answering session. A peek: it moves
-       * no cursor and writes no presence, so a session without the channel may read it too.
-       */
-      inboxSummary(opts) {
-        return this.call("GET", this.teamPath("inbox", "summary"), void 0, opts);
-      }
-      /** Safe to retry: the idempotency key makes a repeated POST return the original request. */
-      createRequest(body, opts) {
-        return this.call("POST", this.teamPath("requests"), body, opts);
-      }
-      readStream(stream, q = {}, opts) {
-        const params = new URLSearchParams();
-        if (q.after !== void 0) params.set("after", String(q.after));
-        if (q.wait !== void 0) params.set("wait", String(q.wait));
-        if (q.limit !== void 0) params.set("limit", String(q.limit));
-        const qs = params.toString();
-        const timeoutMs = opts?.timeoutMs ?? (q.wait ?? 0) * 1e3 + 2e4;
-        return this.call("GET", this.teamPath("streams", stream) + (qs ? `?${qs}` : ""), void 0, {
-          ...opts,
-          timeoutMs
-        });
-      }
-      ackCursor(stream, ackedSeq, opts) {
-        return this.call("POST", this.teamPath("streams", stream, "cursor"), { acked_seq: ackedSeq }, opts);
-      }
-      checkRequestId(id) {
-        if (!REQUEST_ID_RE.test(id)) throw new Error("request_id must look like rq_ followed by 32 lowercase hex characters");
-      }
-      ackRequest(requestId, opts) {
-        this.checkRequestId(requestId);
-        return this.call("POST", this.teamPath("requests", requestId, "ack"), {}, opts);
-      }
-      reply(requestId, body, opts) {
-        this.checkRequestId(requestId);
-        return this.call(
-          "POST",
-          this.teamPath("requests", requestId, "reply"),
-          body,
-          opts
-        );
-      }
-      /** Not idempotent (it appends), so it is sent once unless the caller asks otherwise. */
-      progress(requestId, body, opts) {
-        this.checkRequestId(requestId);
-        return this.call("POST", this.teamPath("requests", requestId, "progress"), body, {
-          attempts: 1,
-          ...opts
-        });
-      }
-      getRequest(requestId, opts) {
-        this.checkRequestId(requestId);
-        return this.call("GET", this.teamPath("requests", requestId), void 0, opts);
-      }
-      /** M2-SPEC §3.3: a tool's name, outcome and duration only. Appends, so it is sent once. */
-      toolEvent(requestId, body, opts) {
-        this.checkRequestId(requestId);
-        return this.call("POST", this.teamPath("requests", requestId, "events"), body, {
-          attempts: 1,
-          ...opts
-        });
-      }
-      /** M10-SPEC §1: the team's boundaries (any member). Never set: version 0, boundaries null. */
-      boundaries(opts) {
-        return this.call("GET", this.teamPath("boundaries"), void 0, opts);
-      }
-      /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
-      setBoundaries(body, opts) {
-        return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
-      }
-      /**
-       * PICKERS-SPEC §3.5 (owners): the GitHub App's install link and the Google Picker's public
-       * settings. Never a key or a token.
-       */
-      sourcesConfig(opts) {
-        return this.call("GET", this.teamPath("sources", "config"), void 0, opts);
-      }
-      /**
-       * PICKERS-SPEC §3.6 (owners): the repositories of the allowed orgs where the relay's GitHub App
-       * is installed. Not configured: 404 github_not_configured; GitHub's rate limit: 503
-       * github_rate_limited with a Retry-After (RelayError.retryAfter).
-       */
-      sourcesGithub(opts) {
-        return this.call("GET", this.teamPath("sources", "github"), void 0, opts);
-      }
-      /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
-      acceptance(opts) {
-        return this.call("GET", this.teamPath("me", "acceptance"), void 0, opts);
-      }
-      /** M11-SPEC §2: accept the current boundaries version (only for oneself). Sent once. */
-      setAcceptance(version2, opts) {
-        return this.call("PUT", this.teamPath("me", "acceptance"), { version: version2 }, { attempts: 1, ...opts });
-      }
-      /** M11-SPEC §3: the background answerer's status (the member itself only). Sent once. */
-      putStatus(body, opts) {
-        return this.call("PUT", this.teamPath("me", "status"), body, { attempts: 1, ...opts });
-      }
-      /** M11-SPEC §3: every member's setup progress and whether they are answering now. */
-      membersStatus(opts) {
-        return this.call("GET", this.teamPath("members", "status"), void 0, opts);
-      }
-      /** M11-SPEC §4: this member's recent requests, newest first. */
-      myRequests(limit = 20, opts) {
-        return this.call("GET", this.teamPath("me", "requests") + `?limit=${limit}`, void 0, opts);
-      }
-      /**
-       * M10-SPEC §2a: the Desktop OAuth client members use to connect Google Drive (read-only).
-       * An installed-app client is not confidential (Google's rule); it is served to members so it
-       * stays out of git. Not configured: 404 drive_not_configured.
-       */
-      driveClient(opts) {
-        return this.call("GET", this.teamPath("drive-client"), void 0, opts);
-      }
-      /** M6-SPEC §2: the team's roster (owners see every email; members only their own). */
-      roster(opts) {
-        return this.call("GET", this.teamPath("roster"), void 0, opts);
-      }
-      /** M6-SPEC §2 (owners): add a member. Not idempotent, so sent once. */
-      addMember(body, opts) {
-        return this.call("POST", this.teamPath("roster"), body, { attempts: 1, ...opts });
-      }
-      /** M6-SPEC §2 (owners): add or remove one email, or change the role. Sent once. */
-      updateMember(member, body, opts) {
-        if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
-        return this.call("PATCH", this.teamPath("roster", member), body, { attempts: 1, ...opts });
-      }
-      /** M6-SPEC §2 (owners): remove a member (their device credentials are revoked). Sent once. */
-      removeMember(member, opts) {
-        if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
-        return this.call("DELETE", this.teamPath("roster", member), void 0, { attempts: 1, ...opts });
-      }
-      /** M5-SPEC §3: revoke the credential this client signs in with (logout). */
-      revokeSelf(opts) {
-        return this.call("DELETE", this.teamPath("credentials", "self"), void 0, { attempts: 1, ...opts });
-      }
-      // M9-SPEC §2, §4, §7: the account routes. They take a Google identity (a Google ID token,
-      // or a delegate on behalf of an email); a device credential or a static token is refused
-      // with 403 google_identity_required. The mutations are sent once.
-      /** The teams (and invitations) of the signed-in Google account. */
-      myTeams(opts) {
-        return this.call("GET", "v1/me/teams", void 0, opts);
-      }
-      /** Create a team; the caller becomes its first owner. */
-      createTeam(body, opts) {
-        return this.call("POST", "v1/teams", body, { attempts: 1, ...opts });
-      }
-      /** Accept or decline an invitation to `team`. */
-      answerInvitation(team, accept, opts) {
-        if (!TEAM_RE.test(team)) throw new Error("invalid team id");
-        return this.call("POST", ["v1", "me", "invitations", team].map(encodeURIComponent).join("/"), { accept }, {
-          attempts: 1,
-          ...opts
-        });
-      }
-      /** An owner deletes this client's team (M9-SPEC §7.7); `confirm` is the team id typed again. */
-      deleteTeam(confirm, opts) {
-        return this.call("DELETE", ["v1", "teams", this.team].map(encodeURIComponent).join("/"), { confirm }, {
-          attempts: 1,
-          ...opts
-        });
-      }
-      /** Relay admins (M9-SPEC §4): every team, a page at a time. */
-      adminTeams(q = {}, opts) {
-        const params = new URLSearchParams();
-        if (q.after !== void 0) params.set("after", q.after);
-        if (q.limit !== void 0) params.set("limit", String(q.limit));
-        const qs = params.toString();
-        return this.call("GET", "v1/admin/teams" + (qs ? `?${qs}` : ""), void 0, opts);
-      }
-      /** Relay admins (M9-SPEC §4): delete a team; `confirm` is its id typed again. */
-      adminDeleteTeam(team, confirm, opts) {
-        if (!TEAM_RE.test(team)) throw new Error("invalid team id");
-        return this.call("DELETE", ["v1", "admin", "teams", team].map(encodeURIComponent).join("/"), { confirm }, {
-          attempts: 1,
-          ...opts
-        });
-      }
-      /** M2-SPEC §3.5: the team's activity feed. */
-      activity(q = {}, opts) {
-        const params = new URLSearchParams();
-        if (q.since !== void 0) params.set("since", q.since);
-        if (q.limit !== void 0) params.set("limit", String(q.limit));
-        const qs = params.toString();
-        return this.call("GET", this.teamPath("activity") + (qs ? `?${qs}` : ""), void 0, opts);
-      }
-    };
-  }
-});
 
 // node_modules/.pnpm/yaml@2.9.1/node_modules/yaml/dist/nodes/identity.js
 var require_identity = __commonJS({
@@ -4841,10 +3998,10 @@ var require_resolve_block_map = __commonJS({
       let offset = bm.offset;
       let commentEnd = null;
       for (const collItem of bm.items) {
-        const { start, key, sep: sep4, value } = collItem;
+        const { start, key, sep: sep2, value } = collItem;
         const keyProps = resolveProps.resolveProps(start, {
           indicator: "explicit-key-ind",
-          next: key ?? sep4?.[0],
+          next: key ?? sep2?.[0],
           offset,
           onError,
           parentIndent: bm.indent,
@@ -4858,7 +4015,7 @@ var require_resolve_block_map = __commonJS({
             else if ("indent" in key && key.indent !== bm.indent)
               onError(offset, "BAD_INDENT", startColMsg);
           }
-          if (!keyProps.anchor && !keyProps.tag && !sep4) {
+          if (!keyProps.anchor && !keyProps.tag && !sep2) {
             commentEnd = keyProps.end;
             if (keyProps.comment) {
               if (map.comment)
@@ -4882,7 +4039,7 @@ var require_resolve_block_map = __commonJS({
         ctx.atKey = false;
         if (utilMapIncludes.mapIncludes(ctx, map.items, keyNode))
           onError(keyStart, "DUPLICATE_KEY", "Map keys must be unique");
-        const valueProps = resolveProps.resolveProps(sep4 ?? [], {
+        const valueProps = resolveProps.resolveProps(sep2 ?? [], {
           indicator: "map-value-ind",
           next: value,
           offset: keyNode.range[2],
@@ -4898,7 +4055,7 @@ var require_resolve_block_map = __commonJS({
             if (ctx.options.strict && keyProps.start < valueProps.found.offset - 1024)
               onError(keyNode.range, "KEY_OVER_1024_CHARS", "The : indicator must be at most 1024 chars after the start of an implicit block mapping key");
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep4, null, valueProps, onError);
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : composeEmptyNode(ctx, offset, sep2, null, valueProps, onError);
           if (ctx.schema.compat)
             utilFlowIndentCheck.flowIndentCheck(bm.indent, value, onError);
           offset = valueNode.range[2];
@@ -4989,7 +4146,7 @@ var require_resolve_end = __commonJS({
       let comment = "";
       if (end) {
         let hasSpace = false;
-        let sep4 = "";
+        let sep2 = "";
         for (const token of end) {
           const { source, type } = token;
           switch (type) {
@@ -5003,13 +4160,13 @@ var require_resolve_end = __commonJS({
               if (!comment)
                 comment = cb;
               else
-                comment += sep4 + cb;
-              sep4 = "";
+                comment += sep2 + cb;
+              sep2 = "";
               break;
             }
             case "newline":
               if (comment)
-                sep4 += source;
+                sep2 += source;
               hasSpace = true;
               break;
             default:
@@ -5052,18 +4209,18 @@ var require_resolve_flow_collection = __commonJS({
       let offset = fc.offset + fc.start.source.length;
       for (let i = 0; i < fc.items.length; ++i) {
         const collItem = fc.items[i];
-        const { start, key, sep: sep4, value } = collItem;
+        const { start, key, sep: sep2, value } = collItem;
         const props = resolveProps.resolveProps(start, {
           flow: fcName,
           indicator: "explicit-key-ind",
-          next: key ?? sep4?.[0],
+          next: key ?? sep2?.[0],
           offset,
           onError,
           parentIndent: fc.indent,
           startOnNewline: false
         });
         if (!props.found) {
-          if (!props.anchor && !props.tag && !sep4 && !value) {
+          if (!props.anchor && !props.tag && !sep2 && !value) {
             if (i === 0 && props.comma)
               onError(props.comma, "UNEXPECTED_TOKEN", `Unexpected , in ${fcName}`);
             else if (i < fc.items.length - 1)
@@ -5117,8 +4274,8 @@ var require_resolve_flow_collection = __commonJS({
             }
           }
         }
-        if (!isMap && !sep4 && !props.found) {
-          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep4, null, props, onError);
+        if (!isMap && !sep2 && !props.found) {
+          const valueNode = value ? composeNode(ctx, value, props, onError) : composeEmptyNode(ctx, props.end, sep2, null, props, onError);
           coll.items.push(valueNode);
           offset = valueNode.range[2];
           if (isBlock(value))
@@ -5130,7 +4287,7 @@ var require_resolve_flow_collection = __commonJS({
           if (isBlock(key))
             onError(keyNode.range, "BLOCK_IN_FLOW", blockMsg);
           ctx.atKey = false;
-          const valueProps = resolveProps.resolveProps(sep4 ?? [], {
+          const valueProps = resolveProps.resolveProps(sep2 ?? [], {
             flow: fcName,
             indicator: "map-value-ind",
             next: value,
@@ -5141,8 +4298,8 @@ var require_resolve_flow_collection = __commonJS({
           });
           if (valueProps.found) {
             if (!isMap && !props.found && ctx.options.strict) {
-              if (sep4)
-                for (const st of sep4) {
+              if (sep2)
+                for (const st of sep2) {
                   if (st === valueProps.found)
                     break;
                   if (st.type === "newline") {
@@ -5159,7 +4316,7 @@ var require_resolve_flow_collection = __commonJS({
             else
               onError(valueProps.start, "MISSING_CHAR", `Missing , or : between ${fcName} items`);
           }
-          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep4, null, valueProps, onError) : null;
+          const valueNode = value ? composeNode(ctx, value, valueProps, onError) : valueProps.found ? composeEmptyNode(ctx, valueProps.end, sep2, null, valueProps, onError) : null;
           if (valueNode) {
             if (isBlock(value))
               onError(valueNode.range, "BLOCK_IN_FLOW", blockMsg);
@@ -5339,7 +4496,7 @@ var require_resolve_block_scalar = __commonJS({
           chompStart = i + 1;
       }
       let value = "";
-      let sep4 = "";
+      let sep2 = "";
       let prevMoreIndented = false;
       for (let i = 0; i < contentStart; ++i)
         value += lines[i][0].slice(trimIndent) + "\n";
@@ -5356,24 +4513,24 @@ var require_resolve_block_scalar = __commonJS({
           indent = "";
         }
         if (type === Scalar.Scalar.BLOCK_LITERAL) {
-          value += sep4 + indent.slice(trimIndent) + content;
-          sep4 = "\n";
+          value += sep2 + indent.slice(trimIndent) + content;
+          sep2 = "\n";
         } else if (indent.length > trimIndent || content[0] === "	") {
-          if (sep4 === " ")
-            sep4 = "\n";
-          else if (!prevMoreIndented && sep4 === "\n")
-            sep4 = "\n\n";
-          value += sep4 + indent.slice(trimIndent) + content;
-          sep4 = "\n";
+          if (sep2 === " ")
+            sep2 = "\n";
+          else if (!prevMoreIndented && sep2 === "\n")
+            sep2 = "\n\n";
+          value += sep2 + indent.slice(trimIndent) + content;
+          sep2 = "\n";
           prevMoreIndented = true;
         } else if (content === "") {
-          if (sep4 === "\n")
+          if (sep2 === "\n")
             value += "\n";
           else
-            sep4 = "\n";
+            sep2 = "\n";
         } else {
-          value += sep4 + content;
-          sep4 = " ";
+          value += sep2 + content;
+          sep2 = " ";
           prevMoreIndented = false;
         }
       }
@@ -5556,25 +4713,25 @@ var require_resolve_flow_scalar = __commonJS({
         trimBoth = /^[ \t]+|[ \t]+$/g;
       }
       let res = match[1].replace(trimEnd, "");
-      let sep4 = " ";
+      let sep2 = " ";
       let pos = line.lastIndex;
       while (match = line.exec(source)) {
         const lm = match[1].replace(trimBoth, "");
         if (lm === "") {
-          if (sep4 === "\n")
-            res += sep4;
+          if (sep2 === "\n")
+            res += sep2;
           else
-            sep4 = "\n";
+            sep2 = "\n";
         } else {
-          res += sep4 + lm;
-          sep4 = " ";
+          res += sep2 + lm;
+          sep2 = " ";
         }
         pos = line.lastIndex;
       }
       const last = /[ \t]*(.*)/sy;
       last.lastIndex = pos;
       match = last.exec(source);
-      return res + sep4 + (match?.[1] ?? "");
+      return res + sep2 + (match?.[1] ?? "");
     }
     function doubleQuotedValue(source, onError) {
       let res = "";
@@ -6384,14 +5541,14 @@ var require_cst_stringify = __commonJS({
         }
       }
     }
-    function stringifyItem({ start, key, sep: sep4, value }) {
+    function stringifyItem({ start, key, sep: sep2, value }) {
       let res = "";
       for (const st of start)
         res += st.source;
       if (key)
         res += stringifyToken(key);
-      if (sep4)
-        for (const st of sep4)
+      if (sep2)
+        for (const st of sep2)
           res += st.source;
       if (value)
         res += stringifyToken(value);
@@ -7558,18 +6715,18 @@ var require_parser = __commonJS({
         if (this.type === "map-value-ind") {
           const prev = getPrevProps(this.peek(2));
           const start = getFirstKeyStartProps(prev);
-          let sep4;
+          let sep2;
           if (scalar.end) {
-            sep4 = scalar.end;
-            sep4.push(this.sourceToken);
+            sep2 = scalar.end;
+            sep2.push(this.sourceToken);
             delete scalar.end;
           } else
-            sep4 = [this.sourceToken];
+            sep2 = [this.sourceToken];
           const map = {
             type: "block-map",
             offset: scalar.offset,
             indent: scalar.indent,
-            items: [{ start, key: scalar, sep: sep4 }]
+            items: [{ start, key: scalar, sep: sep2 }]
           };
           this.onKeyLine = true;
           this.stack[this.stack.length - 1] = map;
@@ -7722,15 +6879,15 @@ var require_parser = __commonJS({
                 } else if (isFlowToken(it.key) && !includesToken(it.sep, "newline")) {
                   const start2 = getFirstKeyStartProps(it.start);
                   const key = it.key;
-                  const sep4 = it.sep;
-                  sep4.push(this.sourceToken);
+                  const sep2 = it.sep;
+                  sep2.push(this.sourceToken);
                   delete it.key;
                   delete it.sep;
                   this.stack.push({
                     type: "block-map",
                     offset: this.offset,
                     indent: this.indent,
-                    items: [{ start: start2, key, sep: sep4 }]
+                    items: [{ start: start2, key, sep: sep2 }]
                   });
                 } else if (start.length > 0) {
                   it.sep = it.sep.concat(start, this.sourceToken);
@@ -7924,13 +7081,13 @@ var require_parser = __commonJS({
             const prev = getPrevProps(parent);
             const start = getFirstKeyStartProps(prev);
             fixFlowSeqItems(fc);
-            const sep4 = fc.end.splice(1, fc.end.length);
-            sep4.push(this.sourceToken);
+            const sep2 = fc.end.splice(1, fc.end.length);
+            sep2.push(this.sourceToken);
             const map = {
               type: "block-map",
               offset: fc.offset,
               indent: fc.indent,
-              items: [{ start, key: fc, sep: sep4 }]
+              items: [{ start, key: fc, sep: sep2 }]
             };
             this.onKeyLine = true;
             this.stack[this.stack.length - 1] = map;
@@ -10410,8 +9567,8 @@ var require_resolve = __commonJS({
       }
       return count;
     }
-    function getFullPath(resolver, id = "", normalize6) {
-      if (normalize6 !== false)
+    function getFullPath(resolver, id = "", normalize5) {
+      if (normalize5 !== false)
         id = normalizeId(id);
       const p = resolver.parse(id);
       return _getFullPath(resolver, p);
@@ -12006,7 +11163,7 @@ var require_fast_uri = __commonJS({
       }
       return decodedScheme;
     }
-    function normalize6(uri, options) {
+    function normalize5(uri, options) {
       if (typeof uri === "string") {
         uri = /** @type {T} */
         normalizeString(uri, options);
@@ -12049,49 +11206,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative4, options, skipNormalization) {
+    function resolveComponent(base, relative2, options, skipNormalization) {
       const target = {};
       if (!skipNormalization) {
         base = parse2(serialize(base, options), options);
-        relative4 = parse2(serialize(relative4, options), options);
+        relative2 = parse2(serialize(relative2, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative4.scheme) {
-        target.scheme = relative4.scheme;
-        target.userinfo = relative4.userinfo;
-        target.host = relative4.host;
-        target.port = relative4.port;
-        target.path = removeDotSegments(relative4.path || "");
-        target.query = relative4.query;
+      if (!options.tolerant && relative2.scheme) {
+        target.scheme = relative2.scheme;
+        target.userinfo = relative2.userinfo;
+        target.host = relative2.host;
+        target.port = relative2.port;
+        target.path = removeDotSegments(relative2.path || "");
+        target.query = relative2.query;
       } else {
-        if (relative4.userinfo !== void 0 || relative4.host !== void 0 || relative4.port !== void 0) {
-          target.userinfo = relative4.userinfo;
-          target.host = relative4.host;
-          target.port = relative4.port;
-          target.path = removeDotSegments(relative4.path || "");
-          target.query = relative4.query;
+        if (relative2.userinfo !== void 0 || relative2.host !== void 0 || relative2.port !== void 0) {
+          target.userinfo = relative2.userinfo;
+          target.host = relative2.host;
+          target.port = relative2.port;
+          target.path = removeDotSegments(relative2.path || "");
+          target.query = relative2.query;
         } else {
-          if (!relative4.path) {
+          if (!relative2.path) {
             target.path = base.path;
-            if (relative4.query !== void 0) {
-              target.query = relative4.query;
+            if (relative2.query !== void 0) {
+              target.query = relative2.query;
             } else {
               target.query = base.query;
             }
           } else {
-            if (relative4.path[0] === "/") {
-              target.path = removeDotSegments(relative4.path);
+            if (relative2.path[0] === "/") {
+              target.path = removeDotSegments(relative2.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target.path = "/" + relative4.path;
+                target.path = "/" + relative2.path;
               } else if (!base.path) {
-                target.path = relative4.path;
+                target.path = relative2.path;
               } else {
-                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative4.path;
+                target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative2.path;
               }
               target.path = removeDotSegments(target.path);
             }
-            target.query = relative4.query;
+            target.query = relative2.query;
           }
           target.userinfo = base.userinfo;
           target.host = base.host;
@@ -12099,7 +11256,7 @@ var require_fast_uri = __commonJS({
         }
         target.scheme = base.scheme;
       }
-      target.fragment = relative4.fragment;
+      target.fragment = relative2.fragment;
       return target;
     }
     function equal(uriA, uriB, options) {
@@ -12384,7 +11541,7 @@ var require_fast_uri = __commonJS({
     }
     var fastUri = {
       SCHEMES,
-      normalize: normalize6,
+      normalize: normalize5,
       resolve,
       resolveComponent,
       equal,
@@ -12723,8 +11880,8 @@ var require_core = __commonJS({
             return this;
           }
           case "object": {
-            const cacheKey2 = schemaKeyRef;
-            this._cache.delete(cacheKey2);
+            const cacheKey = schemaKeyRef;
+            this._cache.delete(cacheKey);
             let id = schemaKeyRef[this.opts.schemaId];
             if (id) {
               id = (0, resolve_1.normalizeId)(id);
@@ -15637,24 +14794,761 @@ import { dirname as dirname8 } from "node:path";
 import { fileURLToPath as fileURLToPath5 } from "node:url";
 
 // src/daemon-core.ts
-import { execFile as execFile8 } from "node:child_process";
+import { execFile as execFile6 } from "node:child_process";
 import { appendFileSync, chmodSync as chmodSync6, lstatSync as lstatSync3, mkdirSync as mkdirSync7, readFileSync as readFileSync11, renameSync as renameSync6 } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { homedir as homedir7 } from "node:os";
-import { basename as basename7, dirname as dirname6, join as join18 } from "node:path";
+import { homedir as homedir6 } from "node:os";
+import { basename as basename7, dirname as dirname6, join as join14 } from "node:path";
 
 // src/answer-host.ts
 import { randomUUID } from "node:crypto";
-import { execFile as execFile7 } from "node:child_process";
+import { execFile as execFile5 } from "node:child_process";
 import { chmodSync as chmodSync5, mkdirSync as mkdirSync6, mkdtempSync as mkdtempSync3, rmSync as rmSync8, writeFileSync as writeFileSync4 } from "node:fs";
-import { basename as basename6, dirname as dirname5, isAbsolute as isAbsolute9, join as join14, resolve as resolvePath } from "node:path";
+import { basename as basename6, dirname as dirname5, isAbsolute as isAbsolute9, join as join11, resolve as resolvePath } from "node:path";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // src/active.ts
-init_relay_client();
 import { randomBytes } from "node:crypto";
 import { mkdirSync as mkdirSync2, readFileSync as readFileSync4, renameSync as renameSync2, rmSync as rmSync2, writeFileSync } from "node:fs";
 import { isAbsolute as isAbsolute2, join as join2 } from "node:path";
+
+// src/relay-client.ts
+import { execFile } from "node:child_process";
+import { readFileSync as readFileSync3 } from "node:fs";
+
+// src/credentials.ts
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeSync
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
+
+// src/relay-client-core.ts
+var TEAM_RE = /^[a-z][a-z0-9_-]{1,31}$/;
+var MEMBER_RE = /^[a-z][a-z0-9_]{1,31}$/;
+var LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+function parseRelayUrl(raw) {
+  if (!raw) throw new Error("RELAY_URL must be set");
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("RELAY_URL is not a valid URL");
+  }
+  if (url.username || url.password) throw new Error("RELAY_URL must not carry credentials");
+  if (url.search || url.hash) throw new Error("RELAY_URL must not carry a query or fragment");
+  if (url.protocol === "https:") return url;
+  if (url.protocol === "http:" && LOOPBACK.has(url.hostname)) return url;
+  throw new Error("RELAY_URL must be https (plain http is allowed only to localhost)");
+}
+
+// src/credentials.ts
+var CREDENTIAL_RE = /^trc_[A-Za-z0-9_-]{43}$/;
+var EMAIL_RE = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})+$/;
+var CREDENTIALS_DIR = "team-relay";
+var CREDENTIALS_FILE = "credentials.json";
+var MAX_FILE_BYTES = 16 * 1024;
+var CredentialFileError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CredentialFileError";
+  }
+};
+function credentialsPath(env2 = process.env) {
+  const explicit = env2.RELAY_CREDENTIALS_FILE?.trim();
+  if (explicit) {
+    if (!isAbsolute(explicit)) throw new CredentialFileError("RELAY_CREDENTIALS_FILE must be an absolute path");
+    return explicit;
+  }
+  const xdg = env2.XDG_CONFIG_HOME?.trim();
+  const base = xdg && isAbsolute(xdg) ? xdg : join(env2.HOME?.trim() || homedir(), ".config");
+  return join(base, CREDENTIALS_DIR, CREDENTIALS_FILE);
+}
+function uid() {
+  return typeof process.getuid === "function" ? process.getuid() : null;
+}
+function checkOwnedPrivate(st, what, kind) {
+  if (st.isSymbolicLink()) throw new CredentialFileError(`${what} is a symbolic link; refusing to use it`);
+  if (kind === "file" ? !st.isFile() : !st.isDirectory()) throw new CredentialFileError(`${what} is not a ${kind}; refusing to use it`);
+  const me = uid();
+  if (me !== null && st.uid !== me) throw new CredentialFileError(`${what} is owned by another user; refusing to use it`);
+  if ((st.mode & 63) !== 0) {
+    const mode = (st.mode & 511).toString(8).padStart(3, "0");
+    throw new CredentialFileError(
+      `${what} has mode ${mode}, readable or writable by others; refusing to use it (run /team-relay:logout and /team-relay:login again, or chmod ${kind === "file" ? "600" : "700"} it)`
+    );
+  }
+}
+var RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+function normaliseRelayUrl(raw) {
+  const url = parseRelayUrl(raw);
+  const path = url.pathname.replace(/\/+$/, "");
+  return `${url.protocol}//${url.host}${path}`;
+}
+function parseStoredCredential(raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new CredentialFileError("the credential file is not a JSON object");
+  const c = raw;
+  const { relay_url, team, member, credential, expires_at, email } = c;
+  if (typeof relay_url !== "string") throw new CredentialFileError("the credential file has no relay_url");
+  let url;
+  try {
+    url = normaliseRelayUrl(relay_url);
+  } catch {
+    throw new CredentialFileError("the credential file has an invalid relay_url");
+  }
+  if (typeof team !== "string" || !TEAM_RE.test(team)) throw new CredentialFileError("the credential file has an invalid team");
+  if (typeof member !== "string" || !MEMBER_RE.test(member)) throw new CredentialFileError("the credential file has an invalid member");
+  if (typeof credential !== "string" || !CREDENTIAL_RE.test(credential)) throw new CredentialFileError("the credential file has an invalid credential");
+  if (expires_at !== void 0 && expires_at !== null && (typeof expires_at !== "string" || !RFC3339.test(expires_at))) {
+    throw new CredentialFileError("the credential file has an invalid expires_at");
+  }
+  if (email !== void 0 && email !== null && (typeof email !== "string" || email.length > 254 || !EMAIL_RE.test(email))) {
+    throw new CredentialFileError("the credential file has an invalid email");
+  }
+  return {
+    relay_url: url,
+    team,
+    member,
+    credential,
+    expires_at: typeof expires_at === "string" ? expires_at : null,
+    ...typeof email === "string" ? { email } : {}
+  };
+}
+function readCredential(path) {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (err) {
+    if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
+    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
+  }
+  checkOwnedPrivate(lstatSync(dirname(path)), "the credential directory", "directory");
+  checkOwnedPrivate(st, "the credential file", "file");
+  if (st.size > MAX_FILE_BYTES) throw new CredentialFileError("the credential file is too large");
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new CredentialFileError("the credential file is not valid JSON");
+  }
+  return parseStoredCredential(json);
+}
+function credentialFileExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function credentialFingerprint(path) {
+  try {
+    const st = lstatSync(path);
+    return `${st.dev}:${st.ino}:${st.size}:${st.mtimeMs}`;
+  } catch {
+    return null;
+  }
+}
+
+// src/relay-default.ts
+import { readFileSync as readFileSync2 } from "node:fs";
+import { fileURLToPath } from "node:url";
+function defaultRelayFile() {
+  return fileURLToPath(new URL("../relay.default.json", import.meta.url));
+}
+function defaultRelayUrl(file2 = defaultRelayFile()) {
+  try {
+    const raw = JSON.parse(readFileSync2(file2, "utf8"));
+    if (typeof raw.relay_url !== "string") return null;
+    parseRelayUrl(raw.relay_url);
+    return raw.relay_url;
+  } catch {
+    return null;
+  }
+}
+
+// src/relay-client.ts
+var REQUEST_ID_RE = /^rq_[0-9a-f]{32}$/;
+var MESSAGE_ID_RE = /^msg_[0-9a-f]{32}$/;
+var RelayError = class extends Error {
+  status;
+  code;
+  detail;
+  /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
+  retryAfter;
+  constructor(status, code, detail, retryAfter) {
+    super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
+    this.name = "RelayError";
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+    this.retryAfter = retryAfter;
+  }
+};
+var RETRY_AFTER_MAX_S = 3600;
+function parseRetryAfter(v) {
+  const t = v?.trim();
+  if (!t || !/^[0-9]{1,10}$/.test(t)) return void 0;
+  return Math.min(RETRY_AFTER_MAX_S, Number(t));
+}
+var RelayNetworkError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RelayNetworkError";
+  }
+};
+function isRetryable(err) {
+  if (err instanceof RelayNetworkError) return true;
+  if (err instanceof RelayError) return err.status >= 500 || err.status === 429;
+  return false;
+}
+var DEFAULT_BACKOFF = { baseMs: 1e3, maxMs: 3e4 };
+function backoffDelay(attempt, b = DEFAULT_BACKOFF, random = Math.random) {
+  const exp = Math.min(b.maxMs, b.baseMs * 2 ** Math.min(attempt, 30));
+  return Math.round(exp / 2 + random() * (exp / 2));
+}
+function configValue(v) {
+  if (v === void 0) return void 0;
+  const t = v.trim();
+  if (!t || /^\$\{user_config\.[A-Za-z0-9_]+\}$/.test(t)) return void 0;
+  return t;
+}
+function staticTokenProvider(read) {
+  return Object.assign(typeof read === "string" ? () => read : read, { kind: "static" });
+}
+function tokenProviderFromEnv(env2) {
+  const file2 = configValue(env2.RELAY_TOKEN_FILE);
+  if (file2) {
+    return staticTokenProvider(() => {
+      let raw;
+      try {
+        raw = readFileSync3(file2, "utf8");
+      } catch (err) {
+        throw new Error(`cannot read RELAY_TOKEN_FILE (${err.code ?? "error"})`);
+      }
+      const token2 = raw.replace(/[\r\n]+$/, "");
+      if (!token2) throw new Error("RELAY_TOKEN_FILE is empty");
+      return token2;
+    });
+  }
+  const token = configValue(env2.RELAY_TOKEN);
+  if (!token) throw new Error('RELAY_AUTH is "token", so RELAY_TOKEN or RELAY_TOKEN_FILE must be set');
+  return staticTokenProvider(token);
+}
+var TOKEN_REFRESH_MARGIN_MS = 5 * 6e4;
+var JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+var ACCOUNT_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
+var GCLOUD_OUTPUT_LIMIT = 64 * 1024;
+function checkGcloudAccount(account) {
+  if (account.length > 254 || !ACCOUNT_RE.test(account)) {
+    throw new Error("RELAY_GCLOUD_ACCOUNT must be an account email address");
+  }
+  return account;
+}
+function jwtExpiryMs(token) {
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof claims.exp === "number" && Number.isFinite(claims.exp) ? claims.exp * 1e3 : null;
+  } catch {
+    return null;
+  }
+}
+function scrub(text) {
+  return text.replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/ya29\.[A-Za-z0-9_.-]+/g, "[redacted]").replace(/[\x00-\x1f\x7f]+/g, " ").trim().slice(0, 200);
+}
+function gcloudTokenProvider(opts = {}) {
+  const now = opts.now ?? Date.now;
+  const env2 = opts.env ?? process.env;
+  const timeoutMs = opts.timeoutMs ?? 3e4;
+  const args = ["auth", "print-identity-token"];
+  if (opts.account !== void 0) args.push(`--account=${checkGcloudAccount(opts.account)}`);
+  let cached = null;
+  let inflight = null;
+  const mint = () => new Promise((resolve, reject) => {
+    execFile(
+      "gcloud",
+      args,
+      { env: env2, timeout: timeoutMs, maxBuffer: GCLOUD_OUTPUT_LIMIT, shell: false, windowsHide: true, encoding: "utf8" },
+      (err, stdout, stderr) => {
+        if (err) {
+          const e = err;
+          if (e.code === "ENOENT") return reject(new Error("gcloud was not found on PATH (RELAY_AUTH=google needs the Google Cloud CLI)"));
+          if (e.killed) return reject(new Error("gcloud auth print-identity-token timed out"));
+          const why = scrub(String(stderr ?? "").split("\n").find((l) => l.trim()) ?? "");
+          return reject(new Error(`gcloud auth print-identity-token failed${why ? `: ${why}` : ""}`));
+        }
+        const token = String(stdout).trim();
+        if (!JWT_RE.test(token)) return reject(new Error("gcloud auth print-identity-token did not print an ID token"));
+        resolve(token);
+      }
+    );
+  });
+  const provider = Object.assign(async () => {
+    if (cached && now() < cached.until) return cached.token;
+    inflight ??= mint().then((token) => {
+      const exp = jwtExpiryMs(token);
+      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
+      return token;
+    }).finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  }, {
+    invalidate: () => {
+      cached = null;
+    }
+  });
+  return provider;
+}
+var METADATA_BASE = "http://metadata.google.internal";
+var METADATA_IDENTITY_PATH = "/computeMetadata/v1/instance/service-accounts/default/identity";
+var METADATA_OUTPUT_LIMIT = 16 * 1024;
+function metadataTokenProvider(opts) {
+  const now = opts.now ?? Date.now;
+  const doFetch = opts.fetch ?? ((u, i) => fetch(u, i));
+  const timeoutMs = opts.timeoutMs ?? 5e3;
+  if (!opts.audience) throw new Error("RELAY_AUTH=metadata needs RELAY_URL as the token audience");
+  const url = new URL(METADATA_IDENTITY_PATH, opts.base ?? METADATA_BASE);
+  url.searchParams.set("audience", opts.audience);
+  url.searchParams.set("format", "full");
+  const target = url.toString();
+  let cached = null;
+  let inflight = null;
+  const mint = async () => {
+    let res;
+    try {
+      res = await doFetch(target, {
+        method: "GET",
+        headers: { "Metadata-Flavor": "Google" },
+        redirect: "error",
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch {
+      throw new Error("the metadata server did not answer (RELAY_AUTH=metadata runs only on Google Cloud)");
+    }
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new Error(`the metadata server refused an identity token (${res.status})`);
+    const token = text.trim();
+    if (token.length > METADATA_OUTPUT_LIMIT || !JWT_RE.test(token)) throw new Error("the metadata server did not return an ID token");
+    return token;
+  };
+  return Object.assign(async () => {
+    if (cached && now() < cached.until) return cached.token;
+    inflight ??= mint().then((token) => {
+      const exp = jwtExpiryMs(token);
+      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
+      return token;
+    }).finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  }, {
+    invalidate: () => {
+      cached = null;
+    }
+  });
+}
+function authModeFromEnv(env2) {
+  const explicit = configValue(env2.RELAY_AUTH);
+  if (explicit === void 0) return credentialFileExists(credentialsPath(env2)) ? "credential" : "google";
+  if (explicit !== "credential" && explicit !== "google" && explicit !== "token" && explicit !== "metadata") {
+    throw new Error('RELAY_AUTH must be "credential", "google" or "token" (or "metadata" on Google Cloud)');
+  }
+  return explicit;
+}
+var NotConnected = class extends Error {
+  constructor(message = "Not connected: run /team-relay:login") {
+    super(message);
+    this.name = "NotConnected";
+  }
+};
+var SIGN_IN_AGAIN = "the relay refused your sign-in (signed out, expired, or no longer on the team): run /team-relay:login again";
+function credentialTokenProvider(path, bound) {
+  const relay = normaliseRelayUrl(bound.relay_url);
+  return Object.assign(
+    () => {
+      const stored = readCredential(path);
+      if (!stored) throw new NotConnected();
+      if (stored.relay_url !== relay || stored.team !== bound.team) {
+        throw new NotConnected("you signed in to another relay or team since this started: restart it");
+      }
+      return stored.credential;
+    },
+    { kind: "credential", path }
+  );
+}
+function isCredentialProvider(p) {
+  return p.kind === "credential";
+}
+function connectionFromEnv(env2, gcloud = {}) {
+  const explicitMode = configValue(env2.RELAY_AUTH) !== void 0;
+  const mode = authModeFromEnv(env2);
+  if (mode === "credential") {
+    const path = credentialsPath(env2);
+    const stored = readCredential(path);
+    if (!stored) throw new NotConnected();
+    const envUrl = configValue(env2.RELAY_URL);
+    if (envUrl !== void 0) {
+      let same = false;
+      try {
+        same = normaliseRelayUrl(envUrl) === stored.relay_url;
+      } catch {
+        same = false;
+      }
+      if (!same) {
+        throw new Error("RELAY_URL is not the relay you signed in to: unset it, or run /team-relay:logout and then /team-relay:login to sign in to it");
+      }
+    }
+    const envTeam = configValue(env2.RELAY_TEAM);
+    if (envTeam !== void 0 && envTeam !== stored.team) {
+      throw new Error("RELAY_TEAM is not the team you signed in to: unset it, or run /team-relay:login again");
+    }
+    return { mode, url: stored.relay_url, team: stored.team, member: stored.member, token: credentialTokenProvider(path, stored) };
+  }
+  const team = configValue(env2.RELAY_TEAM);
+  if (!team) {
+    if (!explicitMode) throw new NotConnected();
+    throw new Error("RELAY_TEAM must be set");
+  }
+  const url = configValue(env2.RELAY_URL) ?? (mode === "google" ? defaultRelayUrl() : null) ?? "";
+  let token;
+  if (mode === "token") token = tokenProviderFromEnv(env2);
+  else if (mode === "metadata") token = metadataTokenProvider({ audience: configValue(env2.RELAY_URL) ?? "" });
+  else {
+    const account = configValue(env2.RELAY_GCLOUD_ACCOUNT);
+    token = gcloudTokenProvider({ env: env2, ...gcloud, ...account !== void 0 ? { account } : {} });
+  }
+  return { mode, url, team, token };
+}
+var CLIENT_IP_HASH_RE = /^[0-9a-f]{64}$/;
+var ON_BEHALF_OF_RE = /^[a-z0-9._%+-]{1,64}@[a-z0-9.-]{1,253}$/;
+var defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+var RelayClient = class _RelayClient {
+  team;
+  opts;
+  base;
+  token;
+  backoff;
+  attempts;
+  timeoutMs;
+  sleep;
+  random;
+  userAgent;
+  constructor(opts) {
+    if (!TEAM_RE.test(opts.team)) throw new Error("RELAY_TEAM is not a valid team id");
+    this.opts = opts;
+    this.team = opts.team;
+    const base = parseRelayUrl(opts.url);
+    if (!base.pathname.endsWith("/")) base.pathname += "/";
+    this.base = base;
+    this.token = opts.token;
+    this.backoff = opts.backoff ?? DEFAULT_BACKOFF;
+    this.attempts = Math.max(1, opts.attempts ?? 4);
+    this.timeoutMs = opts.timeoutMs ?? 3e4;
+    this.sleep = opts.sleep ?? defaultSleep;
+    this.random = opts.random ?? Math.random;
+    this.userAgent = opts.userAgent ?? "team-relay-plugin/0.1.0";
+  }
+  /**
+   * The same relay, sign-in and settings for another team (M9-SPEC §5: the hosted console's
+   * delegate reads any team its viewer is on). The team id is checked like RELAY_TEAM.
+   */
+  withTeam(team) {
+    if (team === this.team) return this;
+    return new _RelayClient({ ...this.opts, team });
+  }
+  /**
+   * True when this client signs in with a stored device credential or a static token, which
+   * are bound to one team (no Google identity for the account routes).
+   */
+  get boundToTeam() {
+    return isCredentialProvider(this.token) || this.token.kind === "static";
+  }
+  /** The relay's base URL (without a trailing slash). */
+  get url() {
+    return this.base.toString().replace(/\/$/, "");
+  }
+  teamPath(...parts) {
+    return ["v1", "teams", this.team, ...parts].map(encodeURIComponent).join("/");
+  }
+  async once(method, path, body, timeoutMs, signal, onBehalfOf, clientIpHash) {
+    const url = new URL(path, this.base);
+    const headers = {
+      Accept: "application/json",
+      Authorization: `Bearer ${await this.token()}`,
+      "User-Agent": this.userAgent
+    };
+    if (onBehalfOf !== void 0) {
+      if (!ON_BEHALF_OF_RE.test(onBehalfOf)) throw new Error("X-Relay-On-Behalf-Of must be a lower-case email address");
+      headers["X-Relay-On-Behalf-Of"] = onBehalfOf;
+    }
+    if (clientIpHash !== void 0) {
+      if (!CLIENT_IP_HASH_RE.test(clientIpHash)) throw new Error("X-Relay-Client-IP-Hash must be 64 lower-case hex characters");
+      headers["X-Relay-Client-IP-Hash"] = clientIpHash;
+    }
+    let payload;
+    if (body !== void 0) {
+      headers["Content-Type"] = "application/json";
+      payload = JSON.stringify(body);
+    }
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    let res;
+    try {
+      res = await fetch(url, { method, headers, body: payload, signal: combined, redirect: "error" });
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      const e = err;
+      const why = e.cause?.code ?? e.cause?.message ?? (e.name === "TimeoutError" ? "timed out" : e.name);
+      throw new RelayNetworkError(`relay unreachable (${String(why).slice(0, 120)})`);
+    }
+    let text;
+    try {
+      text = await res.text();
+    } catch {
+      throw new RelayNetworkError("relay response was cut off");
+    }
+    let json = void 0;
+    if (text) {
+      try {
+        json = JSON.parse(text);
+      } catch {
+        if (res.ok) throw new RelayNetworkError(`relay answered ${res.status} with a body that is not JSON`);
+      }
+    }
+    if (!res.ok) {
+      const obj = json && typeof json === "object" ? json : {};
+      const code = typeof obj.error === "string" ? obj.error : `http_${res.status}`;
+      const detail = typeof obj.detail === "string" ? obj.detail.slice(0, 500) : "";
+      throw new RelayError(res.status, code, detail, parseRetryAfter(res.headers.get("retry-after")));
+    }
+    return json;
+  }
+  /**
+   * One call with retry and exponential backoff on network errors, 5xx and 429. A 401 with
+   * a refreshable identity drops the cached token and retries once at once (M2-SPEC §2).
+   */
+  async call(method, path, body, opts = {}) {
+    const attempts = Math.max(1, opts.attempts ?? this.attempts);
+    const timeoutMs = opts.timeoutMs ?? this.timeoutMs;
+    let refreshed = false;
+    for (let attempt = 0; ; ) {
+      try {
+        return await this.once(method, path, body, timeoutMs, opts.signal, opts.onBehalfOf, opts.clientIpHash);
+      } catch (err) {
+        if (opts.signal?.aborted) throw err;
+        if (err instanceof RelayError && err.status === 401 && !refreshed && this.token.invalidate) {
+          refreshed = true;
+          this.token.invalidate();
+          continue;
+        }
+        if (err instanceof RelayError && err.status === 401 && isCredentialProvider(this.token)) {
+          throw new RelayError(401, err.code, SIGN_IN_AGAIN);
+        }
+        if (attempt + 1 >= attempts || !isRetryable(err)) throw err;
+        await this.sleep(backoffDelay(attempt, this.backoff, this.random));
+        attempt++;
+      }
+    }
+  }
+  me(opts) {
+    return this.call("GET", this.teamPath("me"), void 0, opts);
+  }
+  publishManifest(member, manifest, opts) {
+    if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
+    return this.call(
+      "PUT",
+      this.teamPath("members", member, "manifest"),
+      manifest,
+      opts
+    );
+  }
+  directory(opts) {
+    return this.call("GET", this.teamPath("directory"), void 0, opts);
+  }
+  /**
+   * M7-SPEC §1: what waits in this member's inbox for their answering session. A peek: it moves
+   * no cursor and writes no presence, so a session without the channel may read it too.
+   */
+  inboxSummary(opts) {
+    return this.call("GET", this.teamPath("inbox", "summary"), void 0, opts);
+  }
+  /** Safe to retry: the idempotency key makes a repeated POST return the original request. */
+  createRequest(body, opts) {
+    return this.call("POST", this.teamPath("requests"), body, opts);
+  }
+  readStream(stream, q = {}, opts) {
+    const params = new URLSearchParams();
+    if (q.after !== void 0) params.set("after", String(q.after));
+    if (q.wait !== void 0) params.set("wait", String(q.wait));
+    if (q.limit !== void 0) params.set("limit", String(q.limit));
+    const qs = params.toString();
+    const timeoutMs = opts?.timeoutMs ?? (q.wait ?? 0) * 1e3 + 2e4;
+    return this.call("GET", this.teamPath("streams", stream) + (qs ? `?${qs}` : ""), void 0, {
+      ...opts,
+      timeoutMs
+    });
+  }
+  ackCursor(stream, ackedSeq, opts) {
+    return this.call("POST", this.teamPath("streams", stream, "cursor"), { acked_seq: ackedSeq }, opts);
+  }
+  checkRequestId(id) {
+    if (!REQUEST_ID_RE.test(id)) throw new Error("request_id must look like rq_ followed by 32 lowercase hex characters");
+  }
+  ackRequest(requestId, opts) {
+    this.checkRequestId(requestId);
+    return this.call("POST", this.teamPath("requests", requestId, "ack"), {}, opts);
+  }
+  reply(requestId, body, opts) {
+    this.checkRequestId(requestId);
+    return this.call(
+      "POST",
+      this.teamPath("requests", requestId, "reply"),
+      body,
+      opts
+    );
+  }
+  /** Not idempotent (it appends), so it is sent once unless the caller asks otherwise. */
+  progress(requestId, body, opts) {
+    this.checkRequestId(requestId);
+    return this.call("POST", this.teamPath("requests", requestId, "progress"), body, {
+      attempts: 1,
+      ...opts
+    });
+  }
+  getRequest(requestId, opts) {
+    this.checkRequestId(requestId);
+    return this.call("GET", this.teamPath("requests", requestId), void 0, opts);
+  }
+  /** M2-SPEC §3.3: a tool's name, outcome and duration only. Appends, so it is sent once. */
+  toolEvent(requestId, body, opts) {
+    this.checkRequestId(requestId);
+    return this.call("POST", this.teamPath("requests", requestId, "events"), body, {
+      attempts: 1,
+      ...opts
+    });
+  }
+  /** M10-SPEC §1: the team's boundaries (any member). Never set: version 0, boundaries null. */
+  boundaries(opts) {
+    return this.call("GET", this.teamPath("boundaries"), void 0, opts);
+  }
+  /** M10-SPEC §1 (owners): replace the boundaries; a stale version is 409 version_conflict. Sent once. */
+  setBoundaries(body, opts) {
+    return this.call("PUT", this.teamPath("boundaries"), body, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §2: the boundaries version this member accepted (0: never). */
+  acceptance(opts) {
+    return this.call("GET", this.teamPath("me", "acceptance"), void 0, opts);
+  }
+  /** M11-SPEC §2: accept the current boundaries version (only for oneself). Sent once. */
+  setAcceptance(version2, opts) {
+    return this.call("PUT", this.teamPath("me", "acceptance"), { version: version2 }, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §3: the background answerer's status (the member itself only). Sent once. */
+  putStatus(body, opts) {
+    return this.call("PUT", this.teamPath("me", "status"), body, { attempts: 1, ...opts });
+  }
+  /** M11-SPEC §3: every member's setup progress and whether they are answering now. */
+  membersStatus(opts) {
+    return this.call("GET", this.teamPath("members", "status"), void 0, opts);
+  }
+  /** M11-SPEC §4: this member's recent requests, newest first. */
+  myRequests(limit = 20, opts) {
+    return this.call("GET", this.teamPath("me", "requests") + `?limit=${limit}`, void 0, opts);
+  }
+  /** M6-SPEC §2: the team's roster (owners see every email; members only their own). */
+  roster(opts) {
+    return this.call("GET", this.teamPath("roster"), void 0, opts);
+  }
+  /** M6-SPEC §2 (owners): add a member. Not idempotent, so sent once. */
+  addMember(body, opts) {
+    return this.call("POST", this.teamPath("roster"), body, { attempts: 1, ...opts });
+  }
+  /** M6-SPEC §2 (owners): add or remove one email, or change the role. Sent once. */
+  updateMember(member, body, opts) {
+    if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
+    return this.call("PATCH", this.teamPath("roster", member), body, { attempts: 1, ...opts });
+  }
+  /** M6-SPEC §2 (owners): remove a member (their device credentials are revoked). Sent once. */
+  removeMember(member, opts) {
+    if (!MEMBER_RE.test(member)) throw new Error("invalid member id");
+    return this.call("DELETE", this.teamPath("roster", member), void 0, { attempts: 1, ...opts });
+  }
+  /** M5-SPEC §3: revoke the credential this client signs in with (logout). */
+  revokeSelf(opts) {
+    return this.call("DELETE", this.teamPath("credentials", "self"), void 0, { attempts: 1, ...opts });
+  }
+  // M9-SPEC §2, §4, §7: the account routes. They take a Google identity (a Google ID token,
+  // or a delegate on behalf of an email); a device credential or a static token is refused
+  // with 403 google_identity_required. The mutations are sent once.
+  /** The teams (and invitations) of the signed-in Google account. */
+  myTeams(opts) {
+    return this.call("GET", "v1/me/teams", void 0, opts);
+  }
+  /** Create a team; the caller becomes its first owner. */
+  createTeam(body, opts) {
+    return this.call("POST", "v1/teams", body, { attempts: 1, ...opts });
+  }
+  /** Accept or decline an invitation to `team`. */
+  answerInvitation(team, accept, opts) {
+    if (!TEAM_RE.test(team)) throw new Error("invalid team id");
+    return this.call("POST", ["v1", "me", "invitations", team].map(encodeURIComponent).join("/"), { accept }, {
+      attempts: 1,
+      ...opts
+    });
+  }
+  /** An owner deletes this client's team (M9-SPEC §7.7); `confirm` is the team id typed again. */
+  deleteTeam(confirm, opts) {
+    return this.call("DELETE", ["v1", "teams", this.team].map(encodeURIComponent).join("/"), { confirm }, {
+      attempts: 1,
+      ...opts
+    });
+  }
+  /** Relay admins (M9-SPEC §4): every team, a page at a time. */
+  adminTeams(q = {}, opts) {
+    const params = new URLSearchParams();
+    if (q.after !== void 0) params.set("after", q.after);
+    if (q.limit !== void 0) params.set("limit", String(q.limit));
+    const qs = params.toString();
+    return this.call("GET", "v1/admin/teams" + (qs ? `?${qs}` : ""), void 0, opts);
+  }
+  /** Relay admins (M9-SPEC §4): delete a team; `confirm` is its id typed again. */
+  adminDeleteTeam(team, confirm, opts) {
+    if (!TEAM_RE.test(team)) throw new Error("invalid team id");
+    return this.call("DELETE", ["v1", "admin", "teams", team].map(encodeURIComponent).join("/"), { confirm }, {
+      attempts: 1,
+      ...opts
+    });
+  }
+  /** M2-SPEC §3.5: the team's activity feed. */
+  activity(q = {}, opts) {
+    const params = new URLSearchParams();
+    if (q.since !== void 0) params.set("since", q.since);
+    if (q.limit !== void 0) params.set("limit", String(q.limit));
+    const qs = params.toString();
+    return this.call("GET", this.teamPath("activity") + (qs ? `?${qs}` : ""), void 0, opts);
+  }
+};
+
+// src/active.ts
 var ACTIVE_FILE = "active.json";
 var MAX_OPEN = 50;
 var READ_LIMIT = 64 * 1024;
@@ -16000,7 +15894,6 @@ import { createHash, randomBytes as randomBytes4, timingSafeEqual } from "node:c
 import { createServer } from "node:http";
 
 // src/notify.ts
-init_relay_client();
 var DATA_JSON_LIMIT = 16 * 1024;
 var RFC33393 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 var CAPABILITY_RE = /^[a-z][a-z0-9_]{1,62}$/;
@@ -16552,126 +16445,32 @@ function openInBrowser(url, opts) {
 }
 
 // src/boundary-set.ts
-import { execFile as execFile4 } from "node:child_process";
-import { promises as fsp2 } from "node:fs";
+import { execFile as execFile3 } from "node:child_process";
+import { promises as fsp } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { basename as basename5, dirname as dirname4, extname, join as join9, normalize as normalize4, relative as relative2, sep as sep2 } from "node:path";
+import { basename as basename5, dirname as dirname4, isAbsolute as isAbsolute7, join as join8, normalize as normalize4, relative, sep } from "node:path";
 
 // src/boundaries-rule.ts
 var TOPIC_MAX = 500;
-var SHARED_DRIVE_MAX = 100;
-var DOMAIN_MAX = 253;
-var BOUNDARIES_MAX_ORGS = 10;
-var BOUNDARIES_MAX_DRIVES = 10;
-var BOUNDARIES_MAX_REPOS = 100;
-var BOUNDARIES_MAX_FOLDERS = 20;
-var REPO_ID_MAX = Number.MAX_SAFE_INTEGER;
-var FOLDER_NAME_MAX = 255;
-var DRIVE_NAME_MAX = SHARED_DRIVE_MAX;
-var SOURCES_MISSING_MAX = 140;
 var BOUNDARIES_VERSION_MAX = 2 ** 31 - 1;
-var GITHUB_ORG_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/;
-var GITHUB_REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
-var DRIVE_ITEM_ID_RE = /^[A-Za-z0-9_-]{10,200}$/;
-var DRIVE_DOMAIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+var REMOVED_BOUNDARIES_FIELDS = ["github_orgs", "github_repos", "drive_folders", "drives", "member_folders"];
 var TOPIC_FORBIDDEN_RE = /[\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]|[^\P{Cc}\n\t]/u;
-var DRIVE_NAME_FORBIDDEN_RE = /[/\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}]/u;
-var FOLDER_NAME_FORBIDDEN_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}]/u;
 var EDGE_SPACE_RE = /^[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
-var BOUNDARIES_FIELDS = ["topic", "github_orgs", "github_repos", "drive_folders", "drives", "member_folders"];
-var M10_BOUNDARIES_FIELDS = ["topic", "github_orgs", "drives", "member_folders"];
 var chars = (s) => [...s].length;
 var trimText = (s) => s.replace(EDGE_SPACE_RE, "");
 var isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var exactKeys = (o, keys) => Object.keys(o).length === keys.length && keys.every((k) => Object.prototype.hasOwnProperty.call(o, k));
+var has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 function topicOk(topic) {
   if (typeof topic !== "string") return false;
   const t = trimText(topic);
   return chars(t) >= 1 && chars(t) <= TOPIC_MAX && !TOPIC_FORBIDDEN_RE.test(topic);
 }
-var orgOk = (org) => typeof org === "string" && GITHUB_ORG_RE.test(org);
-function domainOk(domain) {
-  if (typeof domain !== "string" || domain.length > DOMAIN_MAX || !DRIVE_DOMAIN_RE.test(domain)) return false;
-  return !/^[0-9]+$/.test(domain.slice(domain.lastIndexOf(".") + 1));
-}
-function driveNameOk(name) {
-  return typeof name === "string" && chars(name) >= 1 && chars(name) <= SHARED_DRIVE_MAX && !DRIVE_NAME_FORBIDDEN_RE.test(name) && name === trimText(name) && name !== "." && name !== "..";
-}
 var versionOk = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= BOUNDARIES_VERSION_MAX;
-var repoNameOk = (name) => typeof name === "string" && GITHUB_REPO_RE.test(name) && !/^\.+$/.test(name);
-var repoIdOk = (id) => id === null || typeof id === "number" && Number.isSafeInteger(id) && id >= 1;
-var driveItemIdOk = (id) => typeof id === "string" && DRIVE_ITEM_ID_RE.test(id);
-function folderNameOk(name, max = FOLDER_NAME_MAX) {
-  return typeof name === "string" && chars(name) >= 1 && chars(name) <= max && !FOLDER_NAME_FORBIDDEN_RE.test(name) && name === trimText(name);
-}
-var pickedDriveNameOk = (name) => name === null || folderNameOk(name, DRIVE_NAME_MAX);
-function repoOk(r) {
-  return isObj(r) && exactKeys(r, ["org", "repo", "id"]) && orgOk(r.org) && repoNameOk(r.repo) && repoIdOk(r.id);
-}
-function folderOk(f) {
-  return isObj(f) && exactKeys(f, ["domain", "drive_id", "folder_id", "folder_name", "drive_name"]) && domainOk(f.domain) && (f.drive_id === null || driveItemIdOk(f.drive_id)) && driveItemIdOk(f.folder_id) && folderNameOk(f.folder_name) && pickedDriveNameOk(f.drive_name);
-}
-var legacyDriveOk = (d) => isObj(d) && exactKeys(d, ["domain", "shared_drive"]) && domainOk(d.domain) && driveNameOk(d.shared_drive);
-var listOk = (v, max, ok) => Array.isArray(v) && v.length <= max && v.every(ok);
-function commonValid(raw) {
-  return topicOk(raw.topic) && listOk(raw.github_orgs, BOUNDARIES_MAX_ORGS, orgOk) && listOk(raw.drives, BOUNDARIES_MAX_DRIVES, legacyDriveOk) && typeof raw.member_folders === "boolean";
-}
-function boundariesValid(raw) {
-  if (!isObj(raw) || !exactKeys(raw, BOUNDARIES_FIELDS)) return false;
-  return commonValid(raw) && listOk(raw.github_repos, BOUNDARIES_MAX_REPOS, repoOk) && listOk(raw.drive_folders, BOUNDARIES_MAX_FOLDERS, folderOk);
-}
 function readBoundaries(raw) {
-  if (boundariesValid(raw)) return raw;
-  if (!isObj(raw) || !exactKeys(raw, M10_BOUNDARIES_FIELDS) || !commonValid(raw)) return null;
-  const m10 = raw;
-  return { topic: m10.topic, github_orgs: m10.github_orgs, github_repos: [], drive_folders: [], drives: m10.drives, member_folders: m10.member_folders };
-}
-var lowerRepo = (r) => `${r.org.toLowerCase()}/${r.repo.toLowerCase()}`;
-var sameDrive = (a, b) => a.domain === b.domain && a.shared_drive === b.shared_drive;
-function normaliseBoundaries(b) {
-  const orgSeen = /* @__PURE__ */ new Set();
-  const github_orgs = b.github_orgs.filter((o) => !orgSeen.has(o.toLowerCase()) && orgSeen.add(o.toLowerCase()));
-  const repoSeen = /* @__PURE__ */ new Set();
-  const github_repos = b.github_repos.filter((r) => !orgSeen.has(r.org.toLowerCase()) && !repoSeen.has(lowerRepo(r)) && repoSeen.add(lowerRepo(r)));
-  const folderSeen = /* @__PURE__ */ new Set();
-  const drive_folders = b.drive_folders.filter((f) => !folderSeen.has(f.folder_id) && folderSeen.add(f.folder_id));
-  const drives = b.drives.filter((d, i) => b.drives.findIndex((x) => sameDrive(x, d)) === i);
-  return {
-    topic: trimText(b.topic),
-    github_orgs,
-    github_repos: github_repos.map((r) => ({ org: r.org, repo: r.repo, id: r.id })),
-    drive_folders: drive_folders.map((f) => ({ domain: f.domain, drive_id: f.drive_id, folder_id: f.folder_id, folder_name: f.folder_name, drive_name: f.drive_name })),
-    drives: drives.map((d) => ({ domain: d.domain, shared_drive: d.shared_drive })),
-    member_folders: b.member_folders
-  };
-}
-var orgKey = (org) => `org:${org.toLowerCase()}`;
-var repoKey = (r) => `repo:${lowerRepo(r)}`;
-var folderKey = (f) => `folder:${f.folder_id}`;
-var driveKey = (d) => `drive:${d.domain}/${d.shared_drive}`;
-function itemKey(item) {
-  switch (item.kind) {
-    case "org":
-      return orgKey(item.org);
-    case "repo":
-      return repoKey(item);
-    case "folder":
-      return folderKey(item);
-    case "drive":
-      return driveKey(item);
-  }
-}
-function boundaryItems(b) {
-  const n = normaliseBoundaries(b);
-  return [
-    ...n.github_orgs.map((org) => ({ kind: "org", org })),
-    ...n.github_repos.map((r) => ({ kind: "repo", ...r })),
-    ...n.drive_folders.map((f) => ({ kind: "folder", ...f })),
-    ...n.drives.map((d) => ({ kind: "drive", ...d }))
-  ];
-}
-function itemKeys(b) {
-  return boundaryItems(b).map(itemKey);
+  if (!isObj(raw) || !has(raw, "topic") || !topicOk(raw.topic)) return null;
+  const removed = REMOVED_BOUNDARIES_FIELDS;
+  if (!Object.keys(raw).every((k) => k === "topic" || removed.includes(k))) return null;
+  return { topic: raw.topic };
 }
 
 // src/deny-list.ts
@@ -16796,275 +16595,15 @@ function credentialHit(p, ctx) {
   return null;
 }
 
-// src/drive-locate.ts
-import { execFile as execFile3 } from "node:child_process";
-import { promises as fsp } from "node:fs";
-import { join as join6, relative, sep } from "node:path";
-var DRIVEFS_ITEM_ID_ATTR = "com.google.drivefs.item-id#S";
-var XATTR_BIN = "/usr/bin/xattr";
-var XATTR_TIMEOUT_MS = 5e3;
-var READS_AT_ONCE = 4;
-function xattrItemId(home2) {
-  return (path) => new Promise((resolve) => {
-    try {
-      execFile3(
-        XATTR_BIN,
-        ["-p", DRIVEFS_ITEM_ID_ATTR, path],
-        { env: { PATH: "/usr/bin:/bin", HOME: home2 }, timeout: XATTR_TIMEOUT_MS, maxBuffer: 4096, encoding: "utf8", windowsHide: true, shell: false },
-        (err, stdout) => {
-          const id = err ? "" : String(stdout).trim();
-          resolve(DRIVE_ITEM_ID_RE.test(id) ? id : null);
-        }
-      );
-    } catch {
-      resolve(null);
-    }
-  });
-}
-var DEFAULT_LOCATE_LIMITS = {
-  rootsPerMount: 50,
-  depth: 8,
-  hintDirs: 5e3,
-  blindReads: 300,
-  blindMs: 1e4,
-  verifyMs: 6e4,
-  notFoundMs: 10 * 6e4
-};
-var ACCOUNT_RE2 = /^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+)$/;
-var byName = (a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
-async function realOrNull(p) {
-  try {
-    return await fsp.realpath(p);
-  } catch {
-    return null;
-  }
-}
-async function listDirs(dir) {
-  try {
-    return (await fsp.readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory() && !e.name.startsWith(".")).sort(byName);
-  } catch {
-    return [];
-  }
-}
-async function driveMounts(home2, domain) {
-  const want = domain.toLowerCase();
-  const cloud = await realOrNull(join6(home2, "Library", "CloudStorage"));
-  if (!cloud) return [];
-  const out = [];
-  for (const e of await listDirs(cloud)) {
-    const m = /^GoogleDrive-(.+)$/.exec(e.name);
-    const am = m ? ACCOUNT_RE2.exec(m[1]) : null;
-    if (!m || !am || am[1].toLowerCase() !== want) continue;
-    const shared = join6(cloud, e.name, "Shared drives");
-    try {
-      const st = await fsp.lstat(shared);
-      if (!st.isDirectory()) continue;
-    } catch {
-      continue;
-    }
-    if (await realOrNull(shared) !== shared) continue;
-    out.push({ account: m[1], shared });
-  }
-  return out;
-}
-async function mountsSignature(home2) {
-  const cloud = await realOrNull(join6(home2, "Library", "CloudStorage"));
-  if (!cloud) return "";
-  const parts = [];
-  for (const e of await listDirs(cloud)) {
-    if (!e.name.startsWith("GoogleDrive-")) continue;
-    const roots = (await listDirs(join6(cloud, e.name, "Shared drives"))).map((r) => r.name);
-    parts.push(JSON.stringify([e.name, roots]));
-  }
-  return parts.join("\n");
-}
-function limited(fn, n) {
-  let running = 0;
-  const waiting = [];
-  return async (path) => {
-    if (running >= n) await new Promise((r) => waiting.push(r));
-    running++;
-    try {
-      return await fn(path);
-    } catch {
-      return null;
-    } finally {
-      running--;
-      waiting.shift()?.();
-    }
-  };
-}
-var DriveLocator = class {
-  home;
-  readId;
-  now;
-  limits;
-  cache = /* @__PURE__ */ new Map();
-  notFound = /* @__PURE__ */ new Map();
-  entriesKey = null;
-  mountsKey = null;
-  constructor(o) {
-    this.home = o.home;
-    this.readId = limited(o.readId ?? xattrItemId(o.home), READS_AT_ONCE);
-    this.now = o.now ?? Date.now;
-    this.limits = { ...DEFAULT_LOCATE_LIMITS, ...o.limits };
-  }
-  /**
-   * Where each entry is on this Mac (by folder_id; an entry not found is not in the map).
-   * `force`: every cached path is checked again now (before a status report).
-   */
-  async locate(entries, opts = {}) {
-    const entriesKey = JSON.stringify(entries.map((e) => [e.domain, e.drive_id, e.folder_id, e.folder_name]));
-    const mountsKey = await mountsSignature(this.home);
-    if (entriesKey !== this.entriesKey || mountsKey !== this.mountsKey) this.notFound.clear();
-    this.entriesKey = entriesKey;
-    this.mountsKey = mountsKey;
-    const budget = { hintDirs: this.limits.hintDirs, blindReads: this.limits.blindReads, blindUntil: null, roots: /* @__PURE__ */ new Map(), mounts: /* @__PURE__ */ new Map() };
-    const out = /* @__PURE__ */ new Map();
-    for (const e of entries) {
-      if (out.has(e.folder_id) || !DRIVE_ITEM_ID_RE.test(e.folder_id) || e.drive_id !== null && !DRIVE_ITEM_ID_RE.test(e.drive_id)) continue;
-      const cached = this.cache.get(e.folder_id);
-      if (cached) {
-        if (cached.domain === e.domain && (e.drive_id === null || e.drive_id === cached.drive_root_id)) {
-          if (!opts.force && this.now() - cached.verifiedAt < this.limits.verifyMs) {
-            out.set(e.folder_id, strip(cached));
-            continue;
-          }
-          if (await this.verify(cached, budget)) {
-            cached.verifiedAt = this.now();
-            out.set(e.folder_id, strip(cached));
-            continue;
-          }
-        }
-        this.cache.delete(e.folder_id);
-      }
-      const missedAt = this.notFound.get(e.folder_id);
-      if (missedAt !== void 0 && this.now() - missedAt < this.limits.notFoundMs) continue;
-      const found = await this.search(e, budget);
-      if (found) {
-        this.notFound.delete(e.folder_id);
-        this.cache.set(e.folder_id, { ...found, verifiedAt: this.now() });
-        out.set(e.folder_id, found);
-      } else {
-        this.notFound.set(e.folder_id, this.now());
-      }
-    }
-    return out;
-  }
-  async mounts(domain, budget) {
-    let m = budget.mounts.get(domain);
-    if (!m) {
-      m = await driveMounts(this.home, domain);
-      budget.mounts.set(domain, m);
-    }
-    return m;
-  }
-  /** The shared drive roots of one mount and their ids, read once per `locate`. */
-  async roots(mount, budget) {
-    let r = budget.roots.get(mount.shared);
-    if (!r) {
-      const dirs = (await listDirs(mount.shared)).slice(0, this.limits.rootsPerMount).map((d) => join6(mount.shared, d.name));
-      r = await Promise.all(dirs.map(async (path) => ({ path, id: await this.readId(path) })));
-      budget.roots.set(mount.shared, r);
-    }
-    return r;
-  }
-  /** Whether a cached place is still the folder (see the module comment). */
-  async verify(c, budget) {
-    if (!(await this.mounts(c.domain, budget)).some((m) => m.shared === c.shared && m.account === c.account)) return false;
-    const rel = relative(c.shared, c.path);
-    if (!rel || rel.startsWith("..") || rel.split(sep).some((s) => s === "" || s.startsWith("."))) return false;
-    if (join6(c.shared, rel.split(sep)[0]) !== c.drive_root) return false;
-    for (const p of c.path === c.drive_root ? [c.path] : [c.drive_root, c.path]) {
-      try {
-        const st = await fsp.lstat(p);
-        if (!st.isDirectory()) return false;
-      } catch {
-        return false;
-      }
-      if (await realOrNull(p) !== p) return false;
-    }
-    if (await this.readId(c.path) !== c.folder_id) return false;
-    return c.path === c.drive_root || await this.readId(c.drive_root) === c.drive_root_id;
-  }
-  async search(e, budget) {
-    for (const mount of await this.mounts(e.domain, budget)) {
-      const roots = await this.roots(mount, budget);
-      const found = (root, path) => ({
-        folder_id: e.folder_id,
-        domain: e.domain,
-        account: mount.account,
-        shared: mount.shared,
-        drive_root: root.path,
-        drive_root_id: root.id,
-        path
-      });
-      const withId = roots.filter((r) => r.id !== null);
-      if (e.drive_id !== null) {
-        const root = withId.find((r) => r.id === e.drive_id);
-        if (!root) continue;
-        if (e.folder_id === e.drive_id) return found(root, root.path);
-        const p = await this.walk([root], e, budget, "hint") ?? await this.walk([root], e, budget, "blind");
-        if (p) return found(root, p.path);
-      } else {
-        const whole = withId.find((r) => r.id === e.folder_id);
-        if (whole) return found(whole, whole.path);
-        const p = await this.walk(withId, e, budget, "hint");
-        if (p) return found(p.root, p.path);
-      }
-    }
-    return null;
-  }
-  /**
-   * Breadth-first below the roots, directories only, never through a symlink or a dot name, at
-   * most `depth` levels: 'hint' reads the id of each directory named as the entry; 'blind' reads
-   * every directory's id. The first whose id is the folder's, and is its own real path, is it.
-   */
-  async walk(roots, e, budget, mode) {
-    const want = e.folder_name.normalize("NFC");
-    if (mode === "blind") budget.blindUntil ??= this.now() + this.limits.blindMs;
-    const queue = roots.map((root) => ({ root, dir: root.path, depth: 0 }));
-    const isIt = async (path) => await this.readId(path) === e.folder_id && await realOrNull(path) === path;
-    while (queue.length) {
-      const { root, dir, depth } = queue.shift();
-      if (mode === "hint") {
-        if (budget.hintDirs <= 0) return null;
-        budget.hintDirs--;
-      }
-      const children = (await listDirs(dir)).map((d) => ({ name: d.name, path: join6(dir, d.name) }));
-      if (mode === "hint") {
-        for (const c of children) if (c.name.normalize("NFC") === want && await isIt(c.path)) return { root, path: c.path };
-      } else {
-        for (let i = 0; i < children.length; ) {
-          if (budget.blindReads <= 0 || this.now() > budget.blindUntil) return null;
-          const batch = children.slice(i, i + Math.min(READS_AT_ONCE, budget.blindReads));
-          budget.blindReads -= batch.length;
-          i += batch.length;
-          const ids = await Promise.all(batch.map((c) => this.readId(c.path)));
-          for (const [k, c] of batch.entries()) if (ids[k] === e.folder_id && await realOrNull(c.path) === c.path) return { root, path: c.path };
-        }
-      }
-      if (depth + 1 < this.limits.depth) for (const c of children) queue.push({ root, dir: c.path, depth: depth + 1 });
-    }
-    return null;
-  }
-};
-function strip(c) {
-  const { verifiedAt: _v, ...f } = c;
-  return f;
-}
-
 // src/member-folders.ts
 import { chmodSync as chmodSync3, closeSync as closeSync3, fsyncSync as fsyncSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync5, openSync as openSync3, readFileSync as readFileSync7, renameSync as renameSync5, rmSync as rmSync6, writeSync as writeSync3 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { basename as basename3, dirname as dirname3, isAbsolute as isAbsolute6, join as join8, normalize as normalize3 } from "node:path";
-init_relay_client_core();
+import { basename as basename3, dirname as dirname3, isAbsolute as isAbsolute6, join as join7, normalize as normalize3 } from "node:path";
 
 // src/scope.ts
 import { existsSync, readdirSync, statSync as statSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute5, join as join7, normalize as normalize2 } from "node:path";
-init_credentials();
+import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute5, join as join6, normalize as normalize2 } from "node:path";
 function relayCredentialDirs(env2) {
   const dirs = [configDir(env2)];
   try {
@@ -17098,7 +16637,7 @@ function folderSafety(cwd, env2) {
   if (path === "/") return refuse("it is the root directory");
   if (path === homeReal || normalize2(cwd) === normalize2(home2)) return refuse("it is your home directory");
   if (within(homeReal, path) || within(normalize2(home2), path)) return refuse("it contains your home directory");
-  const configDirs = [join7(homeReal, ".claude"), join7(homeReal, ".claude-team-relay"), ...relayCredentialDirs(env2).map(realOr)];
+  const configDirs = [join6(homeReal, ".claude"), join6(homeReal, ".claude-team-relay"), ...relayCredentialDirs(env2).map(realOr)];
   const claudeConfig = env2.CLAUDE_CONFIG_DIR?.trim();
   if (claudeConfig && isAbsolute5(claudeConfig)) configDirs.push(realOr(claudeConfig));
   for (const d of configDirs) {
@@ -17128,14 +16667,14 @@ function homeEntries(homeReal) {
   }
   const wanted = /* @__PURE__ */ new Set(["Library", ...names.filter((n) => n.startsWith(".") && n !== "." && n !== "..")]);
   return [...wanted].map((name) => {
-    const path = join7(homeReal, name);
+    const path = join6(homeReal, name);
     return { name, path, real: realOr(path) };
   });
 }
 function inGitWorkTree(path, homeReal) {
   for (let d = path; ; d = dirname2(d)) {
     if (d === "/" || within(homeReal, d)) return false;
-    if (existsSync(join7(d, ".git"))) return true;
+    if (existsSync(join6(d, ".git"))) return true;
     if (dirname2(d) === d) return false;
   }
 }
@@ -17146,6 +16685,7 @@ var MAX_FOLDERS = 20;
 var MAX_TEAMS = 20;
 var MAX_PATH = 1024;
 var MAX_FILE_BYTES2 = 256 * 1024;
+var OLD_FOLDER_LISTS = ["repo_roots", "extra_folders"];
 var MemberFoldersError = class extends Error {
   constructor(message) {
     super(message);
@@ -17153,14 +16693,14 @@ var MemberFoldersError = class extends Error {
   }
 };
 function memberFoldersPath(env2) {
-  return join8(configDir(env2), MEMBER_FOLDERS_FILE);
+  return join7(configDir(env2), MEMBER_FOLDERS_FILE);
 }
 function home(env2) {
   return env2.HOME?.trim() || homedir4();
 }
 function expandPath(raw, env2) {
   if (raw === "~") return normalize3(home(env2));
-  if (raw.startsWith("~/")) return normalize3(join8(home(env2), raw.slice(2)));
+  if (raw.startsWith("~/")) return normalize3(join7(home(env2), raw.slice(2)));
   if (isAbsolute6(raw)) return normalize3(raw);
   return null;
 }
@@ -17179,82 +16719,52 @@ function onlyKeys(o, allowed, what) {
     if (!allowed.includes(k)) throw new MemberFoldersError(`${what} has an unknown field (${JSON.stringify(k.slice(0, 40))})`);
   }
 }
-function parseMemberFolders(raw, env2, what = "the folders file") {
-  if (!isObj2(raw)) throw new MemberFoldersError(`${what} is not a JSON object`);
-  const out = { repo_roots: [], extra_folders: [] };
-  for (const key of ["repo_roots", "extra_folders"]) {
-    const list = raw[key] ?? [];
-    if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
-    if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
-    for (const entry of list) {
-      const { reason: reason2 } = memberFolderProblem(entry, env2);
-      if (reason2 && reason2 !== "it does not exist") throw new MemberFoldersError(`${key} entry ${JSON.stringify(String(entry).slice(0, 200))} cannot be used: ${reason2}`);
-      if (!out[key].includes(entry)) out[key].push(entry);
-    }
-  }
-  return out;
+function holds(list, raw, env2) {
+  const target = expandPath(raw, env2);
+  return list.some((e) => e === raw || target !== null && expandPath(e, env2) === target);
 }
-function sameDrive2(a, b) {
-  return a.domain === b.domain && a.shared_drive === b.shared_drive;
+function parseList(raw, key, env2) {
+  const list = raw ?? [];
+  if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
+  if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
+  for (const entry of list) {
+    const { reason: reason2 } = memberFolderProblem(entry, env2);
+    if (reason2 && reason2 !== "it does not exist") throw new MemberFoldersError(`${key} entry ${JSON.stringify(String(entry).slice(0, 200))} cannot be used: ${reason2}`);
+  }
+  return list;
 }
-function parseAccepted(raw) {
-  if (!isObj2(raw)) throw new MemberFoldersError("accepted is not a JSON object");
-  onlyKeys(raw, ["version", "github_orgs", "github_repos", "drive_folders", "drives", "member_folders"], "accepted");
-  const v = raw.version;
-  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1 || v > BOUNDARIES_VERSION_MAX) throw new MemberFoldersError("accepted.version must be a whole number from 1");
-  if (!Array.isArray(raw.github_orgs) || raw.github_orgs.length > BOUNDARIES_MAX_ORGS) throw new MemberFoldersError("accepted.github_orgs must be a list of at most 10 org names");
-  const orgs = [];
-  for (const o of raw.github_orgs) {
-    if (!orgOk(o)) throw new MemberFoldersError("accepted.github_orgs has an entry that is not a GitHub org name");
-    if (!orgs.some((x) => x.toLowerCase() === o.toLowerCase())) orgs.push(o);
-  }
-  if (!Array.isArray(raw.drives) || raw.drives.length > BOUNDARIES_MAX_DRIVES) throw new MemberFoldersError("accepted.drives must be a list of at most 10 shared drives");
-  const drives = [];
-  for (const d of raw.drives) {
-    if (!isObj2(d)) throw new MemberFoldersError("accepted.drives has an entry that is not an object");
-    onlyKeys(d, ["domain", "shared_drive"], "an accepted drive");
-    if (!domainOk(d.domain)) throw new MemberFoldersError("accepted.drives has a domain that is not a lower-case DNS name");
-    if (!driveNameOk(d.shared_drive)) throw new MemberFoldersError("accepted.drives has a shared drive name that cannot be used");
-    const drive = { domain: d.domain, shared_drive: d.shared_drive };
-    if (!drives.some((x) => sameDrive2(x, drive))) drives.push(drive);
-  }
-  if (typeof raw.member_folders !== "boolean") throw new MemberFoldersError("accepted.member_folders must be true or false");
-  const rawRepos = raw.github_repos ?? [];
-  if (!Array.isArray(rawRepos) || rawRepos.length > BOUNDARIES_MAX_REPOS) throw new MemberFoldersError("accepted.github_repos must be a list of at most 100 repositories");
-  const repos = [];
-  for (const r of rawRepos) {
-    if (!repoOk(r)) throw new MemberFoldersError("accepted.github_repos has an entry that is not a GitHub repository");
-    if (!repos.some((x) => repoKey(x) === repoKey(r))) repos.push({ org: r.org, repo: r.repo, id: r.id });
-  }
-  const rawFolders = raw.drive_folders ?? [];
-  if (!Array.isArray(rawFolders) || rawFolders.length > BOUNDARIES_MAX_FOLDERS) throw new MemberFoldersError("accepted.drive_folders must be a list of at most 20 folders");
-  const folders = [];
-  for (const f of rawFolders) {
-    if (!folderOk(f)) throw new MemberFoldersError("accepted.drive_folders has an entry that is not a shared-drive folder");
-    if (!folders.some((x) => x.folder_id === f.folder_id)) folders.push({ domain: f.domain, drive_id: f.drive_id, folder_id: f.folder_id, folder_name: f.folder_name, drive_name: f.drive_name });
-  }
-  return { version: v, github_orgs: orgs, github_repos: repos, drive_folders: folders, drives, member_folders: raw.member_folders };
+function parseOldList(raw, key, env2) {
+  const list = raw ?? [];
+  if (!Array.isArray(list)) throw new MemberFoldersError(`${key} must be a list of paths`);
+  if (list.length > MAX_FOLDERS) throw new MemberFoldersError(`${key} has more than ${MAX_FOLDERS} entries`);
+  if (list.some((e) => typeof e !== "string")) throw new MemberFoldersError(`${key} must be a list of paths`);
+  return list.filter((e) => {
+    const { reason: reason2 } = memberFolderProblem(e, env2);
+    return reason2 === null || reason2 === "it does not exist";
+  });
 }
 function parseTeamSettings(raw, env2, team = "a team") {
   if (!isObj2(raw)) throw new MemberFoldersError(`the settings for ${team} are not a JSON object`);
-  onlyKeys(raw, ["repo_roots", "extra_folders", "accepted"], `the settings for ${team}`);
-  const folders = parseMemberFolders(raw, env2, `the settings for ${team}`);
-  let accepted = null;
-  if (raw.accepted !== void 0 && raw.accepted !== null) {
-    try {
-      accepted = parseAccepted(raw.accepted);
-    } catch {
-      accepted = null;
+  onlyKeys(raw, ["folders", ...OLD_FOLDER_LISTS, "accepted"], `the settings for ${team}`);
+  const folders = [];
+  for (const entry of parseList(raw.folders, "folders", env2)) if (!holds(folders, entry, env2)) folders.push(entry);
+  const previous = [];
+  const seen = [...folders];
+  for (const [key, kind] of [["repo_roots", "repo_root"], ["extra_folders", "own_folder"]]) {
+    for (const entry of parseOldList(raw[key], key, env2)) {
+      if (holds(seen, entry, env2)) continue;
+      seen.push(entry);
+      previous.push({ path: entry, kind });
     }
   }
-  return { ...folders, accepted };
+  return { folders, previous };
 }
 function emptyTeams() {
   return /* @__PURE__ */ Object.create(null);
 }
 function parseMemberSettings(raw, env2) {
   if (!isObj2(raw)) throw new MemberFoldersError("the folders file is not a JSON object");
-  if ("repo_roots" in raw || "extra_folders" in raw) {
+  if ("repo_roots" in raw || "extra_folders" in raw || "folders" in raw) {
     throw new MemberFoldersError('the folders file has an older format (no "teams"); remove it and set your folders again with /team-relay:folders');
   }
   onlyKeys(raw, ["teams"], "the folders file");
@@ -17262,15 +16772,23 @@ function parseMemberSettings(raw, env2) {
   const names = Object.keys(raw.teams);
   if (names.length > MAX_TEAMS) throw new MemberFoldersError(`the folders file has more than ${MAX_TEAMS} teams`);
   const teams = emptyTeams();
+  const old = /* @__PURE__ */ Object.create(null);
   for (const name of names) {
     if (!TEAM_RE.test(name)) throw new MemberFoldersError(`the folders file has a team name that is not a team id (${JSON.stringify(name.slice(0, 40))})`);
-    teams[name] = parseTeamSettings(raw.teams[name], env2, `team ${name}`);
+    const entry = raw.teams[name];
+    teams[name] = parseTeamSettings(entry, env2, `team ${name}`);
+    const kept = {};
+    for (const key of OLD_FOLDER_LISTS) {
+      const list = entry[key];
+      if (Array.isArray(list)) kept[key] = [...list];
+    }
+    if (Object.keys(kept).length) old[name] = kept;
   }
-  return { teams };
+  return { teams, old };
 }
 function teamSettings(settings, team) {
   const t = Object.prototype.hasOwnProperty.call(settings.teams, team) ? settings.teams[team] : void 0;
-  return t ? { repo_roots: [...t.repo_roots], extra_folders: [...t.extra_folders], accepted: t.accepted } : { repo_roots: [], extra_folders: [], accepted: null };
+  return t ? { folders: [...t.folders], previous: t.previous.map((x) => ({ ...x })) } : { folders: [], previous: [] };
 }
 function uid2() {
   return typeof process.getuid === "function" ? process.getuid() : null;
@@ -17308,118 +16826,399 @@ function readMemberSettings(path, env2) {
 function readTeamSettings(path, env2, team) {
   return teamSettings(readMemberSettings(path, env2), team);
 }
-var own = (o, key) => o && Object.prototype.hasOwnProperty.call(o, key) ? o[key] : void 0;
-function sinceOf(tb) {
-  const s = tb.since ?? null;
-  const item = (key) => {
-    if (!s) return void 0;
-    const at = key.indexOf(":");
-    const kind = key.slice(0, at);
-    const rest = key.slice(at + 1);
-    if (kind === "org") return own(s.github_orgs, rest);
-    if (kind === "repo") return own(s.github_repos, rest);
-    if (kind === "folder") return own(s.drive_folders, rest);
-    return s.drives.find((d) => driveKey(d) === key)?.since;
-  };
-  return {
-    version: tb.version,
-    item: (key) => item(key) ?? tb.version,
-    memberFolders: () => s?.member_folders ?? tb.version
-  };
+function hasAccepted(acceptedVersion, currentVersion) {
+  return typeof acceptedVersion === "number" && Number.isSafeInteger(acceptedVersion) && acceptedVersion >= 1 && acceptedVersion <= BOUNDARIES_VERSION_MAX && acceptedVersion <= currentVersion;
 }
-var keySet = (a) => /* @__PURE__ */ new Set([...a.github_orgs.map(orgKey), ...a.github_repos.map(repoKey), ...a.drive_folders.map(folderKey), ...a.drives.map(driveKey)]);
-var wholeDrives = (a) => new Set(a.drive_folders.filter((f) => f.drive_id !== null && f.folder_id === f.drive_id).map((f) => f.folder_id));
-function holds(keys, wholes, item) {
-  if (keys.has(itemKey(item))) return true;
-  if (item.kind === "repo") return keys.has(orgKey(item.org));
-  if (item.kind === "folder") return item.drive_id !== null && wholes.has(item.drive_id);
-  return false;
-}
-function widening(items, member_folders) {
-  const w = { github_orgs: [], github_repos: [], drive_folders: [], drives: [], member_folders };
-  for (const i of items) {
-    if (i.kind === "org") w.github_orgs.push(i.org);
-    else if (i.kind === "repo") w.github_repos.push({ org: i.org, repo: i.repo, id: i.id });
-    else if (i.kind === "folder") w.drive_folders.push({ domain: i.domain, drive_id: i.drive_id, folder_id: i.folder_id, folder_name: i.folder_name, drive_name: i.drive_name });
-    else w.drives.push({ domain: i.domain, shared_drive: i.shared_drive });
+
+// src/read-trail-core.ts
+import { basename as basename4 } from "node:path";
+var SENSITIVE_NAMES = [
+  "*.tfstate",
+  "secrets.*",
+  "*.properties",
+  "docker-compose*",
+  "kubeconfig",
+  "*service-account*.json",
+  ".npmrc",
+  ".netrc",
+  ".git-credentials",
+  ".dev.vars",
+  "id_ecdsa*",
+  "id_dsa*",
+  "*.ppk",
+  "*.pem",
+  "*.key",
+  "*.p12"
+];
+function globMatch(glob, name) {
+  const parts = glob.toLowerCase().split("*");
+  const s = name.toLowerCase();
+  if (parts.length === 1) return s === parts[0];
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+  if (!s.startsWith(first) || s.length < first.length + last.length || !s.endsWith(last)) return false;
+  let at = first.length;
+  const end = s.length - last.length;
+  for (const mid of parts.slice(1, -1)) {
+    const i = s.indexOf(mid, at);
+    if (i < 0 || i + mid.length > end) return false;
+    at = i + mid.length;
   }
-  return w;
+  return true;
 }
-var widens = (w) => w.github_orgs.length > 0 || w.github_repos.length > 0 || w.drive_folders.length > 0 || w.drives.length > 0 || w.member_folders;
-function effectiveBoundaries(current, acceptedRaw, since) {
-  const accepted = acceptedRaw ? narrowAccepted(current, acceptedRaw, since)?.accepted ?? acceptedRaw : null;
-  const keys = accepted ? keySet(accepted) : /* @__PURE__ */ new Set();
-  const wholes = accepted ? wholeDrives(accepted) : /* @__PURE__ */ new Set();
-  const stale = accepted !== null && accepted.version > since.version;
-  const isIn = (i) => accepted !== null && !stale && since.item(itemKey(i)) <= accepted.version && holds(keys, wholes, i);
-  const items = boundaryItems(current);
-  const inside = items.filter(isIn);
-  const kept = widening(inside, current.member_folders && accepted?.member_folders === true);
-  const added = widening(
-    items.filter((i) => !isIn(i)),
-    current.member_folders && accepted?.member_folders !== true
+function sensitiveName(path) {
+  const name = basename4(path.replace(/[/\\]+$/, ""));
+  return name !== "" && SENSITIVE_NAMES.some((glob) => globMatch(glob, name));
+}
+
+// src/boundary-set.ts
+var MAX_WALK_FILE_BYTES = 5 * 1024 * 1024;
+var DEFAULT_LIMITS = {
+  walkFiles: 2e4,
+  walkDirs: 5e3,
+  walkDepth: 20,
+  totalFiles: 1e5,
+  walkMs: 2e4
+};
+function homeDir(env2) {
+  return env2.HOME?.trim() || homedir5();
+}
+function gitEnv(env2) {
+  return {
+    PATH: env2.PATH || process.env.PATH || "/usr/bin:/bin",
+    HOME: homeDir(env2),
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_OPTIONAL_LOCKS: "0",
+    LC_ALL: "C"
+  };
+}
+var runGit = (cwd, args, env2) => new Promise((resolve) => {
+  execFile3(
+    "git",
+    ["-C", cwd, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
+    { env: gitEnv(env2), timeout: 3e4, maxBuffer: 64 * 1024 * 1024, encoding: "utf8", windowsHide: true },
+    (err, stdout) => resolve(err ? null : stdout)
   );
-  return {
-    boundaries: { topic: current.topic, ...kept },
-    notAccepted: accepted === null,
-    pending: widens(added) ? added : null
-  };
-}
-function narrowAccepted(current, accepted, since) {
-  if (!accepted) return null;
-  const stale = accepted.version > since.version;
-  const covered = (n) => !stale && n <= accepted.version;
-  const keys = keySet(accepted);
-  const wholes = wholeDrives(accepted);
-  const kept = boundaryItems(current).filter((i) => covered(since.item(itemKey(i))) && holds(keys, wholes, i));
-  const keptKeys = new Set(kept.map(itemKey));
-  const folders = accepted.member_folders && current.member_folders && covered(since.memberFolders());
-  const next = { version: accepted.version, ...widening(kept, folders) };
-  const droppedItems = [
-    ...accepted.github_orgs.map((org) => ({ kind: "org", org })),
-    ...accepted.github_repos.map((r) => ({ kind: "repo", ...r })),
-    ...accepted.drive_folders.map((f) => ({ kind: "folder", ...f })),
-    ...accepted.drives.map((d) => ({ kind: "drive", ...d }))
-  ].filter((i) => !keptKeys.has(itemKey(i)));
-  const dropped = widening(droppedItems, accepted.member_folders && !folders);
-  const same = keptKeys.size === keys.size && [...keys].every((k) => keptKeys.has(k));
-  if (!widens(dropped) && same) return null;
-  const asAccepted = (list, key, from) => list.map((x) => from.find((y) => key(y) === key(x)) ?? x);
-  return {
-    accepted: {
-      ...next,
-      github_orgs: next.github_orgs.map((o) => accepted.github_orgs.find((a) => a.toLowerCase() === o.toLowerCase()) ?? o),
-      github_repos: asAccepted(next.github_repos, repoKey, accepted.github_repos),
-      drive_folders: asAccepted(next.drive_folders, folderKey, accepted.drive_folders),
-      drives: asAccepted(next.drives, driveKey, accepted.drives)
-    },
-    dropped
-  };
-}
-function acceptedAtVersion(current, version2, since) {
-  if (typeof version2 !== "number" || !Number.isSafeInteger(version2) || version2 < 1 || version2 > since.version) return null;
+});
+var GitCache = class {
+  entries = /* @__PURE__ */ new Map();
+  get(tree, key) {
+    const e = this.entries.get(tree);
+    return e && e.key === key ? e.files : null;
+  }
+  set(tree, key, files) {
+    if (this.entries.size > 500) this.entries.clear();
+    this.entries.set(tree, { key, files });
+  }
+};
+async function gitDirOf(tree) {
+  const dotgit = join8(tree, ".git");
   try {
-    return acceptedFrom(current, version2);
+    const st = await fsp.lstat(dotgit);
+    if (st.isDirectory()) return dotgit;
+    if (!st.isFile() || st.size > 4096) return null;
+    const m = /^gitdir:\s*(.+?)\s*$/m.exec(await fsp.readFile(dotgit, "utf8"));
+    if (!m) return null;
+    return m[1].startsWith("/") ? m[1] : join8(tree, m[1]);
   } catch {
     return null;
   }
 }
-function acceptedFrom(current, version2) {
-  const n = normaliseBoundaries(current);
-  return parseAccepted({
-    version: version2,
-    github_orgs: n.github_orgs,
-    github_repos: n.github_repos,
-    drive_folders: n.drive_folders,
-    drives: n.drives,
-    member_folders: n.member_folders
-  });
+async function gitCacheKey(tree) {
+  const dir = await gitDirOf(tree);
+  if (!dir) return null;
+  try {
+    const head = (await fsp.readFile(join8(dir, "HEAD"), "utf8")).slice(0, 300);
+    let ref = "";
+    const m = /^ref:\s*(\S+)/.exec(head);
+    if (m && /^refs\/[A-Za-z0-9._/-]+$/.test(m[1]) && !m[1].includes("..")) {
+      ref = await fsp.readFile(join8(dir, m[1]), "utf8").catch(() => "");
+    }
+    const idx = await fsp.stat(join8(dir, "index"));
+    return `${head}|${ref.trim()}|${idx.mtimeMs}|${idx.size}|${idx.ino}`;
+  } catch {
+    return null;
+  }
 }
-
-// src/manifest.ts
-var import_yaml = __toESM(require_dist(), 1);
-var import__ = __toESM(require__(), 1);
-import { readFileSync as readFileSync8 } from "node:fs";
+async function trackedFiles(dir, env2, git, cache) {
+  const key = cache ? await gitCacheKey(dir) : null;
+  if (cache && key) {
+    const hit = cache.get(dir, key);
+    if (hit) return hit;
+  }
+  const out = await git(dir, ["ls-files", "-z", "--cached", "--full-name"], env2);
+  if (out === null) return null;
+  const top = await git(dir, ["rev-parse", "--show-toplevel"], env2);
+  if (top === null) return null;
+  const topReal = await canonical(top.trim());
+  if (!topReal) return null;
+  const files = [];
+  for (const rel of out.split("\0")) {
+    if (!rel) continue;
+    const abs = join8(topReal, rel);
+    if (abs === dir || !within(abs, dir)) continue;
+    files.push(relative(dir, abs));
+  }
+  if (cache && key) cache.set(dir, key, files);
+  return files;
+}
+async function canonical(path) {
+  try {
+    return await fsp.realpath(path);
+  } catch {
+    return null;
+  }
+}
+var ANY_DEPTH_RES = ANY_DEPTH.map((rule) => globRe(rule.replace(/^\*\*\//, "").replace(/\/\*\*$/, "")));
+function denyContext(env2) {
+  const cloudsdk = env2.CLOUDSDK_CONFIG?.trim();
+  return {
+    home: homeDir(env2),
+    cloudsdkConfig: cloudsdk && cloudsdk.startsWith("/") ? cloudsdk : void 0,
+    credentialDirs: relayCredentialDirs(env2)
+  };
+}
+function alwaysOut(path, ctx) {
+  if (credentialHit(path, ctx) !== null) return true;
+  if (sensitiveName(path)) return true;
+  for (const part of path.split("/")) {
+    if (part === "") continue;
+    if (part === ".git") return true;
+    const lower = part.toLowerCase();
+    if (ANY_DEPTH_RES.some((re) => re.test(lower))) return true;
+  }
+  return false;
+}
+async function keepFiles(candidates, ctx, opts) {
+  const files = [];
+  let truncated = false;
+  const BATCH = 64;
+  for (let i = 0; i < candidates.length; i += BATCH) {
+    const batch = candidates.slice(i, i + BATCH);
+    const checked = await Promise.all(
+      batch.map(async (p) => {
+        if (alwaysOut(p, ctx)) return null;
+        const real = await canonical(p);
+        if (real !== p) return null;
+        try {
+          const st = await fsp.stat(real);
+          if (!st.isFile()) return null;
+          if (opts.maxBytes !== void 0 && st.size > opts.maxBytes) return null;
+        } catch {
+          return null;
+        }
+        return real;
+      })
+    );
+    for (const f of checked) {
+      if (f === null) continue;
+      if (opts.budget.left <= 0) {
+        truncated = true;
+        break;
+      }
+      opts.budget.left--;
+      files.push(f);
+    }
+    if (truncated) break;
+  }
+  files.sort();
+  return { files, truncated };
+}
+var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git"]);
+var isGitEntryName = (name) => name.toLowerCase() === ".git";
+function looksLikeGitDir(entries) {
+  const has2 = (name, dir) => entries.some((e) => e.name === name && (dir ? e.isDirectory() : e.isFile()));
+  return has2("HEAD", false) && has2("objects", true) && has2("refs", true);
+}
+async function walk(root, limits) {
+  const files = [];
+  const trees = [];
+  const gitDirs = [];
+  let dirs = 0;
+  let truncated = false;
+  const until = Date.now() + limits.walkMs;
+  const queue = [{ dir: root, depth: 0 }];
+  while (queue.length) {
+    const { dir, depth } = queue.shift();
+    if (++dirs > limits.walkDirs || Date.now() > until) {
+      truncated = true;
+      break;
+    }
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    if (entries.some((e) => isGitEntryName(e.name))) {
+      trees.push(dir);
+      continue;
+    }
+    if (looksLikeGitDir(entries)) {
+      gitDirs.push(dir);
+      continue;
+    }
+    entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    for (const e of entries) {
+      if (e.name.startsWith(".")) continue;
+      const p = join8(dir, e.name);
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name.toLowerCase()) && depth < limits.walkDepth) queue.push({ dir: p, depth: depth + 1 });
+      } else if (e.isFile()) {
+        if (files.length >= limits.walkFiles) {
+          truncated = true;
+          break;
+        }
+        files.push(p);
+      }
+    }
+    if (truncated) break;
+  }
+  return { files, trees, gitDirs, truncated };
+}
+async function underGitEntry(dir) {
+  for (let d = dir; ; d = dirname4(d)) {
+    try {
+      await fsp.lstat(join8(d, ".git"));
+      return true;
+    } catch {
+    }
+    if (dirname4(d) === d) return false;
+  }
+}
+var quotedName = (p) => JSON.stringify((basename5(p) || p).slice(0, 200));
+async function inGitDirByShape(dir) {
+  for (let d = dir; ; d = dirname4(d)) {
+    try {
+      if (looksLikeGitDir(await fsp.readdir(d, { withFileTypes: true }))) return true;
+    } catch {
+    }
+    if (dirname4(d) === d) return false;
+  }
+}
+async function inGitDir(root, env2, git) {
+  if (await inGitDirByShape(root)) return true;
+  const out = await git(root, ["rev-parse", "--is-bare-repository", "--is-inside-git-dir", "--absolute-git-dir"], env2);
+  if (out === null) return false;
+  const [bare, insideGitDir, gitDir] = out.split("\n").map((l) => l.trim());
+  if (bare === "true" || insideGitDir === "true") return true;
+  if (!gitDir) return false;
+  const real = await canonical(gitDir) ?? gitDir;
+  const rel = relative(root, real);
+  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute7(rel);
+}
+async function folderFiles(root, input) {
+  const { env: env2, git, cache, limits, ctx, budget } = input;
+  const unlisted = `folder ${quotedName(root)}: git could not list this repository's files, so none of them are used`;
+  const inside = await git(root, ["rev-parse", "--is-inside-work-tree"], env2);
+  if (inside?.trim() === "true") {
+    const rel = await trackedFiles(root, env2, git, cache);
+    if (rel === null) return { error: unlisted };
+    const kept = await keepFiles(
+      rel.map((r) => join8(root, r)),
+      ctx,
+      { budget }
+    );
+    return { ...kept, notes: [] };
+  }
+  if (await underGitEntry(root)) return { error: unlisted };
+  if (await inGitDir(root, env2, git)) {
+    return { error: `folder ${quotedName(root)} is not used: it is a git repository's own folder (a bare repository or a git directory), not a folder of files` };
+  }
+  const w = await walk(root, limits);
+  const walked = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
+  const files = [...walked.files];
+  const notes = w.gitDirs.map((d) => `folder ${quotedName(root)}: the git directory ${quotedName(d)} in it is not used`);
+  let truncated = w.truncated || walked.truncated;
+  for (const tree of w.trees) {
+    const rel = await trackedFiles(tree, env2, git, cache);
+    if (rel === null) {
+      notes.push(`folder ${quotedName(root)}: git could not list the files of the repository ${quotedName(tree)} in it, so none of them are used`);
+      continue;
+    }
+    const kept = await keepFiles(
+      rel.map((r) => join8(tree, r)),
+      ctx,
+      { budget }
+    );
+    files.push(...kept.files);
+    truncated ||= kept.truncated;
+  }
+  files.sort();
+  return { files, truncated, notes };
+}
+async function buildAllowedSet(input) {
+  const { env: env2 } = input;
+  const limits = { ...DEFAULT_LIMITS, ...input.limits };
+  const git = input.git ?? runGit;
+  const cache = input.cache === void 0 ? null : input.cache;
+  const ctx = denyContext(env2);
+  const notes = [];
+  const areas = [];
+  const budget = { left: limits.totalFiles };
+  if ("error" in input.member) notes.push(`your folders file cannot be used (${input.member.error})`);
+  const folders = "error" in input.member ? [] : input.member.folders;
+  for (const raw of folders) {
+    const { path, reason: reason2 } = memberFolderProblem(raw, env2);
+    if (reason2 || !path) {
+      notes.push(`folder ${JSON.stringify(raw.slice(0, 200))} is not used: ${reason2 ?? "not a path"}`);
+      continue;
+    }
+    const root = await canonical(path);
+    if (!root) {
+      notes.push(`folder ${quotedName(path)} is not used: it could not be resolved`);
+      continue;
+    }
+    const kept = await folderFiles(root, { env: env2, git, cache, limits, ctx, budget });
+    if ("error" in kept) {
+      notes.push(kept.error);
+      continue;
+    }
+    notes.push(...kept.notes);
+    areas.push({ kind: "folder", name: `folder:${basename5(root)}`, root, files: kept.files, truncated: kept.truncated });
+  }
+  const used = /* @__PURE__ */ new Set();
+  for (const a of areas) {
+    let n = a.name;
+    for (let k = 2; used.has(n); k++) n = `${a.name} (${k})`;
+    a.name = n;
+    used.add(n);
+  }
+  const files = /* @__PURE__ */ new Map();
+  for (const a of areas) for (const f of a.files) if (!files.has(f)) files.set(f, a);
+  return { version: input.version, areas, files, notes };
+}
+async function inSet(set, path, ctx) {
+  if (alwaysOut(normalize4(path), ctx)) return null;
+  const real = await canonical(path);
+  if (!real || alwaysOut(real, ctx)) return null;
+  return set.files.has(real) ? real : null;
+}
+function setSummary(set) {
+  const n = set.areas.length;
+  if (n === 0) return `none of your folders; ${set.files.size} files`;
+  const names = set.areas.slice(0, 8).map((a) => a.name.replace(/^[a-z]+:/, ""));
+  const list = `${names.join(", ")}${n > 8 ? ` and ${n - 8} more` : ""}`;
+  return `${n === 1 ? "1 of your folders" : `${n} of your folders`} (${list}); ${set.files.size} files`;
+}
+function areaRelative(area, path) {
+  return relative(area.root, path).split(sep).join("/");
+}
+function quotedOwnerText(text, limit) {
+  const flat = neutraliseChannelTags(text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim());
+  return JSON.stringify(flat.length <= limit ? flat : flat.slice(0, limit));
+}
+var isObj3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+function validBoundaries(v) {
+  if (!isObj3(v) || !versionOk(v.version)) return false;
+  if (v.boundaries !== null) {
+    const b = readBoundaries(v.boundaries);
+    if (!b) return false;
+    v.boundaries = b;
+  }
+  delete v.since;
+  return true;
+}
 
 // node_modules/.pnpm/re2js@2.8.6/node_modules/re2js/build/index.js
 var RE2Flags = class RE2Flags2 {
@@ -20402,10 +20201,10 @@ var Regexp = class Regexp2 {
         else out += sub.appendTo();
         break;
       case Regexp2.Op.ALTERNATE: {
-        let sep4 = "";
+        let sep2 = "";
         for (let sub of this.subs) {
-          out += sep4;
-          sep4 = "|";
+          out += sep2;
+          sep2 = "|";
           out += sub.appendTo();
         }
         break;
@@ -23716,6 +23515,545 @@ var RE2JS = class RE2JS2 {
   }
 };
 
+// src/secret-screen.ts
+var PREFIXED = [
+  { kind: "a private key", re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/ },
+  { kind: "a PGP private key", re: /-----BEGIN PGP PRIVATE KEY BLOCK-----/ },
+  { kind: "a key or certificate body", re: /\bMI[IGH][A-Za-z0-9+/]{40,}/ },
+  { kind: "an AWS access key id", re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[0-9A-Z]{16}\b/ },
+  { kind: "a GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\b/ },
+  { kind: "a GitLab token", re: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },
+  { kind: "a Slack token", re: /\bxox[abprsoe]-[A-Za-z0-9-]{10,}\b/ },
+  { kind: "a Slack webhook", re: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]{20,}/ },
+  { kind: "an Anthropic API key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/ },
+  { kind: "an OpenAI-style API key", re: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/ },
+  { kind: "a Stripe key", re: /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b/ },
+  { kind: "a Stripe webhook secret", re: /\bwhsec_[A-Za-z0-9]{24,}\b/ },
+  { kind: "a Google API key", re: /\bAIza[0-9A-Za-z_-]{35}\b/ },
+  { kind: "a Google OAuth token", re: /\bya29\.[0-9A-Za-z_-]{20,}/ },
+  { kind: "a Google OAuth client secret", re: /\bGOCSPX-[A-Za-z0-9_-]{20,}/ },
+  { kind: "a Google service account key", re: /"private_key_id"\s*:\s*"[0-9a-f]{20,}"/ },
+  { kind: "an npm token", re: /\bnpm_[A-Za-z0-9]{36}\b/ },
+  { kind: "a PyPI token", re: /\bpypi-[A-Za-z0-9_-]{50,}/ },
+  { kind: "a SendGrid key", re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/ },
+  { kind: "a Twilio key", re: /\bSK[0-9a-fA-F]{32}\b/ },
+  { kind: "a Hugging Face token", re: /\bhf_[A-Za-z0-9]{30,}\b/ },
+  { kind: "a DigitalOcean token", re: /\bdo[oprs]_v1_[a-f0-9]{64}\b/ },
+  { kind: "a Shopify token", re: /\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b/ },
+  { kind: "an Azure storage key", re: /AccountKey=[A-Za-z0-9+/=]{40,}/ },
+  { kind: "a team relay credential", re: /\btrc_[A-Za-z0-9_-]{43}\b/ },
+  { kind: "a JSON web token", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/ },
+  { kind: "a basic-auth header", re: /\bAuthorization:\s*(?:Basic|Bearer)\s+[A-Za-z0-9+/=._-]{12,}/i }
+];
+var INVISIBLE = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0]/g;
+var CONFUSABLES = {
+  "\u0410": "A",
+  "\u0412": "B",
+  "\u0415": "E",
+  "\u041A": "K",
+  "\u041C": "M",
+  "\u041D": "H",
+  "\u041E": "O",
+  "\u0420": "P",
+  "\u0421": "C",
+  "\u0422": "T",
+  "\u0425": "X",
+  "\u0423": "Y",
+  "\u0405": "S",
+  "\u0406": "I",
+  "\u0408": "J",
+  "\u0500": "d",
+  "\u0430": "a",
+  "\u0432": "b",
+  "\u0435": "e",
+  "\u043A": "k",
+  "\u043C": "m",
+  "\u043D": "h",
+  "\u043E": "o",
+  "\u0440": "p",
+  "\u0441": "c",
+  "\u0442": "t",
+  "\u0445": "x",
+  "\u0443": "y",
+  "\u0455": "s",
+  "\u0456": "i",
+  "\u0458": "j",
+  "\u04BB": "h",
+  "\u0501": "d",
+  "\u051B": "q",
+  "\u051D": "w",
+  "\u04CF": "l",
+  "\u0391": "A",
+  "\u0392": "B",
+  "\u0395": "E",
+  "\u0396": "Z",
+  "\u0397": "H",
+  "\u0399": "I",
+  "\u039A": "K",
+  "\u039C": "M",
+  "\u039D": "N",
+  "\u039F": "O",
+  "\u03A1": "P",
+  "\u03A4": "T",
+  "\u03A5": "Y",
+  "\u03A7": "X",
+  "\u03BF": "o",
+  "\u03BD": "v",
+  "\u03B1": "a",
+  "\u03B9": "i",
+  "\u03BA": "k",
+  "\u03C1": "p",
+  "\u03C4": "t",
+  "\u03C5": "u",
+  "\u03C7": "x"
+};
+function normalise(text) {
+  let out = "";
+  for (const c of text.normalize("NFKC").replace(INVISIBLE, "")) out += CONFUSABLES[c] ?? c;
+  return out;
+}
+function joinLines(text) {
+  return text.replace(/(?<=[A-Za-z0-9+/_=.-]{4})[ \t]*\r?\n[ \t>*-]*(?=[A-Za-z0-9+/_=-]{4})/g, "");
+}
+function closeUp(text) {
+  return text.replace(/(?:\S[ \t\u00A0]){7,}\S/g, (run2) => run2.replace(/[ \t\u00A0]/g, ""));
+}
+var SECRET_KEY_SUBSTRING = /PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API[_-]?KEY|APIKEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|CLIENT[_-]?SECRET|AUTH[_-]?KEY|SIGNING[_-]?KEY|ENCRYPTION[_-]?KEY|SESSION[_-]?KEY|DSN|CONN(?:ECTION)?[_-]?STRING/;
+var SECRET_KEY_WORDS = /* @__PURE__ */ new Set(["pass", "pwd", "pw", "passwd", "passcode", "passphrase", "creds", "pat"]);
+function isSecretKey(key) {
+  const k = normalise(key);
+  if (SECRET_KEY_SUBSTRING.test(k.toUpperCase())) return true;
+  const words = k.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[\s_.:-]+/).map((w) => w.toLowerCase()).filter(Boolean);
+  return words.some((w) => SECRET_KEY_WORDS.has(w));
+}
+var ASSIGNMENT = /(?:^|[\s"'`{,;(])["'`]?([A-Za-z_][A-Za-z0-9_.-]{0,79})["'`]?\s*(?::=|=>|=|:)\s*["'`]?([^\s"'`,;}]+)/gm;
+function placeholder(value, minLength = 6) {
+  const v = value.trim().replace(/^["'`]|["'`]$/g, "");
+  if (v.length < minLength) return true;
+  if (/^(?:x+|\*+|•+|\.+|-+|_+|<[^>]*>|\{\{.*\}\}|\$\{[^}]*\}?|\$[A-Z_][A-Z0-9_]*|%[A-Z_]+%|null|none|nil|true|false|undefined|changeme|change_me|your[_-]?\w*|example\w*|placeholder|redacted|\[redacted\]|todo|tbd|secret|password|token)$/i.test(v)) {
+    return true;
+  }
+  if (/^(?:process\.env|os\.environ|env\.|secrets\.|vault:|projects\/[^/]+\/secrets\/)/i.test(v)) return true;
+  return false;
+}
+var PROSE = /\b(passwords?|passphrase|passcode|passwd|pwd|pass|pin|secret|token|(?:api|access|secret|private|signing)[ _-]?key|key)\b(?:\s+(?:for|of|to|on|in|at)(?:\s+[^\s.,;:!?]{1,40}){1,3}?)?\s+(?:is|was|=|would be|will be|should be|reads|equals|is set to|was set to)\s*:?\s*(["'`“”‘’]?)([^\s"'`“”‘’]{1,256})/gi;
+var PROSE_WORDS = new Set(
+  "a an the not no now also still only just then this that these those it its your our my his her their what whatever which stored kept saved held set reset changed rotated managed required needed used missing wrong invalid expired correct same different located encrypted hashed salted sent provided generated defined configured found empty blank shown visible hidden secure private public available unavailable being from at on in under via inside outside there here too very rotated important optional mandatory case-sensitive sensitive unknown unset known given shared read loaded fetched pulled injected passed checked verified validated refreshed renewed revoked issued signed short long weak strong random different".split(" ")
+);
+function proseSecret(word, quoted, rawValue) {
+  const value = rawValue.replace(/[.,;:!?)\]]+$/, "");
+  if (value === "" || PROSE_WORDS.has(value.toLowerCase())) return false;
+  if (placeholder(value, 4)) return false;
+  const w = word.toLowerCase();
+  const passwordLike = /^(?:passwords?|passphrase|passcode|passwd|pwd|pass|pin|secret)$/.test(w);
+  if (quoted || passwordLike) return true;
+  return value.length >= 8 && (/[0-9]/.test(value) || /[a-z]/.test(value) && /[A-Z]/.test(value) || /[_+/=!@#$%^&*-]/.test(value));
+}
+var URL_USERINFO = /(?:\b[a-z][a-z0-9+.-]{0,20}:)?\/\/([^\s/?#@"'<>]{1,256})@[^\s/?#@"'<>]{1,255}/gi;
+var URL_PARAM = /[?&;#]([A-Za-z0-9_.-]{1,64})=([^&#\s"'<>]{1,512})/g;
+var SECRET_PARAMS = /* @__PURE__ */ new Set([
+  "key",
+  "sig",
+  "signature",
+  "auth",
+  "access_token",
+  "id_token",
+  "refresh_token",
+  "client_secret",
+  "apikey",
+  "api_key",
+  "x-amz-signature",
+  "x-amz-credential",
+  "x-amz-security-token",
+  "x-goog-signature",
+  "x-goog-credential",
+  "sas",
+  "sv",
+  "code"
+]);
+function decode(s) {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+function urlCredentials(text) {
+  for (const m of text.matchAll(URL_USERINFO)) {
+    const info = m[1] ?? "";
+    const colon = info.indexOf(":");
+    if (colon >= 0) {
+      const password = decode(info.slice(colon + 1));
+      if (password !== "" && !placeholder(password, 1)) return true;
+    } else {
+      const user = decode(info);
+      if (!placeholder(user, 12) && (user.length >= 20 || /[0-9]/.test(user) && /[A-Za-z]/.test(user))) return true;
+    }
+  }
+  for (const m of text.matchAll(URL_PARAM)) {
+    const name = (m[1] ?? "").toLowerCase();
+    if ((SECRET_PARAMS.has(name) || isSecretKey(name)) && !placeholder(decode(m[2] ?? ""))) return true;
+  }
+  return false;
+}
+function entropy(s) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const c of s) counts.set(c, (counts.get(c) ?? 0) + 1);
+  let h = 0;
+  for (const n of counts.values()) {
+    const p = n / s.length;
+    h -= p * Math.log2(p);
+  }
+  return h;
+}
+var CANDIDATE = /[A-Za-z0-9+/_=-]{32,}/g;
+function highEntropy(text) {
+  for (const m of text.matchAll(CANDIDATE)) {
+    const s = m[0].replace(/=+$/, "");
+    if (s.length < 32) continue;
+    if (/^[0-9a-f]+$/i.test(s)) continue;
+    if (!/[0-9]/.test(s) || !/[a-z]/.test(s) || !/[A-Z]/.test(s)) continue;
+    if ((s.match(/\//g) ?? []).length > 2) continue;
+    if (entropy(s) >= 4.3) return true;
+  }
+  return false;
+}
+var HEX = /(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])/g;
+var HEX_GROUPS = /(?<![0-9A-Za-z])(?:[0-9a-fA-F]{2,8}[ :-]){3,}[0-9a-fA-F]{2,8}(?![0-9A-Za-z])/g;
+function hexSecret(text) {
+  const mixed = (s) => /[0-9]/.test(s) && /[a-f]/i.test(s);
+  for (const m of text.matchAll(HEX)) if (mixed(m[0])) return true;
+  for (const m of text.matchAll(HEX_GROUPS)) {
+    const digits = m[0].replace(/[ :-]/g, "");
+    if (digits.length >= 32 && mixed(digits)) return true;
+  }
+  return false;
+}
+var BASE64_PADDED = /(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{14,}={1,2}(?![A-Za-z0-9+/=])/g;
+function paddedBase64(text) {
+  for (const m of text.matchAll(BASE64_PADDED)) {
+    const s = m[0];
+    if (s.length % 4 !== 0) continue;
+    const body = s.replace(/=+$/, "");
+    if (/[0-9]/.test(body) && /[A-Za-z]/.test(body) || /[a-z]/.test(body) && /[A-Z]/.test(body)) return true;
+  }
+  return false;
+}
+function screenForm(text, add) {
+  for (const { kind, re } of PREFIXED) if (re.test(text)) add(kind);
+  for (const m of text.matchAll(ASSIGNMENT)) {
+    if (isSecretKey(m[1] ?? "") && !placeholder(m[2] ?? "")) add("a secret-looking KEY=value pair");
+  }
+  for (const m of text.matchAll(PROSE)) {
+    if (proseSecret(m[1] ?? "", (m[2] ?? "") !== "", m[3] ?? "")) add("a secret stated in words");
+  }
+  if (urlCredentials(text)) add("a URL with credentials");
+  if (hexSecret(text)) add("a long hex string");
+  if (paddedBase64(text)) add("a base64-encoded value");
+  if (highEntropy(text)) add("a long random-looking token");
+}
+function screenSecrets(text) {
+  const found = [];
+  const add = (kind) => {
+    if (!found.some((f) => f.kind === kind)) found.push({ kind });
+  };
+  const norm = normalise(text);
+  const forms = /* @__PURE__ */ new Set([norm, joinLines(norm), closeUp(norm), closeUp(joinLines(norm))]);
+  for (const form of forms) screenForm(form, add);
+  const stripped = norm.replace(/\s+/g, "");
+  for (const { kind, re } of PREFIXED) if (re.test(stripped)) add(kind);
+  return found;
+}
+function screenDraft(text, data) {
+  const parts = [text];
+  if (data !== void 0 && data !== null) parts.push(JSON.stringify(data));
+  return screenSecrets(parts.join("\n"));
+}
+
+// src/snapshot.ts
+import { randomBytes as randomBytes6 } from "node:crypto";
+import { constants, promises as fsp2 } from "node:fs";
+import { extname, join as join9 } from "node:path";
+var MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
+var MAX_RUN_SNAPSHOT_BYTES = 100 * 1024 * 1024;
+function snapshotDirPrefix(pid = process.pid) {
+  return `trs-${pid}-`;
+}
+var SNAPSHOT_DIR_RE = /^trs-([1-9][0-9]{0,9})-[A-Za-z0-9]{6}$/;
+var PID_MAX = 2 ** 31 - 1;
+function snapshotRun(dir, maxTotal = MAX_RUN_SNAPSHOT_BYTES) {
+  return { dir, maxTotal, total: 0, copies: /* @__PURE__ */ new Map() };
+}
+async function openAllowed(input) {
+  const { set, ctx, real } = input;
+  await input.beforeOpen?.(real);
+  let fh;
+  try {
+    fh = await fsp2.open(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch {
+    return { ok: false, why: "unsafe" };
+  }
+  let keep = false;
+  try {
+    const st = await fh.stat({ bigint: true });
+    if (!st.isFile()) return { ok: false, why: "unsafe" };
+    if (st.size > BigInt(input.maxBytes)) return { ok: false, why: "too_large" };
+    const again = await canonical(real);
+    if (again !== real || !set.files.has(again) || alwaysOut(again, ctx)) return { ok: false, why: "unsafe" };
+    const now = await fsp2.stat(real, { bigint: true }).catch(() => null);
+    if (!now || now.dev !== st.dev || now.ino !== st.ino) return { ok: false, why: "unsafe" };
+    keep = true;
+    return { ok: true, fh, st };
+  } catch {
+    return { ok: false, why: "unsafe" };
+  } finally {
+    if (!keep) await fh.close().catch(() => {
+    });
+  }
+}
+async function readCapped(fh, max) {
+  const chunks = [];
+  let total = 0;
+  for (; ; ) {
+    const buf = Buffer.alloc(Math.min(1024 * 1024, max + 1 - total));
+    const { bytesRead } = await fh.read(buf, 0, buf.length, null);
+    if (bytesRead === 0) break;
+    chunks.push(buf.subarray(0, bytesRead));
+    total += bytesRead;
+    if (total > max) return null;
+  }
+  return Buffer.concat(chunks, total);
+}
+var EXT_RE = /^\.[A-Za-z0-9]{1,16}$/;
+async function snapshotRead(input) {
+  const max = input.maxBytes ?? MAX_SNAPSHOT_BYTES;
+  const run2 = input.run;
+  const real = await inSet(input.set, input.requested, input.ctx);
+  if (!real) return { ok: false, why: "outside" };
+  const opened = await openAllowed({ set: input.set, ctx: input.ctx, real, maxBytes: max, ...input.beforeOpen ? { beforeOpen: input.beforeOpen } : {} });
+  if (!opened.ok) return opened;
+  const { fh, st } = opened;
+  try {
+    const key = `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}`;
+    const made = run2.copies.get(key);
+    if (made) return { ok: true, path: made.path, source: real, bytes: made.bytes };
+    const reserved = Number(st.size);
+    if (reserved > run2.maxTotal - run2.total) return { ok: false, why: "run_cap" };
+    run2.total += reserved;
+    let used = 0;
+    try {
+      const body = await readCapped(fh, reserved);
+      if (body === null) return { ok: false, why: "unsafe" };
+      const ext = extname(real);
+      const copy = join9(run2.dir, `${randomBytes6(16).toString("hex")}${EXT_RE.test(ext) ? ext : ""}`);
+      await fsp2.writeFile(copy, body, { flag: "wx", mode: 384 });
+      used = body.length;
+      run2.copies.set(key, { path: copy, bytes: body.length });
+      return { ok: true, path: copy, source: real, bytes: body.length };
+    } finally {
+      run2.total -= reserved - used;
+    }
+  } finally {
+    await fh.close().catch(() => {
+    });
+  }
+}
+function processGone(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1 || pid > PID_MAX || pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return err.code === "ESRCH";
+  }
+}
+async function removeStaleSnapshotDirs(root, startedAt) {
+  const me = typeof process.getuid === "function" ? process.getuid() : null;
+  if (me === null) return 0;
+  let names;
+  try {
+    names = await fsp2.readdir(root);
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    const m = SNAPSHOT_DIR_RE.exec(name);
+    if (!m || !processGone(Number(m[1]))) continue;
+    const path = join9(root, name);
+    const st = await fsp2.lstat(path).catch(() => null);
+    if (!st || st.isSymbolicLink() || !st.isDirectory() || st.uid !== me || (st.mode & 511) !== 448) continue;
+    if (!(st.mtimeMs < startedAt)) continue;
+    try {
+      await fsp2.rm(path, { recursive: true, force: true });
+      removed++;
+    } catch {
+    }
+  }
+  return removed;
+}
+
+// src/boundary-tools.ts
+var LIST_LIMIT = 500;
+var SEARCH_DEFAULT_RESULTS = 50;
+var SEARCH_MAX_RESULTS = 200;
+var SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
+var SEARCH_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+var SEARCH_MAX_MS = 2e4;
+var LINE_SHOWN = 300;
+var LINE_SCANNED = 1e4;
+var PATTERN_LIMIT = 300;
+var WITHHELD_LINE = "[line withheld: it may contain a credential]";
+function areaList(set) {
+  return set.areas.map((a) => ({ area: a.name, kind: a.kind, root: a.root, files: a.files.length, ...a.truncated ? { truncated: true } : {} }));
+}
+function pickAreas(set, area) {
+  if (area === void 0 || area === null || area === "") return set.areas;
+  if (typeof area !== "string" || area.length > 300) return "area must be one of the area names list_files shows";
+  const found = set.areas.filter((a) => a.name === area || a.name.replace(/^[a-z]+:/, "") === area);
+  if (found.length === 0) return `there is no area ${JSON.stringify(area.slice(0, 100))}; the areas are: ${set.areas.map((a) => a.name).join(", ") || "(none)"}`;
+  return found;
+}
+function globToRe2(glob) {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*" && glob[i + 1] === "*") {
+      if (glob[i + 2] === "/") {
+        re += "(?:.*/)?";
+        i += 2;
+      } else {
+        re += ".*";
+        i += 1;
+      }
+    } else if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else re += RE2JS.quote(c);
+  }
+  return RE2JS.compile(re);
+}
+function globFilter(glob) {
+  if (glob === void 0 || glob === null || glob === "") return null;
+  if (typeof glob !== "string" || glob.length > PATTERN_LIMIT) return 'glob must be a short pattern such as "**/*.md"';
+  let re;
+  try {
+    re = globToRe2(glob);
+  } catch {
+    return 'glob must be a short pattern such as "**/*.md"';
+  }
+  const nameOnly = !glob.includes("/");
+  return (rel) => re.matches(rel) || nameOnly && re.matches(rel.slice(rel.lastIndexOf("/") + 1));
+}
+function filesOf(areas, filter) {
+  const out = [];
+  for (const a of areas) for (const f of a.files) if (!filter || filter(areaRelative(a, f))) out.push({ area: a, path: f });
+  return out;
+}
+function listFiles(set, args) {
+  const areas = pickAreas(set, args.area);
+  if (typeof areas === "string") return { ok: false, message: areas };
+  const filter = globFilter(args.glob);
+  if (typeof filter === "string") return { ok: false, message: filter };
+  const all = filesOf(areas, filter);
+  const shown = all.slice(0, LIST_LIMIT);
+  return {
+    ok: true,
+    result: {
+      areas: areaList(set),
+      total: all.length,
+      files: shown.map((f) => f.path),
+      ...all.length > shown.length ? { truncated: true, note: `only the first ${LIST_LIMIT} are shown: narrow with area or glob` } : {}
+    }
+  };
+}
+async function readInSet(set, path, budget, opts) {
+  const real = await canonical(path);
+  if (real !== path || !set.files.has(real)) return null;
+  const cap = Math.min(SEARCH_MAX_FILE_BYTES, budget.bytes);
+  const opened = await openAllowed({ set, ctx: opts.ctx, real, maxBytes: cap, ...opts.beforeOpen ? { beforeOpen: opts.beforeOpen } : {} });
+  if (!opened.ok) return null;
+  try {
+    const body = await readCapped(opened.fh, cap);
+    if (body === null) return null;
+    budget.bytes -= body.length;
+    if (body.subarray(0, 8e3).includes(0)) return null;
+    return body.toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    await opened.fh.close().catch(() => {
+    });
+  }
+}
+async function searchFiles(set, args, opts) {
+  const now = opts.now ?? Date.now;
+  const pattern = args.pattern;
+  if (typeof pattern !== "string" || pattern.length === 0 || pattern.length > PATTERN_LIMIT) {
+    return { ok: false, message: `pattern must be 1 to ${PATTERN_LIMIT} characters (an RE2 regular expression; (?i) ignores case)` };
+  }
+  let re;
+  try {
+    re = RE2JS.compile(pattern);
+  } catch {
+    return { ok: false, message: "pattern is not a valid RE2 regular expression" };
+  }
+  const max = args.max_results ?? SEARCH_DEFAULT_RESULTS;
+  if (typeof max !== "number" || !Number.isInteger(max) || max < 1 || max > SEARCH_MAX_RESULTS) {
+    return { ok: false, message: `max_results must be a whole number from 1 to ${SEARCH_MAX_RESULTS}` };
+  }
+  const areas = pickAreas(set, args.area);
+  if (typeof areas === "string") return { ok: false, message: areas };
+  const filter = globFilter(args.glob);
+  if (typeof filter === "string") return { ok: false, message: filter };
+  const until = now() + SEARCH_MAX_MS;
+  const budget = { bytes: SEARCH_MAX_TOTAL_BYTES };
+  const results = [];
+  let searched = 0;
+  let skipped = 0;
+  let stopped = null;
+  for (const { path } of filesOf(areas, filter)) {
+    if (results.length >= max) {
+      stopped = `stopped at max_results (${max})`;
+      break;
+    }
+    if (now() > until) {
+      stopped = "stopped: the search took too long; narrow it with area or glob";
+      break;
+    }
+    if (budget.bytes <= 0) {
+      stopped = "stopped: too much text searched; narrow it with area or glob";
+      break;
+    }
+    const text = await readInSet(set, path, budget, opts);
+    if (text === null) {
+      skipped++;
+      continue;
+    }
+    searched++;
+    const lines = text.split(/\r?\n/);
+    for (let i = 0; i < lines.length && results.length < max; i++) {
+      const line = lines[i];
+      if (!re.matcher(line.length > LINE_SCANNED ? line.slice(0, LINE_SCANNED) : line).find()) continue;
+      const shown = line.length > LINE_SHOWN ? `${line.slice(0, LINE_SHOWN)}\u2026` : line;
+      results.push({ path, line: i + 1, text: screenSecrets(line).length ? WITHHELD_LINE : shown });
+    }
+  }
+  return {
+    ok: true,
+    result: { results, files_searched: searched, ...skipped ? { files_skipped: skipped } : {}, ...stopped ? { truncated: true, note: stopped } : {} }
+  };
+}
+
+// src/exposed.ts
+import { statSync as statSync3, accessSync, constants as constants2 } from "node:fs";
+import { isAbsolute as isAbsolute8 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+
+// src/manifest.ts
+var import_yaml = __toESM(require_dist(), 1);
+var import__ = __toESM(require__(), 1);
+import { readFileSync as readFileSync8 } from "node:fs";
+
 // ../schema/manifest.schema.json
 var manifest_schema_default = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -23858,8 +24196,6 @@ var manifest_schema_default = {
 };
 
 // src/manifest.ts
-var SHARE_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
-var MAX_SHARES = 16;
 var ManifestError = class extends Error {
   problems;
   constructor(problems) {
@@ -24055,1655 +24391,7 @@ function validateOne(name, p, v) {
   }
 }
 
-// src/read-trail-core.ts
-import { basename as basename4 } from "node:path";
-var SENSITIVE_NAMES = [
-  "*.tfstate",
-  "secrets.*",
-  "*.properties",
-  "docker-compose*",
-  "kubeconfig",
-  "*service-account*.json",
-  ".npmrc",
-  ".netrc",
-  ".git-credentials",
-  ".dev.vars",
-  "id_ecdsa*",
-  "id_dsa*",
-  "*.ppk",
-  "*.pem",
-  "*.key",
-  "*.p12"
-];
-function globMatch(glob, name) {
-  const parts = glob.toLowerCase().split("*");
-  const s = name.toLowerCase();
-  if (parts.length === 1) return s === parts[0];
-  const first = parts[0];
-  const last = parts[parts.length - 1];
-  if (!s.startsWith(first) || s.length < first.length + last.length || !s.endsWith(last)) return false;
-  let at = first.length;
-  const end = s.length - last.length;
-  for (const mid of parts.slice(1, -1)) {
-    const i = s.indexOf(mid, at);
-    if (i < 0 || i + mid.length > end) return false;
-    at = i + mid.length;
-  }
-  return true;
-}
-function sensitiveName(path) {
-  const name = basename4(path.replace(/[/\\]+$/, ""));
-  return name !== "" && SENSITIVE_NAMES.some((glob) => globMatch(glob, name));
-}
-
-// src/boundary-set.ts
-var REPO_SEARCH_DEPTH = 3;
-var MAX_WALK_FILE_BYTES = 5 * 1024 * 1024;
-var GOOGLE_LINK_EXTENSIONS = [".gdoc", ".gsheet", ".gslides"];
-var DEFAULT_LIMITS = {
-  repoSearchDirs: 5e3,
-  walkFiles: 2e4,
-  walkDirs: 5e3,
-  walkDepth: 20,
-  totalFiles: 1e5,
-  walkMs: 2e4
-};
-function isGoogleLinkName(path) {
-  return GOOGLE_LINK_EXTENSIONS.includes(extname(path).toLowerCase());
-}
-function homeDir(env2) {
-  return env2.HOME?.trim() || homedir5();
-}
-var ORIGIN_RES = [
-  /^https:\/\/github\.com\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/i,
-  /^git@github\.com:([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/i,
-  /^ssh:\/\/git@github\.com(?::22)?\/([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?\/?$/i
-];
-function githubSourceMatcher(s) {
-  const orgs = new Set(s.github_orgs.map((o) => o.toLowerCase()));
-  const repos = new Set(s.github_repos.map((r) => repoKey(r)));
-  return (o) => orgs.has(o.org.toLowerCase()) || repos.has(repoKey(o));
-}
-function parseGithubOrigin(url) {
-  const u = url.trim();
-  for (const re of ORIGIN_RES) {
-    const m = re.exec(u);
-    if (m && !/^\.+$/.test(m[2])) return { org: m[1], repo: m[2] };
-  }
-  return null;
-}
-function gitEnv(env2) {
-  return {
-    PATH: env2.PATH || process.env.PATH || "/usr/bin:/bin",
-    HOME: homeDir(env2),
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_OPTIONAL_LOCKS: "0",
-    LC_ALL: "C"
-  };
-}
-var runGit = (cwd, args, env2) => new Promise((resolve) => {
-  execFile4(
-    "git",
-    ["-C", cwd, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", ...args],
-    { env: gitEnv(env2), timeout: 3e4, maxBuffer: 64 * 1024 * 1024, encoding: "utf8", windowsHide: true },
-    (err, stdout) => resolve(err ? null : stdout)
-  );
-});
-var GitCache = class {
-  entries = /* @__PURE__ */ new Map();
-  get(tree, key) {
-    const e = this.entries.get(tree);
-    return e && e.key === key ? e.files : null;
-  }
-  set(tree, key, files) {
-    if (this.entries.size > 500) this.entries.clear();
-    this.entries.set(tree, { key, files });
-  }
-};
-async function gitDirOf(tree) {
-  const dotgit = join9(tree, ".git");
-  try {
-    const st = await fsp2.lstat(dotgit);
-    if (st.isDirectory()) return dotgit;
-    if (!st.isFile() || st.size > 4096) return null;
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(await fsp2.readFile(dotgit, "utf8"));
-    if (!m) return null;
-    return m[1].startsWith("/") ? m[1] : join9(tree, m[1]);
-  } catch {
-    return null;
-  }
-}
-async function gitCacheKey(tree) {
-  const dir = await gitDirOf(tree);
-  if (!dir) return null;
-  try {
-    const head = (await fsp2.readFile(join9(dir, "HEAD"), "utf8")).slice(0, 300);
-    let ref = "";
-    const m = /^ref:\s*(\S+)/.exec(head);
-    if (m && /^refs\/[A-Za-z0-9._/-]+$/.test(m[1]) && !m[1].includes("..")) {
-      ref = await fsp2.readFile(join9(dir, m[1]), "utf8").catch(() => "");
-    }
-    const idx = await fsp2.stat(join9(dir, "index"));
-    return `${head}|${ref.trim()}|${idx.mtimeMs}|${idx.size}|${idx.ino}`;
-  } catch {
-    return null;
-  }
-}
-async function trackedFiles(dir, env2, git, cache) {
-  const key = cache ? await gitCacheKey(dir) : null;
-  if (cache && key) {
-    const hit = cache.get(dir, key);
-    if (hit) return hit;
-  }
-  const out = await git(dir, ["ls-files", "-z", "--cached", "--full-name"], env2);
-  if (out === null) return null;
-  const top = await git(dir, ["rev-parse", "--show-toplevel"], env2);
-  if (top === null) return null;
-  const topReal = await canonical(top.trim());
-  if (!topReal) return null;
-  const files = [];
-  for (const rel of out.split("\0")) {
-    if (!rel) continue;
-    const abs = join9(topReal, rel);
-    if (abs === dir || !within(abs, dir)) continue;
-    files.push(relative2(dir, abs));
-  }
-  if (cache && key) cache.set(dir, key, files);
-  return files;
-}
-async function canonical(path) {
-  try {
-    return await fsp2.realpath(path);
-  } catch {
-    return null;
-  }
-}
-var ANY_DEPTH_RES = ANY_DEPTH.map((rule) => globRe(rule.replace(/^\*\*\//, "").replace(/\/\*\*$/, "")));
-function denyContext(env2) {
-  const cloudsdk = env2.CLOUDSDK_CONFIG?.trim();
-  return {
-    home: homeDir(env2),
-    cloudsdkConfig: cloudsdk && cloudsdk.startsWith("/") ? cloudsdk : void 0,
-    credentialDirs: relayCredentialDirs(env2)
-  };
-}
-function alwaysOut(path, ctx) {
-  if (credentialHit(path, ctx) !== null) return true;
-  if (sensitiveName(path)) return true;
-  for (const part of path.split("/")) {
-    if (part === "") continue;
-    if (part === ".git") return true;
-    const lower = part.toLowerCase();
-    if (ANY_DEPTH_RES.some((re) => re.test(lower))) return true;
-  }
-  return false;
-}
-async function keepFiles(candidates, ctx, opts) {
-  const files = [];
-  let truncated = false;
-  const BATCH = 64;
-  for (let i = 0; i < candidates.length; i += BATCH) {
-    const batch = candidates.slice(i, i + BATCH);
-    const checked = await Promise.all(
-      batch.map(async (p) => {
-        if (alwaysOut(p, ctx)) return null;
-        const real = await canonical(p);
-        if (real !== p) return null;
-        try {
-          const st = await fsp2.stat(real);
-          if (!st.isFile()) return null;
-          if (opts.maxBytes !== void 0 && st.size > opts.maxBytes && !isGoogleLinkName(real)) return null;
-        } catch {
-          return null;
-        }
-        return real;
-      })
-    );
-    for (const f of checked) {
-      if (f === null) continue;
-      if (opts.budget.left <= 0) {
-        truncated = true;
-        break;
-      }
-      opts.budget.left--;
-      files.push(f);
-    }
-    if (truncated) break;
-  }
-  files.sort();
-  return { files, truncated };
-}
-var SKIP_DIRS = /* @__PURE__ */ new Set(["node_modules", ".git"]);
-async function walk(root, limits) {
-  const files = [];
-  let dirs = 0;
-  let truncated = false;
-  const until = Date.now() + limits.walkMs;
-  const queue = [{ dir: root, depth: 0 }];
-  while (queue.length) {
-    const { dir, depth } = queue.shift();
-    if (++dirs > limits.walkDirs || Date.now() > until) {
-      truncated = true;
-      break;
-    }
-    let entries;
-    try {
-      entries = await fsp2.readdir(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-    for (const e of entries) {
-      if (e.name.startsWith(".")) continue;
-      const p = join9(dir, e.name);
-      if (e.isDirectory()) {
-        if (!SKIP_DIRS.has(e.name) && depth < limits.walkDepth) queue.push({ dir: p, depth: depth + 1 });
-      } else if (e.isFile()) {
-        if (files.length >= limits.walkFiles) {
-          truncated = true;
-          break;
-        }
-        files.push(p);
-      }
-    }
-    if (truncated) break;
-  }
-  return { files, truncated };
-}
-async function findWorkTrees(root, depth, maxDirs) {
-  const found = [];
-  let seen = 0;
-  const queue = [{ dir: root, depth: 0 }];
-  while (queue.length && seen < maxDirs) {
-    const { dir, depth: d } = queue.shift();
-    seen++;
-    let entries;
-    try {
-      entries = await fsp2.readdir(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    if (entries.some((e) => e.name === ".git" && (e.isDirectory() || e.isFile()))) found.push(dir);
-    if (d >= depth) continue;
-    entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-    for (const e of entries) {
-      if (e.isDirectory() && !e.name.startsWith(".") && !SKIP_DIRS.has(e.name)) queue.push({ dir: join9(dir, e.name), depth: d + 1 });
-    }
-  }
-  return found;
-}
-var ACCOUNT_RE3 = /^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+)$/;
-async function driveRoots(drive, home2) {
-  const name = drive.shared_drive;
-  if (!name || name === "." || name === ".." || name.includes("/") || /[\u0000-\u001f\u007f]/.test(name)) return [];
-  const domain = drive.domain.toLowerCase();
-  const cloud = await canonical(join9(home2, "Library", "CloudStorage"));
-  if (!cloud) return [];
-  let entries;
-  try {
-    entries = await fsp2.readdir(cloud, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const e of entries.sort((a, b) => a.name < b.name ? -1 : 1)) {
-    if (!e.isDirectory()) continue;
-    const m = /^GoogleDrive-(.+)$/.exec(e.name);
-    if (!m) continue;
-    const account = m[1];
-    const am = ACCOUNT_RE3.exec(account);
-    if (!am || am[1].toLowerCase() !== domain) continue;
-    const shared = join9(cloud, e.name, "Shared drives");
-    const root = join9(shared, name);
-    try {
-      const a = await fsp2.lstat(shared);
-      const b = await fsp2.lstat(root);
-      if (!a.isDirectory() || !b.isDirectory()) continue;
-    } catch {
-      continue;
-    }
-    const real = await canonical(root);
-    if (real !== root || dirname4(real) !== shared) continue;
-    out.push({ account, root: real });
-  }
-  return out;
-}
-async function buildAllowedSet(input) {
-  const { env: env2, boundaries } = input;
-  const limits = { ...DEFAULT_LIMITS, ...input.limits };
-  const git = input.git ?? runGit;
-  const cache = input.cache === void 0 ? null : input.cache;
-  const ctx = denyContext(env2);
-  const home2 = homeDir(env2);
-  const notes = [];
-  const areas = [];
-  const budget = { left: limits.totalFiles };
-  const matches = githubSourceMatcher(boundaries);
-  const github = boundaries.github_orgs.length > 0 || boundaries.github_repos.length > 0;
-  const member = "error" in input.member ? null : input.member;
-  if ("error" in input.member) notes.push(`your folders file cannot be used (${input.member.error})`);
-  if (member && github) {
-    const trees = /* @__PURE__ */ new Set();
-    for (const raw of member.repo_roots) {
-      const { path, reason: reason2 } = memberFolderProblem(raw, env2);
-      if (reason2 || !path) {
-        notes.push(`repo root ${JSON.stringify(raw.slice(0, 200))} is not used: ${reason2 ?? "not a path"}`);
-        continue;
-      }
-      const root = await canonical(path);
-      if (!root) continue;
-      for (const t of await findWorkTrees(root, REPO_SEARCH_DEPTH, limits.repoSearchDirs)) trees.add(t);
-    }
-    for (const tree of [...trees].sort()) {
-      const gd = await gitDirOf(tree);
-      if (gd === null || `${normalize4(gd)}/`.includes("/.git/modules/")) continue;
-      const origin = await git(tree, ["config", "--local", "--get", "remote.origin.url"], env2);
-      const parsed = origin === null ? null : parseGithubOrigin(origin);
-      if (!parsed || !matches(parsed)) continue;
-      const rel = await trackedFiles(tree, env2, git, cache);
-      if (rel === null) continue;
-      const kept = await keepFiles(
-        rel.map((r) => join9(tree, r)),
-        ctx,
-        { budget }
-      );
-      areas.push({ kind: "github", name: `github:${parsed.org}/${parsed.repo}`, root: tree, files: kept.files, repo: parsed, truncated: kept.truncated });
-    }
-  }
-  if (boundaries.drive_folders.length > 0) {
-    const locator = input.locator ?? new DriveLocator({ home: home2 });
-    const found = await locator.locate(boundaries.drive_folders);
-    const entries = boundaries.drive_folders.filter((e, i) => boundaries.drive_folders.findIndex((x) => x.folder_id === e.folder_id) === i).flatMap((e) => {
-      const f = found.get(e.folder_id);
-      return f ? [{ e, f }] : [];
-    }).sort((a, b) => a.f.path < b.f.path ? -1 : a.f.path > b.f.path ? 1 : 0);
-    const walked = [];
-    for (const { e, f } of entries) {
-      if (walked.some((root) => within(f.path, root))) continue;
-      walked.push(f.path);
-      const w = await walk(f.path, limits);
-      const kept = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
-      areas.push({
-        kind: "drive",
-        name: `drive:${e.folder_name}`,
-        root: f.path,
-        files: kept.files,
-        folder: { domain: e.domain, folder_id: e.folder_id, drive_root_id: f.drive_root_id, whole_drive: f.path === f.drive_root, folder_name: e.folder_name },
-        truncated: w.truncated || kept.truncated
-      });
-    }
-  }
-  for (const drive of boundaries.drives) {
-    const roots = await driveRoots(drive, home2);
-    for (const [i, r] of roots.entries()) {
-      const w = await walk(r.root, limits);
-      const kept = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
-      const name = i === 0 ? `drive:${drive.shared_drive}` : `drive:${drive.shared_drive} (${r.account})`;
-      areas.push({ kind: "drive", name, root: r.root, files: kept.files, drive, truncated: w.truncated || kept.truncated });
-    }
-  }
-  if (member && boundaries.member_folders) {
-    for (const raw of member.extra_folders) {
-      const { path, reason: reason2 } = memberFolderProblem(raw, env2);
-      if (reason2 || !path) {
-        notes.push(`folder ${JSON.stringify(raw.slice(0, 200))} is not used: ${reason2 ?? "not a path"}`);
-        continue;
-      }
-      const root = await canonical(path);
-      if (!root) continue;
-      const inside = await git(root, ["rev-parse", "--is-inside-work-tree"], env2);
-      let kept;
-      if (inside?.trim() === "true") {
-        const rel = await trackedFiles(root, env2, git, null);
-        if (rel === null) continue;
-        kept = await keepFiles(rel.map((r) => join9(root, r)), ctx, { budget });
-      } else {
-        const w = await walk(root, limits);
-        const k = await keepFiles(w.files, ctx, { maxBytes: MAX_WALK_FILE_BYTES, budget });
-        kept = { files: k.files, truncated: w.truncated || k.truncated };
-      }
-      areas.push({ kind: "folder", name: `folder:${basename5(root)}`, root, files: kept.files, truncated: kept.truncated });
-    }
-  } else if (member && member.extra_folders.length > 0) {
-    notes.push("the team does not allow member folders, so your extra folders are not used");
-  }
-  const used = /* @__PURE__ */ new Set();
-  for (const a of areas) {
-    let n = a.name;
-    for (let k = 2; used.has(n); k++) n = `${a.name} (${k})`;
-    a.name = n;
-    used.add(n);
-  }
-  const files = /* @__PURE__ */ new Map();
-  for (const a of areas) for (const f of a.files) if (!files.has(f)) files.set(f, a);
-  return { version: input.version, areas, files, notes };
-}
-async function inSet(set, path, ctx) {
-  if (alwaysOut(normalize4(path), ctx)) return null;
-  const real = await canonical(path);
-  if (!real || alwaysOut(real, ctx)) return null;
-  return set.files.has(real) ? real : null;
-}
-function shareNames(set) {
-  const order = ["drive", "github", "folder"];
-  const names = [];
-  for (const kind of order) {
-    const raws = set.areas.filter((x) => x.kind === kind).map((a) => kind === "github" && a.repo ? a.repo.repo : kind === "drive" && a.drive ? a.drive.shared_drive : kind === "drive" && a.folder ? a.folder.folder_name : basename5(a.root)).sort();
-    for (const raw of raws) {
-      const n = shareName(raw);
-      if (SHARE_NAME_RE.test(n) && !names.includes(n)) names.push(n);
-    }
-  }
-  if (names.length <= MAX_SHARES) return names;
-  const more = names.length - (MAX_SHARES - 1);
-  return [...names.slice(0, MAX_SHARES - 1), `and-${more}-more`];
-}
-function setSummary(set) {
-  const by = (k) => set.areas.filter((a) => a.kind === k);
-  const parts = [];
-  const gh = by("github");
-  const dr = by("drive").filter((a) => !a.folder || a.folder.whole_drive);
-  const df = by("drive").filter((a) => a.folder && !a.folder.whole_drive);
-  const fo = by("folder");
-  const list = (as) => {
-    const names = as.slice(0, 8).map((a) => a.name.replace(/^[a-z]+:/, ""));
-    return `${names.join(", ")}${as.length > 8 ? ` and ${as.length - 8} more` : ""}`;
-  };
-  parts.push(gh.length ? `${gh.length} GitHub ${gh.length === 1 ? "repository" : "repositories"} (${list(gh)})` : "no GitHub repositories");
-  parts.push(dr.length ? `${dr.length === 1 ? "the shared drive" : `${dr.length} shared drives`} ${list(dr)}` : "no shared drive");
-  if (df.length) parts.push(`${df.length === 1 ? "the Drive folder" : `${df.length} Drive folders`} ${list(df)}`);
-  if (fo.length) parts.push(`${fo.length} of your folders (${list(fo)})`);
-  return `${parts.join(", ")}; ${set.files.size} files`;
-}
-function areaRelative(area, path) {
-  return relative2(area.root, path).split(sep2).join("/");
-}
-function quotedOwnerText(text, limit) {
-  const flat = neutraliseChannelTags(text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim());
-  return JSON.stringify(flat.length <= limit ? flat : flat.slice(0, limit));
-}
-function someOf(names, max) {
-  return `${names.slice(0, max).join(", ")}${names.length > max ? ` and ${names.length - max} more` : ""}`;
-}
-function folderText(f, withDomain) {
-  const where = f.drive_id !== null && f.folder_id === f.drive_id ? " (a whole shared drive" : f.drive_name !== null ? ` (in ${quotedOwnerText(f.drive_name, 100)}` : " (in a shared drive";
-  return `${quotedOwnerText(f.folder_name, 255)}${where}${withDomain ? `, ${f.domain}` : ""})`;
-}
-var repoNames = (repos) => someOf(repos.map((r) => `${r.org}/${r.repo}`), 10);
-function wideningText(w) {
-  const parts = [];
-  if (w.github_orgs.length) parts.push(`${w.github_orgs.length === 1 ? "the GitHub org" : "the GitHub orgs"} ${w.github_orgs.join(", ")}`);
-  if (w.github_repos.length) parts.push(`${w.github_repos.length === 1 ? "the GitHub repository" : "the GitHub repositories"} ${repoNames(w.github_repos)}`);
-  if (w.drive_folders.length) {
-    const names = someOf(w.drive_folders.map((f) => folderText(f, true)), 10);
-    parts.push(`${w.drive_folders.length === 1 ? "the Drive folder" : "the Drive folders"} ${names}`);
-  }
-  if (w.drives.length) {
-    const names = w.drives.map((d) => `${quotedOwnerText(d.shared_drive, 100)} (${d.domain})`).join(", ");
-    parts.push(`${w.drives.length === 1 ? "the shared drive" : "the shared drives"} ${names}`);
-  }
-  if (w.member_folders) parts.push("members' own folders");
-  return parts.join(", ") || "nothing to read yet";
-}
-var isObj3 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-function validBoundaries(v) {
-  if (!isObj3(v) || !versionOk(v.version)) return false;
-  if (v.boundaries === null) return v.since === void 0 || v.since === null;
-  const b = readBoundaries(v.boundaries);
-  if (!b || !sinceValid(v.since, v.version)) return false;
-  v.boundaries = b;
-  if (isObj3(v.since)) v.since = { github_orgs: v.since.github_orgs, github_repos: v.since.github_repos ?? {}, drive_folders: v.since.drive_folders ?? {}, drives: v.since.drives, member_folders: v.since.member_folders };
-  return true;
-}
-function sinceValid(v, version2) {
-  if (v === void 0 || v === null) return true;
-  const inRange = (n) => versionOk(n) && n >= 1 && n <= version2;
-  const keys = (o, want) => Object.keys(o).length === want.length && want.every((k) => Object.prototype.hasOwnProperty.call(o, k));
-  if (!isObj3(v) || !(keys(v, ["github_orgs", "drives", "member_folders"]) || keys(v, ["github_orgs", "github_repos", "drive_folders", "drives", "member_folders"]))) return false;
-  const orgs = v.github_orgs;
-  if (!isObj3(orgs) || Object.keys(orgs).length > BOUNDARIES_MAX_ORGS) return false;
-  if (!Object.entries(orgs).every(([o, n]) => orgOk(o) && o === o.toLowerCase() && inRange(n))) return false;
-  if (v.github_repos !== void 0) {
-    const repos = v.github_repos;
-    if (!isObj3(repos) || Object.keys(repos).length > BOUNDARIES_MAX_REPOS) return false;
-    const repoKeyOk = (k) => {
-      const at = k.indexOf("/");
-      return at > 0 && k === k.toLowerCase() && orgOk(k.slice(0, at)) && repoNameOk(k.slice(at + 1));
-    };
-    if (!Object.entries(repos).every(([k, n]) => repoKeyOk(k) && inRange(n))) return false;
-  }
-  if (v.drive_folders !== void 0) {
-    const folders = v.drive_folders;
-    if (!isObj3(folders) || Object.keys(folders).length > BOUNDARIES_MAX_FOLDERS) return false;
-    if (!Object.entries(folders).every(([k, n]) => driveItemIdOk(k) && inRange(n))) return false;
-  }
-  if (!Array.isArray(v.drives) || v.drives.length > BOUNDARIES_MAX_DRIVES) return false;
-  if (!v.drives.every((d) => isObj3(d) && keys(d, ["domain", "shared_drive", "since"]) && domainOk(d.domain) && driveNameOk(d.shared_drive) && inRange(d.since))) return false;
-  return v.member_folders === null || inRange(v.member_folders);
-}
-
-// src/boundary-tools.ts
-import { join as join12 } from "node:path";
-
-// src/google-drive.ts
-init_credentials();
-import { execFile as execFile5 } from "node:child_process";
-import { createHash as createHash2 } from "node:crypto";
-import { closeSync as closeSync4, constants as fsConstants, fstatSync, openSync as openSync4, readSync, realpathSync as realpathSync2 } from "node:fs";
-import { homedir as homedir6 } from "node:os";
-import { extname as extname2, isAbsolute as isAbsolute7, join as join10, relative as relative3, sep as sep3 } from "node:path";
-var DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
-var KEYCHAIN_SERVICE = "team-relay-drive";
-var GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-var DRIVE_API = "https://www.googleapis.com/drive/v3/";
-var SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets/";
-var GOOGLE_HOSTS = /* @__PURE__ */ new Set(["accounts.google.com", "oauth2.googleapis.com", "www.googleapis.com", "sheets.googleapis.com"]);
-var DOC_ID_RE = /^[A-Za-z0-9_-]{10,200}$/;
-var RESOURCE_KEY_RE = /^[A-Za-z0-9_-]{1,200}$/;
-var REFRESH_TOKEN_RE = /^[A-Za-z0-9._~+/-]{10,2048}$/;
-var ACCESS_TOKEN_RE = /^[A-Za-z0-9._~+/-]{10,4096}$/;
-var DOMAIN_RE = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
-var CLIENT_ID_RE = /^[A-Za-z0-9.-]{1,200}\.apps\.googleusercontent\.com$/;
-var CLIENT_SECRET_RE = /^[A-Za-z0-9_-]{1,200}$/;
-var MAX_LINK_FILE_BYTES = 4 * 1024;
-var MAX_TEXT_BYTES = 200 * 1024;
-var MAX_JSON_BYTES = 1024 * 1024;
-var MAX_SHEET_JSON_BYTES = 8 * 1024 * 1024;
-var MAX_DRIVE_PAGES = 50;
-var MAX_SHEETS = 100;
-var GOOGLE_TIMEOUT_MS = 2e4;
-var USER_AGENT = "team-relay-plugin/0.1.0";
-var GOOGLE_TYPES = {
-  ".gdoc": { mime: "application/vnd.google-apps.document", kind: "doc" },
-  ".gsheet": { mime: "application/vnd.google-apps.spreadsheet", kind: "sheet" },
-  ".gslides": { mime: "application/vnd.google-apps.presentation", kind: "slides" }
-};
-var NOT_CONNECTED = "not connected: run /team-relay:drive";
-function isGoogleLinkFile(path) {
-  if (typeof path !== "string" || path.length === 0) return false;
-  return Object.hasOwn(GOOGLE_TYPES, extname2(path).toLowerCase());
-}
-var KeychainError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "KeychainError";
-  }
-};
-var SECURITY = "/usr/bin/security";
-var ITEM_NOT_FOUND = 44;
-var execSecurity = (args, stdin) => new Promise((resolve) => {
-  const child = execFile5(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8" }, (err, stdout) => {
-    const code = err ? typeof err.code === "number" ? err.code : 1 : 0;
-    resolve({ code, stdout: String(stdout ?? "") });
-  });
-  if (stdin !== void 0) child.stdin?.end(stdin);
-  else child.stdin?.end();
-});
-function macKeychain(exec = execSecurity) {
-  const checkAccount = (account) => {
-    if (typeof account !== "string" || account.length > 254 || !EMAIL_RE.test(account)) throw new KeychainError("invalid account");
-  };
-  return {
-    async account() {
-      const r = await exec(["find-generic-password", "-s", KEYCHAIN_SERVICE]);
-      if (r.code === ITEM_NOT_FOUND) return null;
-      if (r.code !== 0) throw new KeychainError(`the Keychain could not be read (security exit ${r.code})`);
-      const m = /"acct"<blob>="([^"\n]*)"/.exec(r.stdout);
-      const acct = m?.[1];
-      return acct && EMAIL_RE.test(acct) ? acct : null;
-    },
-    async read(account) {
-      checkAccount(account);
-      const r = await exec(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"]);
-      if (r.code === ITEM_NOT_FOUND) return null;
-      if (r.code !== 0) throw new KeychainError(`the Keychain could not be read (security exit ${r.code})`);
-      const token = r.stdout.replace(/\n$/, "");
-      return REFRESH_TOKEN_RE.test(token) ? token : null;
-    },
-    async write(account, token) {
-      checkAccount(account);
-      if (!REFRESH_TOKEN_RE.test(token)) throw new KeychainError("the token has an unexpected form; nothing was stored");
-      const line = `add-generic-password -U -s "${KEYCHAIN_SERVICE}" -a "${account}" -l "${KEYCHAIN_SERVICE}" -w "${token}"
-`;
-      const r = await exec(["-i"], line);
-      if (r.code !== 0) throw new KeychainError(`the Keychain could not be written (security exit ${r.code})`);
-      const back = await this.read(account);
-      if (back !== token) throw new KeychainError("the Keychain did not keep the token");
-    },
-    async removeAll() {
-      let n = 0;
-      for (let i = 0; i < 20; i++) {
-        const r = await exec(["delete-generic-password", "-s", KEYCHAIN_SERVICE]);
-        if (r.code === ITEM_NOT_FOUND) return n;
-        if (r.code !== 0) throw new KeychainError(`the Keychain item could not be deleted (security exit ${r.code})`);
-        n++;
-      }
-      throw new KeychainError("too many Keychain items to delete");
-    }
-  };
-}
-function defaultKeychain(platform = process.platform) {
-  return platform === "darwin" ? macKeychain() : null;
-}
-var GoogleHttpError = class extends Error {
-  status;
-  constructor(status) {
-    super(status === 0 ? "Google did not answer" : `Google refused (${status})`);
-    this.name = "GoogleHttpError";
-    this.status = status;
-  }
-};
-function assertGoogleUrl(url) {
-  const u = new URL(url);
-  if (u.protocol !== "https:" || !GOOGLE_HOSTS.has(u.hostname) || u.port !== "" || u.username || u.password) {
-    throw new Error("not a Google endpoint");
-  }
-  return u;
-}
-async function readCapped(res, max) {
-  if (!res.body) return { buf: Buffer.alloc(0), over: false };
-  const reader = res.body.getReader();
-  const chunks = [];
-  let n = 0;
-  for (; ; ) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (n + value.byteLength > max) {
-      chunks.push(Buffer.from(value.subarray(0, max - n)));
-      n = max;
-      await reader.cancel().catch(() => {
-      });
-      return { buf: Buffer.concat(chunks), over: true };
-    }
-    chunks.push(Buffer.from(value));
-    n += value.byteLength;
-  }
-  return { buf: Buffer.concat(chunks), over: false };
-}
-async function googleRequest(doFetch, url, init = {}) {
-  assertGoogleUrl(url);
-  const signal = AbortSignal.timeout(init.timeoutMs ?? GOOGLE_TIMEOUT_MS);
-  try {
-    const res = await doFetch(url, {
-      method: init.method ?? "GET",
-      headers: { "User-Agent": USER_AGENT, ...init.headers ?? {} },
-      ...init.body !== void 0 ? { body: init.body } : {},
-      redirect: "error",
-      signal
-    });
-    const { buf, over } = await readCapped(res, init.maxBytes ?? MAX_JSON_BYTES);
-    return { status: res.status, body: buf, over };
-  } catch {
-    return { status: 0, body: Buffer.alloc(0), over: false };
-  }
-}
-function jsonOf(r) {
-  if (r.over) return null;
-  try {
-    const v = JSON.parse(r.body.toString("utf8"));
-    return typeof v === "object" && v !== null && !Array.isArray(v) ? v : null;
-  } catch {
-    return null;
-  }
-}
-function googleForm(doFetch, url, form, maxBytes = 16 * 1024) {
-  return googleRequest(doFetch, url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: new URLSearchParams(form).toString(),
-    maxBytes
-  });
-}
-function oauthError(r) {
-  const j = jsonOf(r);
-  const e = j?.error;
-  return typeof e === "string" && /^[a-z_]{1,40}$/.test(e) ? e : null;
-}
-async function fetchDriveClient(relay) {
-  let c;
-  try {
-    c = await relay.driveClient();
-  } catch (err) {
-    const status = err.status;
-    const code = err.code;
-    if (status === 404 && code === "drive_not_configured") throw new DriveReadError("Google Drive is not set up for this team (ask the relay admin)");
-    throw new DriveReadError("the team relay did not give the Google Drive client; try again later");
-  }
-  if (!c || typeof c.client_id !== "string" || !CLIENT_ID_RE.test(c.client_id) || typeof c.client_secret !== "string" || !CLIENT_SECRET_RE.test(c.client_secret)) {
-    throw new DriveReadError("the team relay gave an invalid Google Drive client");
-  }
-  return { client_id: c.client_id, client_secret: c.client_secret };
-}
-function isDomain(d) {
-  return typeof d === "string" && DOMAIN_RE.test(d);
-}
-function emailInDomain(email, domain) {
-  if (!EMAIL_RE.test(email)) return false;
-  const at = email.lastIndexOf("@");
-  return email.slice(at + 1).toLowerCase() === domain.toLowerCase();
-}
-var DriveReadError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "DriveReadError";
-  }
-};
-var tokenCache = /* @__PURE__ */ new Map();
-function cacheKey(account, refresh) {
-  return `${account}
-${createHash2("sha256").update(refresh).digest("hex")}`;
-}
-async function refreshAccessToken(doFetch, relay, refresh, now) {
-  const client = await fetchDriveClient(relay);
-  const r = await googleForm(doFetch, GOOGLE_TOKEN_URL, {
-    client_id: client.client_id,
-    client_secret: client.client_secret,
-    refresh_token: refresh,
-    grant_type: "refresh_token"
-  });
-  if (r.status === 0) throw new DriveReadError("Google did not answer");
-  if (r.status !== 200) {
-    const e = oauthError(r);
-    if (e === "invalid_grant" || e === "unauthorized_client" || e === "invalid_client") {
-      throw new DriveReadError("the Google Drive connection has expired or was revoked: run /team-relay:drive connect");
-    }
-    throw new DriveReadError(`Google refused (${r.status})`);
-  }
-  const j = jsonOf(r);
-  const token = j?.access_token;
-  const expiresIn = j?.expires_in;
-  const scope = j?.scope;
-  if (typeof token !== "string" || !ACCESS_TOKEN_RE.test(token)) throw new DriveReadError("Google answered with something unexpected");
-  if (typeof scope === "string" && !scope.split(" ").includes(DRIVE_SCOPE)) {
-    throw new DriveReadError("the Google Drive connection does not allow reading Drive: run /team-relay:drive connect");
-  }
-  const secs = typeof expiresIn === "number" && Number.isFinite(expiresIn) && expiresIn > 0 ? Math.min(expiresIn, 3600) : 300;
-  return { token, expiresAt: now() + Math.max(0, secs - 60) * 1e3 };
-}
-var Session = class {
-  constructor(doFetch, relay, account, refresh, now) {
-    this.doFetch = doFetch;
-    this.relay = relay;
-    this.account = account;
-    this.refresh = refresh;
-    this.now = now;
-  }
-  doFetch;
-  relay;
-  account;
-  refresh;
-  now;
-  current = null;
-  async token() {
-    const key = cacheKey(this.account, this.refresh);
-    const hit = tokenCache.get(key);
-    if (hit && hit.expiresAt > this.now()) {
-      this.current = hit;
-      return hit.token;
-    }
-    const fresh = await refreshAccessToken(this.doFetch, this.relay, this.refresh, this.now);
-    tokenCache.set(key, fresh);
-    this.current = fresh;
-    return fresh.token;
-  }
-  invalidate() {
-    tokenCache.delete(cacheKey(this.account, this.refresh));
-    this.current = null;
-  }
-  /** GET a Drive/Sheets URL as the member; one retry with a fresh token on 401. */
-  async get(url, opts = {}) {
-    for (let attempt = 0; ; attempt++) {
-      const token = await this.token();
-      const r = await googleRequest(this.doFetch, url, {
-        headers: { Authorization: `Bearer ${token}`, Accept: "*/*", ...opts.headers ?? {} },
-        ...opts.maxBytes !== void 0 ? { maxBytes: opts.maxBytes } : {}
-      });
-      if (r.status === 401 && attempt === 0) {
-        this.invalidate();
-        continue;
-      }
-      return r;
-    }
-  }
-};
-function cloudStorageRoot() {
-  return join10(homedir6(), "Library", "CloudStorage");
-}
-var isFolderArea = (a) => "root" in a;
-var below = (rel) => rel !== "" && rel !== ".." && !rel.startsWith(`..${sep3}`) && !isAbsolute7(rel);
-function readLinkFile(linkPath, area, root) {
-  if (!isGoogleLinkFile(linkPath)) throw new DriveReadError("not a Google file");
-  if (!isAbsolute7(linkPath)) throw new DriveReadError("not in the team drive");
-  let realRoot;
-  let realFile;
-  let realArea = null;
-  try {
-    realRoot = realpathSync2(root);
-    realFile = realpathSync2(linkPath);
-    if (isFolderArea(area)) realArea = realpathSync2(area.root);
-  } catch {
-    throw new DriveReadError("not in the team drive");
-  }
-  if (!isGoogleLinkFile(realFile)) throw new DriveReadError("not a Google file");
-  const ext = extname2(realFile).toLowerCase();
-  if (ext !== extname2(linkPath).toLowerCase()) throw new DriveReadError("not a Google file");
-  const rel = relative3(realRoot, realFile);
-  if (!below(rel)) throw new DriveReadError("not in the team drive");
-  const segs = rel.split(sep3);
-  const mount = /^GoogleDrive-(.+)$/.exec(segs[0] ?? "");
-  const account = mount?.[1];
-  if (segs.length < 4 || !account || !emailInDomain(account, area.domain) || segs[1] !== "Shared drives") throw new DriveReadError("not in the team drive");
-  if (isFolderArea(area)) {
-    const areaRel = relative3(realRoot, realArea);
-    const areaSegs = areaRel.split(sep3);
-    if (!below(areaRel) || areaSegs.length < 3 || areaSegs[0] !== segs[0] || areaSegs[1] !== "Shared drives" || !below(relative3(realArea, realFile))) {
-      throw new DriveReadError("not in the team drive");
-    }
-  } else if ((segs[2] ?? "").normalize("NFC") !== area.shared_drive.normalize("NFC")) {
-    throw new DriveReadError("not in the team drive");
-  }
-  let fd;
-  try {
-    fd = openSync4(realFile, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-  } catch {
-    throw new DriveReadError("the link file cannot be read");
-  }
-  let text;
-  try {
-    const st = fstatSync(fd);
-    if (!st.isFile()) throw new DriveReadError("not a Google file");
-    if (st.size > MAX_LINK_FILE_BYTES) throw new DriveReadError("the link file is too large to be a Google link");
-    const buf = Buffer.alloc(MAX_LINK_FILE_BYTES + 1);
-    let n = 0;
-    for (; ; ) {
-      const got = readSync(fd, buf, n, buf.length - n, null);
-      if (got === 0) break;
-      n += got;
-      if (n > MAX_LINK_FILE_BYTES) throw new DriveReadError("the link file is too large to be a Google link");
-    }
-    text = buf.subarray(0, n).toString("utf8");
-  } finally {
-    closeSync4(fd);
-  }
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new DriveReadError("the link file is not a Google link");
-  }
-  if (typeof json !== "object" || json === null || Array.isArray(json)) throw new DriveReadError("the link file is not a Google link");
-  const o = json;
-  const docId = o.doc_id;
-  if (typeof docId !== "string" || !DOC_ID_RE.test(docId)) throw new DriveReadError("the link file has no valid doc_id");
-  const rk = o.resource_key;
-  let resourceKey = null;
-  if (typeof rk === "string" && rk !== "") {
-    if (!RESOURCE_KEY_RE.test(rk)) throw new DriveReadError("the link file has an invalid resource_key");
-    resourceKey = rk;
-  } else if (rk !== void 0 && rk !== null && rk !== "") {
-    throw new DriveReadError("the link file has an invalid resource_key");
-  }
-  const email = o.email;
-  if (email !== void 0 && email !== null && email !== "" && (typeof email !== "string" || !emailInDomain(email, area.domain))) {
-    throw new DriveReadError("not in the team drive");
-  }
-  const t = GOOGLE_TYPES[ext];
-  return { docId, resourceKey, kind: t.kind, googleMime: t.mime };
-}
-var MAX_ANCESTRY_LEVELS = 20;
-var NOT_IN_FOLDER = "not in the picked Drive folder";
-function oneParent(parents) {
-  if (!Array.isArray(parents) || parents.length !== 1) return null;
-  const p = parents[0];
-  return typeof p === "string" && DOC_ID_RE.test(p) ? p : null;
-}
-async function reachesFolder(s, parents, driveId, folderId) {
-  let current = oneParent(parents);
-  for (let level = 1; level <= MAX_ANCESTRY_LEVELS; level++) {
-    if (current === null || current === driveId) return false;
-    if (current === folderId) return true;
-    if (level === MAX_ANCESTRY_LEVELS) return false;
-    const q = new URLSearchParams({ supportsAllDrives: "true", fields: "id,parents,driveId" });
-    const r = await s.get(`${DRIVE_API}files/${encodeURIComponent(current)}?${q.toString()}`);
-    if (r.status === 0) throw new GoogleHttpError(0);
-    if (r.status !== 200) return false;
-    const m = jsonOf(r);
-    if (!m || m.id !== current || m.driveId !== driveId) return false;
-    current = oneParent(m.parents);
-  }
-  return false;
-}
-async function resolveSharedDrive(s, name) {
-  const want = name.normalize("NFC");
-  const found = [];
-  let pageToken = null;
-  for (let page = 0; page < MAX_DRIVE_PAGES; page++) {
-    const q = new URLSearchParams({ pageSize: "100", useDomainAdminAccess: "false", fields: "nextPageToken,drives(id,name)" });
-    if (pageToken) q.set("pageToken", pageToken);
-    const r = await s.get(`${DRIVE_API}drives?${q.toString()}`);
-    if (r.status !== 200) throw new GoogleHttpError(r.status);
-    const j = jsonOf(r);
-    if (!j) throw new DriveReadError("Google answered with something unexpected");
-    const drives = Array.isArray(j.drives) ? j.drives : [];
-    for (const d of drives) {
-      if (typeof d !== "object" || d === null) continue;
-      const { id, name: n } = d;
-      if (typeof id === "string" && typeof n === "string" && n.normalize("NFC") === want) found.push(id);
-    }
-    const next = j.nextPageToken;
-    if (typeof next !== "string" || next === "") {
-      pageToken = null;
-      break;
-    }
-    pageToken = next;
-  }
-  if (pageToken) throw new DriveReadError("too many shared drives to find the team drive");
-  if (found.length === 0) throw new DriveReadError("the team drive is not visible to the connected Google account");
-  if (new Set(found).size > 1) throw new DriveReadError("two or more shared drives have the team drive's name; cannot tell which one it is");
-  return found[0];
-}
-function decode(buf, truncated) {
-  let text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
-  if (text.charCodeAt(0) === 65279) text = text.slice(1);
-  if (truncated) text = text.replace(/�+$/, "");
-  return text;
-}
-async function exportAs(s, docId, mime) {
-  const q = new URLSearchParams({ mimeType: mime, supportsAllDrives: "true" });
-  return s.get(`${DRIVE_API}files/${encodeURIComponent(docId)}/export?${q.toString()}`, { maxBytes: MAX_TEXT_BYTES });
-}
-function textResult(r, mime, prefix = "") {
-  const pre = Buffer.from(prefix, "utf8");
-  const room = MAX_TEXT_BYTES - pre.length;
-  const over = r.over || r.body.length > room;
-  const body = r.body.length > room ? r.body.subarray(0, room) : r.body;
-  return { ok: true, text: prefix + decode(body, over), mime, truncated: over };
-}
-function csvField(v) {
-  const s = v === null || v === void 0 ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
-  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-function sheetRange(title) {
-  return `'${title.replace(/'/g, "''")}'`;
-}
-async function exportSheets(s, docId) {
-  const meta = await s.get(`${SHEETS_API}${encodeURIComponent(docId)}?${new URLSearchParams({ fields: "sheets.properties(title,sheetType,index)" }).toString()}`);
-  if (meta.status !== 200) return null;
-  const j = jsonOf(meta);
-  if (!j || !Array.isArray(j.sheets)) return null;
-  const titles = [];
-  const props = j.sheets.map((x) => typeof x === "object" && x !== null ? x.properties : void 0).filter((p) => typeof p === "object" && p !== null).sort((a, b) => (typeof a.index === "number" ? a.index : 0) - (typeof b.index === "number" ? b.index : 0));
-  for (const p of props) {
-    if (typeof p.title !== "string" || p.title.length === 0 || p.title.length > 200) continue;
-    if (p.sheetType !== void 0 && p.sheetType !== "GRID") continue;
-    titles.push(p.title);
-  }
-  let out = "";
-  let truncated = titles.length > MAX_SHEETS;
-  const budget = MAX_TEXT_BYTES;
-  for (const title of titles.slice(0, MAX_SHEETS)) {
-    const q = new URLSearchParams({ majorDimension: "ROWS", valueRenderOption: "FORMATTED_VALUE" });
-    const r = await s.get(`${SHEETS_API}${encodeURIComponent(docId)}/values/${encodeURIComponent(sheetRange(title))}?${q.toString()}`, { maxBytes: MAX_SHEET_JSON_BYTES });
-    if (r.over) {
-      truncated = true;
-      break;
-    }
-    if (r.status !== 200) return out ? { ok: true, text: out, mime: "text/csv", truncated: true } : null;
-    const v = jsonOf(r);
-    const rows = Array.isArray(v?.values) ? v.values : [];
-    let section = `# Sheet: ${title.replace(/[\r\n]+/g, " ")}
-`;
-    for (const row of rows) section += `${(Array.isArray(row) ? row : []).map(csvField).join(",")}
-`;
-    section += "\n";
-    if (Buffer.byteLength(out + section, "utf8") > budget) {
-      const room = budget - Buffer.byteLength(out, "utf8");
-      if (room > 0) out += decode(Buffer.from(section, "utf8").subarray(0, room), true);
-      truncated = true;
-      break;
-    }
-    out += section;
-  }
-  return { ok: true, text: out, mime: "text/csv", truncated };
-}
-var FIRST_SHEET_NOTE = "(first sheet only: the other sheets could not be read)\n";
-async function exportFile(s, link) {
-  if (link.kind === "doc") {
-    const md = await exportAs(s, link.docId, "text/markdown");
-    if (md.status === 200) return textResult(md, "text/markdown");
-    if (md.status !== 400 && md.status !== 415) throw new GoogleHttpError(md.status);
-    const plain = await exportAs(s, link.docId, "text/plain");
-    if (plain.status === 200) return textResult(plain, "text/plain");
-    throw new GoogleHttpError(plain.status);
-  }
-  if (link.kind === "slides") {
-    const r = await exportAs(s, link.docId, "text/plain");
-    if (r.status === 200) return textResult(r, "text/plain");
-    throw new GoogleHttpError(r.status);
-  }
-  const all = await exportSheets(s, link.docId);
-  if (all) return all;
-  const csv = await exportAs(s, link.docId, "text/csv");
-  if (csv.status === 200) return textResult(csv, "text/csv", FIRST_SHEET_NOTE);
-  throw new GoogleHttpError(csv.status);
-}
-async function defaultRelay() {
-  const { relayClientFromEnv: relayClientFromEnv2 } = await Promise.resolve().then(() => (init_relay_client(), relay_client_exports));
-  return relayClientFromEnv2(process.env, { attempts: 1, timeoutMs: 1e4 });
-}
-function areaOk(a) {
-  if (typeof a !== "object" || a === null) return null;
-  const o = a;
-  if (!isDomain(o.domain)) return null;
-  if ("root" in o) {
-    const idOk = (v) => typeof v === "string" && DOC_ID_RE.test(v);
-    return typeof o.root === "string" && isAbsolute7(o.root) && idOk(o.drive_root_id) && idOk(o.folder_id) ? { domain: o.domain, root: o.root, drive_root_id: o.drive_root_id, folder_id: o.folder_id } : null;
-  }
-  const n = o.shared_drive;
-  return typeof n === "string" && n.length > 0 && n.length <= 100 && !/[/\u0000-\u001f\u007f]/.test(n) ? { domain: o.domain, shared_drive: n } : null;
-}
-async function readGoogleFile(linkPath, given, deps = {}) {
-  try {
-    if (!isGoogleLinkFile(linkPath)) return { ok: false, reason: "not a Google file" };
-    const drive = areaOk(given);
-    if (!drive) return { ok: false, reason: "not in the team drive" };
-    const link = readLinkFile(linkPath, drive, deps.cloudStorageRoot ?? cloudStorageRoot());
-    const keychain = deps.keychain === void 0 ? defaultKeychain() : deps.keychain;
-    if (!keychain) return { ok: false, reason: "Google files can only be read on macOS (the Drive connection lives in the macOS Keychain)" };
-    const account = await keychain.account();
-    if (!account) return { ok: false, reason: NOT_CONNECTED };
-    if (!emailInDomain(account, drive.domain)) {
-      return { ok: false, reason: `the connected Google account is not in ${drive.domain}: run /team-relay:drive connect` };
-    }
-    const refresh = await keychain.read(account);
-    if (!refresh) return { ok: false, reason: NOT_CONNECTED };
-    const doFetch = deps.fetch ?? ((u, i) => fetch(u, i));
-    const relay = deps.relay ?? await defaultRelay();
-    const s = new Session(doFetch, relay, account, refresh, deps.now ?? Date.now);
-    const driveId = isFolderArea(drive) ? drive.drive_root_id : await resolveSharedDrive(s, drive.shared_drive);
-    const folderId = isFolderArea(drive) && drive.folder_id !== drive.drive_root_id ? drive.folder_id : null;
-    const q = new URLSearchParams({ supportsAllDrives: "true", fields: folderId ? "id,name,mimeType,driveId,parents" : "id,name,mimeType,driveId" });
-    const headers = link.resourceKey ? { "X-Goog-Drive-Resource-Keys": `${link.docId}/${link.resourceKey}` } : {};
-    const meta = await s.get(`${DRIVE_API}files/${encodeURIComponent(link.docId)}?${q.toString()}`, { headers });
-    if (meta.status !== 200) throw new GoogleHttpError(meta.status);
-    const m = jsonOf(meta);
-    if (!m || m.id !== link.docId) return { ok: false, reason: "Google answered with something unexpected" };
-    if (typeof m.driveId !== "string" || m.driveId !== driveId) return { ok: false, reason: "not in the team drive" };
-    if (m.mimeType !== link.googleMime) return { ok: false, reason: "not a Google file" };
-    if (folderId && !await reachesFolder(s, m.parents, driveId, folderId)) return { ok: false, reason: NOT_IN_FOLDER };
-    return await exportFile(s, link);
-  } catch (err) {
-    if (err instanceof DriveReadError || err instanceof GoogleHttpError) return { ok: false, reason: err.message };
-    if (err instanceof KeychainError) return { ok: false, reason: `${NOT_CONNECTED} (${err.message})` };
-    return { ok: false, reason: "the Google file could not be read" };
-  }
-}
-
-// src/secret-screen.ts
-var PREFIXED = [
-  { kind: "a private key", re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/ },
-  { kind: "a PGP private key", re: /-----BEGIN PGP PRIVATE KEY BLOCK-----/ },
-  { kind: "a key or certificate body", re: /\bMI[IGH][A-Za-z0-9+/]{40,}/ },
-  { kind: "an AWS access key id", re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[0-9A-Z]{16}\b/ },
-  { kind: "a GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\b/ },
-  { kind: "a GitLab token", re: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },
-  { kind: "a Slack token", re: /\bxox[abprsoe]-[A-Za-z0-9-]{10,}\b/ },
-  { kind: "a Slack webhook", re: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]{20,}/ },
-  { kind: "an Anthropic API key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/ },
-  { kind: "an OpenAI-style API key", re: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/ },
-  { kind: "a Stripe key", re: /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b/ },
-  { kind: "a Stripe webhook secret", re: /\bwhsec_[A-Za-z0-9]{24,}\b/ },
-  { kind: "a Google API key", re: /\bAIza[0-9A-Za-z_-]{35}\b/ },
-  { kind: "a Google OAuth token", re: /\bya29\.[0-9A-Za-z_-]{20,}/ },
-  { kind: "a Google OAuth client secret", re: /\bGOCSPX-[A-Za-z0-9_-]{20,}/ },
-  { kind: "a Google service account key", re: /"private_key_id"\s*:\s*"[0-9a-f]{20,}"/ },
-  { kind: "an npm token", re: /\bnpm_[A-Za-z0-9]{36}\b/ },
-  { kind: "a PyPI token", re: /\bpypi-[A-Za-z0-9_-]{50,}/ },
-  { kind: "a SendGrid key", re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/ },
-  { kind: "a Twilio key", re: /\bSK[0-9a-fA-F]{32}\b/ },
-  { kind: "a Hugging Face token", re: /\bhf_[A-Za-z0-9]{30,}\b/ },
-  { kind: "a DigitalOcean token", re: /\bdo[oprs]_v1_[a-f0-9]{64}\b/ },
-  { kind: "a Shopify token", re: /\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b/ },
-  { kind: "an Azure storage key", re: /AccountKey=[A-Za-z0-9+/=]{40,}/ },
-  { kind: "a team relay credential", re: /\btrc_[A-Za-z0-9_-]{43}\b/ },
-  { kind: "a JSON web token", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/ },
-  { kind: "a basic-auth header", re: /\bAuthorization:\s*(?:Basic|Bearer)\s+[A-Za-z0-9+/=._-]{12,}/i }
-];
-var INVISIBLE = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0]/g;
-var CONFUSABLES = {
-  "\u0410": "A",
-  "\u0412": "B",
-  "\u0415": "E",
-  "\u041A": "K",
-  "\u041C": "M",
-  "\u041D": "H",
-  "\u041E": "O",
-  "\u0420": "P",
-  "\u0421": "C",
-  "\u0422": "T",
-  "\u0425": "X",
-  "\u0423": "Y",
-  "\u0405": "S",
-  "\u0406": "I",
-  "\u0408": "J",
-  "\u0500": "d",
-  "\u0430": "a",
-  "\u0432": "b",
-  "\u0435": "e",
-  "\u043A": "k",
-  "\u043C": "m",
-  "\u043D": "h",
-  "\u043E": "o",
-  "\u0440": "p",
-  "\u0441": "c",
-  "\u0442": "t",
-  "\u0445": "x",
-  "\u0443": "y",
-  "\u0455": "s",
-  "\u0456": "i",
-  "\u0458": "j",
-  "\u04BB": "h",
-  "\u0501": "d",
-  "\u051B": "q",
-  "\u051D": "w",
-  "\u04CF": "l",
-  "\u0391": "A",
-  "\u0392": "B",
-  "\u0395": "E",
-  "\u0396": "Z",
-  "\u0397": "H",
-  "\u0399": "I",
-  "\u039A": "K",
-  "\u039C": "M",
-  "\u039D": "N",
-  "\u039F": "O",
-  "\u03A1": "P",
-  "\u03A4": "T",
-  "\u03A5": "Y",
-  "\u03A7": "X",
-  "\u03BF": "o",
-  "\u03BD": "v",
-  "\u03B1": "a",
-  "\u03B9": "i",
-  "\u03BA": "k",
-  "\u03C1": "p",
-  "\u03C4": "t",
-  "\u03C5": "u",
-  "\u03C7": "x"
-};
-function normalise(text) {
-  let out = "";
-  for (const c of text.normalize("NFKC").replace(INVISIBLE, "")) out += CONFUSABLES[c] ?? c;
-  return out;
-}
-function joinLines(text) {
-  return text.replace(/(?<=[A-Za-z0-9+/_=.-]{4})[ \t]*\r?\n[ \t>*-]*(?=[A-Za-z0-9+/_=-]{4})/g, "");
-}
-function closeUp(text) {
-  return text.replace(/(?:\S[ \t\u00A0]){7,}\S/g, (run2) => run2.replace(/[ \t\u00A0]/g, ""));
-}
-var SECRET_KEY_SUBSTRING = /PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API[_-]?KEY|APIKEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|CLIENT[_-]?SECRET|AUTH[_-]?KEY|SIGNING[_-]?KEY|ENCRYPTION[_-]?KEY|SESSION[_-]?KEY|DSN|CONN(?:ECTION)?[_-]?STRING/;
-var SECRET_KEY_WORDS = /* @__PURE__ */ new Set(["pass", "pwd", "pw", "passwd", "passcode", "passphrase", "creds", "pat"]);
-function isSecretKey(key) {
-  const k = normalise(key);
-  if (SECRET_KEY_SUBSTRING.test(k.toUpperCase())) return true;
-  const words = k.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[\s_.:-]+/).map((w) => w.toLowerCase()).filter(Boolean);
-  return words.some((w) => SECRET_KEY_WORDS.has(w));
-}
-var ASSIGNMENT = /(?:^|[\s"'`{,;(])["'`]?([A-Za-z_][A-Za-z0-9_.-]{0,79})["'`]?\s*(?::=|=>|=|:)\s*["'`]?([^\s"'`,;}]+)/gm;
-function placeholder(value, minLength = 6) {
-  const v = value.trim().replace(/^["'`]|["'`]$/g, "");
-  if (v.length < minLength) return true;
-  if (/^(?:x+|\*+|•+|\.+|-+|_+|<[^>]*>|\{\{.*\}\}|\$\{[^}]*\}?|\$[A-Z_][A-Z0-9_]*|%[A-Z_]+%|null|none|nil|true|false|undefined|changeme|change_me|your[_-]?\w*|example\w*|placeholder|redacted|\[redacted\]|todo|tbd|secret|password|token)$/i.test(v)) {
-    return true;
-  }
-  if (/^(?:process\.env|os\.environ|env\.|secrets\.|vault:|projects\/[^/]+\/secrets\/)/i.test(v)) return true;
-  return false;
-}
-var PROSE = /\b(passwords?|passphrase|passcode|passwd|pwd|pass|pin|secret|token|(?:api|access|secret|private|signing)[ _-]?key|key)\b(?:\s+(?:for|of|to|on|in|at)(?:\s+[^\s.,;:!?]{1,40}){1,3}?)?\s+(?:is|was|=|would be|will be|should be|reads|equals|is set to|was set to)\s*:?\s*(["'`“”‘’]?)([^\s"'`“”‘’]{1,256})/gi;
-var PROSE_WORDS = new Set(
-  "a an the not no now also still only just then this that these those it its your our my his her their what whatever which stored kept saved held set reset changed rotated managed required needed used missing wrong invalid expired correct same different located encrypted hashed salted sent provided generated defined configured found empty blank shown visible hidden secure private public available unavailable being from at on in under via inside outside there here too very rotated important optional mandatory case-sensitive sensitive unknown unset known given shared read loaded fetched pulled injected passed checked verified validated refreshed renewed revoked issued signed short long weak strong random different".split(" ")
-);
-function proseSecret(word, quoted, rawValue) {
-  const value = rawValue.replace(/[.,;:!?)\]]+$/, "");
-  if (value === "" || PROSE_WORDS.has(value.toLowerCase())) return false;
-  if (placeholder(value, 4)) return false;
-  const w = word.toLowerCase();
-  const passwordLike = /^(?:passwords?|passphrase|passcode|passwd|pwd|pass|pin|secret)$/.test(w);
-  if (quoted || passwordLike) return true;
-  return value.length >= 8 && (/[0-9]/.test(value) || /[a-z]/.test(value) && /[A-Z]/.test(value) || /[_+/=!@#$%^&*-]/.test(value));
-}
-var URL_USERINFO = /(?:\b[a-z][a-z0-9+.-]{0,20}:)?\/\/([^\s/?#@"'<>]{1,256})@[^\s/?#@"'<>]{1,255}/gi;
-var URL_PARAM = /[?&;#]([A-Za-z0-9_.-]{1,64})=([^&#\s"'<>]{1,512})/g;
-var SECRET_PARAMS = /* @__PURE__ */ new Set([
-  "key",
-  "sig",
-  "signature",
-  "auth",
-  "access_token",
-  "id_token",
-  "refresh_token",
-  "client_secret",
-  "apikey",
-  "api_key",
-  "x-amz-signature",
-  "x-amz-credential",
-  "x-amz-security-token",
-  "x-goog-signature",
-  "x-goog-credential",
-  "sas",
-  "sv",
-  "code"
-]);
-function decode2(s) {
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return s;
-  }
-}
-function urlCredentials(text) {
-  for (const m of text.matchAll(URL_USERINFO)) {
-    const info = m[1] ?? "";
-    const colon = info.indexOf(":");
-    if (colon >= 0) {
-      const password = decode2(info.slice(colon + 1));
-      if (password !== "" && !placeholder(password, 1)) return true;
-    } else {
-      const user = decode2(info);
-      if (!placeholder(user, 12) && (user.length >= 20 || /[0-9]/.test(user) && /[A-Za-z]/.test(user))) return true;
-    }
-  }
-  for (const m of text.matchAll(URL_PARAM)) {
-    const name = (m[1] ?? "").toLowerCase();
-    if ((SECRET_PARAMS.has(name) || isSecretKey(name)) && !placeholder(decode2(m[2] ?? ""))) return true;
-  }
-  return false;
-}
-function entropy(s) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const c of s) counts.set(c, (counts.get(c) ?? 0) + 1);
-  let h = 0;
-  for (const n of counts.values()) {
-    const p = n / s.length;
-    h -= p * Math.log2(p);
-  }
-  return h;
-}
-var CANDIDATE = /[A-Za-z0-9+/_=-]{32,}/g;
-function highEntropy(text) {
-  for (const m of text.matchAll(CANDIDATE)) {
-    const s = m[0].replace(/=+$/, "");
-    if (s.length < 32) continue;
-    if (/^[0-9a-f]+$/i.test(s)) continue;
-    if (!/[0-9]/.test(s) || !/[a-z]/.test(s) || !/[A-Z]/.test(s)) continue;
-    if ((s.match(/\//g) ?? []).length > 2) continue;
-    if (entropy(s) >= 4.3) return true;
-  }
-  return false;
-}
-var HEX = /(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])/g;
-var HEX_GROUPS = /(?<![0-9A-Za-z])(?:[0-9a-fA-F]{2,8}[ :-]){3,}[0-9a-fA-F]{2,8}(?![0-9A-Za-z])/g;
-function hexSecret(text) {
-  const mixed = (s) => /[0-9]/.test(s) && /[a-f]/i.test(s);
-  for (const m of text.matchAll(HEX)) if (mixed(m[0])) return true;
-  for (const m of text.matchAll(HEX_GROUPS)) {
-    const digits = m[0].replace(/[ :-]/g, "");
-    if (digits.length >= 32 && mixed(digits)) return true;
-  }
-  return false;
-}
-var BASE64_PADDED = /(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{14,}={1,2}(?![A-Za-z0-9+/=])/g;
-function paddedBase64(text) {
-  for (const m of text.matchAll(BASE64_PADDED)) {
-    const s = m[0];
-    if (s.length % 4 !== 0) continue;
-    const body = s.replace(/=+$/, "");
-    if (/[0-9]/.test(body) && /[A-Za-z]/.test(body) || /[a-z]/.test(body) && /[A-Z]/.test(body)) return true;
-  }
-  return false;
-}
-function screenForm(text, add) {
-  for (const { kind, re } of PREFIXED) if (re.test(text)) add(kind);
-  for (const m of text.matchAll(ASSIGNMENT)) {
-    if (isSecretKey(m[1] ?? "") && !placeholder(m[2] ?? "")) add("a secret-looking KEY=value pair");
-  }
-  for (const m of text.matchAll(PROSE)) {
-    if (proseSecret(m[1] ?? "", (m[2] ?? "") !== "", m[3] ?? "")) add("a secret stated in words");
-  }
-  if (urlCredentials(text)) add("a URL with credentials");
-  if (hexSecret(text)) add("a long hex string");
-  if (paddedBase64(text)) add("a base64-encoded value");
-  if (highEntropy(text)) add("a long random-looking token");
-}
-function screenSecrets(text) {
-  const found = [];
-  const add = (kind) => {
-    if (!found.some((f) => f.kind === kind)) found.push({ kind });
-  };
-  const norm = normalise(text);
-  const forms = /* @__PURE__ */ new Set([norm, joinLines(norm), closeUp(norm), closeUp(joinLines(norm))]);
-  for (const form of forms) screenForm(form, add);
-  const stripped = norm.replace(/\s+/g, "");
-  for (const { kind, re } of PREFIXED) if (re.test(stripped)) add(kind);
-  return found;
-}
-function screenDraft(text, data) {
-  const parts = [text];
-  if (data !== void 0 && data !== null) parts.push(JSON.stringify(data));
-  return screenSecrets(parts.join("\n"));
-}
-
-// src/snapshot.ts
-import { randomBytes as randomBytes6 } from "node:crypto";
-import { constants, promises as fsp3 } from "node:fs";
-import { extname as extname3, join as join11 } from "node:path";
-var MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
-var MAX_RUN_SNAPSHOT_BYTES = 100 * 1024 * 1024;
-function snapshotDirPrefix(pid = process.pid) {
-  return `trs-${pid}-`;
-}
-var SNAPSHOT_DIR_RE = /^trs-([1-9][0-9]{0,9})-[A-Za-z0-9]{6}$/;
-var PID_MAX = 2 ** 31 - 1;
-function snapshotRun(dir, maxTotal = MAX_RUN_SNAPSHOT_BYTES) {
-  return { dir, maxTotal, total: 0, copies: /* @__PURE__ */ new Map() };
-}
-async function openAllowed(input) {
-  const { set, ctx, real } = input;
-  await input.beforeOpen?.(real);
-  let fh;
-  try {
-    fh = await fsp3.open(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  } catch {
-    return { ok: false, why: "unsafe" };
-  }
-  let keep = false;
-  try {
-    const st = await fh.stat({ bigint: true });
-    if (!st.isFile()) return { ok: false, why: "unsafe" };
-    if (st.size > BigInt(input.maxBytes)) return { ok: false, why: "too_large" };
-    const again = await canonical(real);
-    if (again !== real || !set.files.has(again) || alwaysOut(again, ctx)) return { ok: false, why: "unsafe" };
-    const now = await fsp3.stat(real, { bigint: true }).catch(() => null);
-    if (!now || now.dev !== st.dev || now.ino !== st.ino) return { ok: false, why: "unsafe" };
-    keep = true;
-    return { ok: true, fh, st };
-  } catch {
-    return { ok: false, why: "unsafe" };
-  } finally {
-    if (!keep) await fh.close().catch(() => {
-    });
-  }
-}
-async function readCapped2(fh, max) {
-  const chunks = [];
-  let total = 0;
-  for (; ; ) {
-    const buf = Buffer.alloc(Math.min(1024 * 1024, max + 1 - total));
-    const { bytesRead } = await fh.read(buf, 0, buf.length, null);
-    if (bytesRead === 0) break;
-    chunks.push(buf.subarray(0, bytesRead));
-    total += bytesRead;
-    if (total > max) return null;
-  }
-  return Buffer.concat(chunks, total);
-}
-var EXT_RE = /^\.[A-Za-z0-9]{1,16}$/;
-async function snapshotRead(input) {
-  const max = input.maxBytes ?? MAX_SNAPSHOT_BYTES;
-  const run2 = input.run;
-  const real = await inSet(input.set, input.requested, input.ctx);
-  if (!real) return { ok: false, why: "outside" };
-  const opened = await openAllowed({ set: input.set, ctx: input.ctx, real, maxBytes: max, ...input.beforeOpen ? { beforeOpen: input.beforeOpen } : {} });
-  if (!opened.ok) return opened;
-  const { fh, st } = opened;
-  try {
-    const key = `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}`;
-    const made = run2.copies.get(key);
-    if (made) return { ok: true, path: made.path, source: real, bytes: made.bytes };
-    const reserved = Number(st.size);
-    if (reserved > run2.maxTotal - run2.total) return { ok: false, why: "run_cap" };
-    run2.total += reserved;
-    let used = 0;
-    try {
-      const body = await readCapped2(fh, reserved);
-      if (body === null) return { ok: false, why: "unsafe" };
-      const ext = extname3(real);
-      const copy = join11(run2.dir, `${randomBytes6(16).toString("hex")}${EXT_RE.test(ext) ? ext : ""}`);
-      await fsp3.writeFile(copy, body, { flag: "wx", mode: 384 });
-      used = body.length;
-      run2.copies.set(key, { path: copy, bytes: body.length });
-      return { ok: true, path: copy, source: real, bytes: body.length };
-    } finally {
-      run2.total -= reserved - used;
-    }
-  } finally {
-    await fh.close().catch(() => {
-    });
-  }
-}
-function processGone(pid) {
-  if (!Number.isSafeInteger(pid) || pid < 1 || pid > PID_MAX || pid === process.pid) return false;
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (err) {
-    return err.code === "ESRCH";
-  }
-}
-async function removeStaleSnapshotDirs(root, startedAt) {
-  const me = typeof process.getuid === "function" ? process.getuid() : null;
-  if (me === null) return 0;
-  let names;
-  try {
-    names = await fsp3.readdir(root);
-  } catch {
-    return 0;
-  }
-  let removed = 0;
-  for (const name of names) {
-    const m = SNAPSHOT_DIR_RE.exec(name);
-    if (!m || !processGone(Number(m[1]))) continue;
-    const path = join11(root, name);
-    const st = await fsp3.lstat(path).catch(() => null);
-    if (!st || st.isSymbolicLink() || !st.isDirectory() || st.uid !== me || (st.mode & 511) !== 448) continue;
-    if (!(st.mtimeMs < startedAt)) continue;
-    try {
-      await fsp3.rm(path, { recursive: true, force: true });
-      removed++;
-    } catch {
-    }
-  }
-  return removed;
-}
-
-// src/boundary-tools.ts
-var LIST_LIMIT = 500;
-var SEARCH_DEFAULT_RESULTS = 50;
-var SEARCH_MAX_RESULTS = 200;
-var SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
-var SEARCH_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
-var SEARCH_MAX_MS = 2e4;
-var LINE_SHOWN = 300;
-var LINE_SCANNED = 1e4;
-var PATTERN_LIMIT = 300;
-var WITHHELD_LINE = "[line withheld: it may contain a credential]";
-function areaList(set) {
-  return set.areas.map((a) => ({ area: a.name, kind: a.kind, root: a.root, files: a.files.length, ...a.truncated ? { truncated: true } : {} }));
-}
-function pickAreas(set, area) {
-  if (area === void 0 || area === null || area === "") return set.areas;
-  if (typeof area !== "string" || area.length > 300) return "area must be one of the area names list_files shows";
-  const found = set.areas.filter((a) => a.name === area || a.name.replace(/^[a-z]+:/, "") === area || a.repo !== void 0 && a.repo.repo === area);
-  if (found.length === 0) return `there is no area ${JSON.stringify(area.slice(0, 100))}; the areas are: ${set.areas.map((a) => a.name).join(", ") || "(none)"}`;
-  return found;
-}
-function globToRe2(glob) {
-  let re = "";
-  for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === "*" && glob[i + 1] === "*") {
-      if (glob[i + 2] === "/") {
-        re += "(?:.*/)?";
-        i += 2;
-      } else {
-        re += ".*";
-        i += 1;
-      }
-    } else if (c === "*") re += "[^/]*";
-    else if (c === "?") re += "[^/]";
-    else re += RE2JS.quote(c);
-  }
-  return RE2JS.compile(re);
-}
-function globFilter(glob) {
-  if (glob === void 0 || glob === null || glob === "") return null;
-  if (typeof glob !== "string" || glob.length > PATTERN_LIMIT) return 'glob must be a short pattern such as "**/*.md"';
-  let re;
-  try {
-    re = globToRe2(glob);
-  } catch {
-    return 'glob must be a short pattern such as "**/*.md"';
-  }
-  const nameOnly = !glob.includes("/");
-  return (rel) => re.matches(rel) || nameOnly && re.matches(rel.slice(rel.lastIndexOf("/") + 1));
-}
-function filesOf(areas, filter) {
-  const out = [];
-  for (const a of areas) for (const f of a.files) if (!filter || filter(areaRelative(a, f))) out.push({ area: a, path: f });
-  return out;
-}
-function listFiles(set, args) {
-  const areas = pickAreas(set, args.area);
-  if (typeof areas === "string") return { ok: false, message: areas };
-  const filter = globFilter(args.glob);
-  if (typeof filter === "string") return { ok: false, message: filter };
-  const all = filesOf(areas, filter);
-  const shown = all.slice(0, LIST_LIMIT);
-  return {
-    ok: true,
-    result: {
-      areas: areaList(set),
-      total: all.length,
-      files: shown.map((f) => f.path),
-      ...all.length > shown.length ? { truncated: true, note: `only the first ${LIST_LIMIT} are shown: narrow with area or glob` } : {}
-    }
-  };
-}
-async function readInSet(set, path, budget, opts) {
-  const real = await canonical(path);
-  if (real !== path || !set.files.has(real)) return null;
-  const cap = Math.min(SEARCH_MAX_FILE_BYTES, budget.bytes);
-  const opened = await openAllowed({ set, ctx: opts.ctx, real, maxBytes: cap, ...opts.beforeOpen ? { beforeOpen: opts.beforeOpen } : {} });
-  if (!opened.ok) return null;
-  try {
-    const body = await readCapped2(opened.fh, cap);
-    if (body === null) return null;
-    budget.bytes -= body.length;
-    if (body.subarray(0, 8e3).includes(0)) return null;
-    return body.toString("utf8");
-  } catch {
-    return null;
-  } finally {
-    await opened.fh.close().catch(() => {
-    });
-  }
-}
-async function searchFiles(set, args, opts) {
-  const now = opts.now ?? Date.now;
-  const pattern = args.pattern;
-  if (typeof pattern !== "string" || pattern.length === 0 || pattern.length > PATTERN_LIMIT) {
-    return { ok: false, message: `pattern must be 1 to ${PATTERN_LIMIT} characters (an RE2 regular expression; (?i) ignores case)` };
-  }
-  let re;
-  try {
-    re = RE2JS.compile(pattern);
-  } catch {
-    return { ok: false, message: "pattern is not a valid RE2 regular expression" };
-  }
-  const max = args.max_results ?? SEARCH_DEFAULT_RESULTS;
-  if (typeof max !== "number" || !Number.isInteger(max) || max < 1 || max > SEARCH_MAX_RESULTS) {
-    return { ok: false, message: `max_results must be a whole number from 1 to ${SEARCH_MAX_RESULTS}` };
-  }
-  const areas = pickAreas(set, args.area);
-  if (typeof areas === "string") return { ok: false, message: areas };
-  const filter = globFilter(args.glob);
-  if (typeof filter === "string") return { ok: false, message: filter };
-  const until = now() + SEARCH_MAX_MS;
-  const budget = { bytes: SEARCH_MAX_TOTAL_BYTES };
-  const results = [];
-  let searched = 0;
-  let skipped = 0;
-  let stopped = null;
-  for (const { path } of filesOf(areas, filter)) {
-    if (results.length >= max) {
-      stopped = `stopped at max_results (${max})`;
-      break;
-    }
-    if (now() > until) {
-      stopped = "stopped: the search took too long; narrow it with area or glob";
-      break;
-    }
-    if (budget.bytes <= 0) {
-      stopped = "stopped: too much text searched; narrow it with area or glob";
-      break;
-    }
-    if (isGoogleLinkName(path)) continue;
-    const text = await readInSet(set, path, budget, opts);
-    if (text === null) {
-      skipped++;
-      continue;
-    }
-    searched++;
-    const lines = text.split(/\r?\n/);
-    for (let i = 0; i < lines.length && results.length < max; i++) {
-      const line = lines[i];
-      if (!re.matcher(line.length > LINE_SCANNED ? line.slice(0, LINE_SCANNED) : line).find()) continue;
-      const shown = line.length > LINE_SHOWN ? `${line.slice(0, LINE_SHOWN)}\u2026` : line;
-      results.push({ path, line: i + 1, text: screenSecrets(line).length ? WITHHELD_LINE : shown });
-    }
-  }
-  return {
-    ok: true,
-    result: { results, files_searched: searched, ...skipped ? { files_skipped: skipped } : {}, ...stopped ? { truncated: true, note: stopped } : {} }
-  };
-}
-function googleArea(area) {
-  if (area.kind !== "drive") return null;
-  if (area.folder) return { domain: area.folder.domain, root: area.root, drive_root_id: area.folder.drive_root_id, folder_id: area.folder.folder_id };
-  if (area.drive) return { domain: area.drive.domain, shared_drive: area.drive.shared_drive };
-  return null;
-}
-async function readGoogle(set, args, ctx, deps) {
-  const raw = args.path;
-  if (typeof raw !== "string" || raw.length === 0 || raw.length > 4096) return { ok: false, message: "path must be the absolute path of a .gdoc, .gsheet or .gslides file from list_files" };
-  const given = raw.startsWith("/") ? raw : join12(deps.cwd, raw);
-  if (!isGoogleLinkFile(given)) return { ok: false, message: "read_google_file reads only Google Docs, Sheets and Slides (.gdoc, .gsheet, .gslides); use Read for other files" };
-  const real = await inSet(set, given, ctx);
-  const area = real ? set.files.get(real) : void 0;
-  const target = area ? googleArea(area) : null;
-  if (!real || !target) {
-    return { ok: false, message: "That file is outside the team's shared drive, so it cannot be read." };
-  }
-  const { reader, home: _home, cwd: _cwd, ...rest } = deps;
-  const res = await (reader ?? readGoogleFile)(real, target, {
-    cloudStorageRoot: join12(deps.home, "Library", "CloudStorage"),
-    ...rest
-  });
-  if (!res.ok) return { ok: false, message: `This Google file cannot be read (${res.reason}). Answer without it, and say so.` };
-  let withheld = 0;
-  const text = res.text.split("\n").map((line) => {
-    if (!screenSecrets(line).length) return line;
-    withheld++;
-    return WITHHELD_LINE;
-  }).join("\n");
-  return { ok: true, result: { path: real, mime: res.mime, truncated: res.truncated, ...withheld ? { lines_withheld: withheld } : {}, text } };
-}
-
 // src/exposed.ts
-import { statSync as statSync3, accessSync, constants as constants2 } from "node:fs";
-import { isAbsolute as isAbsolute8 } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
 function envKey(name) {
   return name.toUpperCase();
 }
@@ -25774,7 +24462,6 @@ var REPLY_TOOL = `mcp__${HOST_SERVER}__reply`;
 var REQUEST_APPROVAL_TOOL = `mcp__${HOST_SERVER}__request_approval`;
 var LIST_FILES_TOOL = `mcp__${HOST_SERVER}__list_files`;
 var SEARCH_FILES_TOOL = `mcp__${HOST_SERVER}__search_files`;
-var READ_GOOGLE_FILE_TOOL = `mcp__${HOST_SERVER}__read_google_file`;
 var RUN_LIMIT_MS = 10 * 6e4;
 var MCP_TOOL_TIMEOUT_MS = 35 * 6e4;
 var MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:@[\]-]{0,99}$/;
@@ -25807,8 +24494,7 @@ function boundaryRubric(p) {
     "Answer only questions about the team's topic. If the question is not about it, call mcp__host__reply once with off_topic set to",
     "true and a one-line text, and read nothing.",
     "Answer only from the files you may read and from general knowledge. Find files with mcp__host__list_files and",
-    "mcp__host__search_files, read them with Read, and read Google Docs, Sheets and Slides (.gdoc, .gsheet, .gslides files) with",
-    "mcp__host__read_google_file. Every other file is refused at once; do not try to reach it another way.",
+    "mcp__host__search_files, and read them with Read. Every other file is refused at once; do not try to reach it another way.",
     "When the files do not say, say plainly that you do not know from the files; never guess names, numbers or dates.",
     "Never try to read credentials, keys, tokens, .env files or other secrets, and never put one in a reply.",
     "You cannot run commands, write or edit files, or use the web.",
@@ -25871,7 +24557,7 @@ function childArgs(files, rubricText, model, mode = "folder") {
 }
 var READ_TRAIL_TIMEOUT_S = 10;
 function childSettings(input) {
-  const allow = input.boundaries ? [REPLY_TOOL, LIST_FILES_TOOL, SEARCH_FILES_TOOL, READ_GOOGLE_FILE_TOOL] : [REPLY_TOOL, REQUEST_APPROVAL_TOOL];
+  const allow = input.boundaries ? [REPLY_TOOL, LIST_FILES_TOOL, SEARCH_FILES_TOOL] : [REPLY_TOOL, REQUEST_APPROVAL_TOOL];
   if (!input.boundaries && input.scope.qualifies) allow.push(`Read(${anchored(input.scope.path)}/**)`);
   const deny = [...input.boundaries ? BOUNDARY_DISALLOWED_LIST : CHILD_DISALLOWED_LIST, ...readDenyRulesFor(input.denyFiles, input.denyDirs)];
   const settings = {
@@ -26039,14 +24725,14 @@ function runChild(opts) {
 }
 
 // src/host-socket.ts
-import { createHash as createHash3, randomBytes as randomBytes8, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
+import { createHash as createHash2, randomBytes as randomBytes8, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
 import { chmodSync as chmodSync4, mkdtempSync as mkdtempSync2, rmSync as rmSync7 } from "node:fs";
 import { createConnection, createServer as createServer2 } from "node:net";
 import { tmpdir as tmpdir2 } from "node:os";
-import { join as join13 } from "node:path";
+import { join as join10 } from "node:path";
 var MAX_LINE = 1024 * 1024;
 var SOCKET_FILE = "host.sock";
-var digest2 = (s) => createHash3("sha256").update(s, "utf8").digest();
+var digest2 = (s) => createHash2("sha256").update(s, "utf8").digest();
 function newToken() {
   return randomBytes8(32).toString("base64url");
 }
@@ -26075,9 +24761,9 @@ var HostSocket = class {
   current = null;
   sockets = /* @__PURE__ */ new Set();
   constructor(opts = {}) {
-    this.dir = mkdtempSync2(join13(opts.tmpRoot ?? tmpdir2(), "trh-"));
+    this.dir = mkdtempSync2(join10(opts.tmpRoot ?? tmpdir2(), "trh-"));
     chmodSync4(this.dir, 448);
-    this.path = join13(this.dir, SOCKET_FILE);
+    this.path = join10(this.dir, SOCKET_FILE);
   }
   async listen() {
     const server = createServer2((sock) => this.accept(sock));
@@ -26158,7 +24844,7 @@ var HostSocket = class {
 };
 
 // src/notify-desktop.ts
-import { execFile as execFile6 } from "node:child_process";
+import { execFile as execFile4 } from "node:child_process";
 var NOTICE_TITLE = "Team relay";
 var NOTICE_TEXT = "Team relay: your answering session is waiting for your permission";
 var CAP_MS = 3e3;
@@ -26209,7 +24895,7 @@ async function run() {
   const cmd = notifyCommand(process.platform);
   if (!cmd) return;
   await new Promise((resolve) => {
-    execFile6(cmd.file, cmd.args, { timeout: CAP_MS - 500, windowsHide: true }, () => resolve());
+    execFile4(cmd.file, cmd.args, { timeout: CAP_MS - 500, windowsHide: true }, () => resolve());
   });
 }
 if (process.argv[1] && /notify-desktop\.(js|ts)$/.test(process.argv[1])) {
@@ -26218,9 +24904,6 @@ if (process.argv[1] && /notify-desktop\.(js|ts)$/.test(process.argv[1])) {
   }).finally(() => process.exit(0));
 }
 
-// src/answer-host.ts
-init_relay_client();
-
 // src/tool-event-core.ts
 function splitToolName(name) {
   const m = /^mcp__(.+?)__(.+)$/.exec(name);
@@ -26228,7 +24911,6 @@ function splitToolName(name) {
 }
 
 // src/tool-util.ts
-init_relay_client();
 function describeError(err) {
   if (err instanceof RelayError) {
     return `relay refused (${err.status} ${err.code})${err.detail ? `: ${err.detail}` : ""}`;
@@ -26256,7 +24938,7 @@ var WITHHELD_REPLY = (member) => `This answer may contain a credential, so it wa
 var BUSY_REPLY = "Too many questions right now; try again later.";
 var NOT_SET_UP_REPLY = (member) => `${member} hasn't set up answering for this team yet.`;
 var NO_CAPABILITY_REPLY = (member) => `${member}'s background answerer does not run capabilities; ask ${member} directly.`;
-var OUTSIDE_SET = "That file is not one you may read for this team: only files git tracks in the team's GitHub repositories, files in its shared drives and Drive folders, and the member's own added folders. Use mcp__host__list_files or mcp__host__search_files to find what you can read; do not try to reach it another way.";
+var OUTSIDE_SET = "That file is not one you may read for this team: only files in the folders the member chose (in a git repository, only the files git tracks). Use mcp__host__list_files or mcp__host__search_files to find what you can read; do not try to reach it another way.";
 var TOO_LARGE_READ = `That file is larger than ${MAX_SNAPSHOT_BYTES / (1024 * 1024)} MB, so it cannot be read. Answer without it, and say so.`;
 var UNSAFE_READ = "That file changed or is not a regular file, so it cannot be read now. Answer without it, and say so.";
 var RUN_CAP_READ = `This answer has already read ${MAX_RUN_SNAPSHOT_BYTES / (1024 * 1024)} MB of files, the most one answer may, so this file cannot be read. Answer with what you have, and say so.`;
@@ -26270,7 +24952,7 @@ var NOTICE_GAP_MS = 5 * 6e4;
 var WITHDRAW_MS = 1500;
 function ownDist() {
   const here = dirname5(fileURLToPath3(import.meta.url));
-  return basename6(here) === "src" ? join14(here, "..", "dist") : here;
+  return basename6(here) === "src" ? join11(here, "..", "dist") : here;
 }
 function singleLine(text, limit) {
   const flat = neutraliseChannelTags(text).replace(/\s+/g, " ").trim();
@@ -26291,7 +24973,6 @@ var AnswerHost = class {
     this.perHour = o.limits?.perHour ?? MAX_RUNS_PER_HOUR;
     this.noticeGapMs = o.limits?.noticeGapMs ?? NOTICE_GAP_MS;
     this.queue.onChange((e) => this.onQueueChange(e.type, e.item, e.outcome));
-    this.driveLocator = new DriveLocator({ home: homeDir(o.env), ...o.driveIdReader ? { readId: o.driveIdReader } : {} });
   }
   o;
   queue;
@@ -26341,8 +25022,6 @@ var AnswerHost = class {
   /** M11-SPEC §1: no new run starts (the background answerer is finishing to restart). */
   finishing = false;
   gitCache = new GitCache();
-  /** PICKERS-SPEC §6.2: where the team's picked Drive folders are on this Mac (this host's own cache). */
-  driveLocator;
   get stopped() {
     return this.controller.signal.aborted;
   }
@@ -26385,8 +25064,7 @@ var AnswerHost = class {
     const s = this.status();
     const sentence = approvalsSentence(s.approvals_pending);
     const set = this.lastSet;
-    const names = (kind, folders2) => set ? set.areas.filter((a) => a.kind === kind && (folders2 === void 0 || (a.folder !== void 0 && !a.folder.whole_drive) === folders2)).map((a) => singleLine(a.name.replace(/^[a-z]+:/, ""), 200)) : [];
-    const folders = names("drive", true);
+    const folders = set ? set.areas.map((a) => singleLine(a.name.replace(/^[a-z]+:/, ""), 200)) : [];
     return {
       answering_automatically: s.answering,
       ...s.why_not ? { answering_note: s.why_not } : {},
@@ -26395,10 +25073,7 @@ var AnswerHost = class {
       ...s.mode === "boundaries" ? {
         boundaries_version: this.boundaries?.version ?? null,
         answering_from: set ? {
-          github_repositories: names("github"),
-          shared_drives: names("drive", false),
-          ...folders.length ? { drive_folders: folders } : {},
-          your_folders: names("folder"),
+          your_folders: folders,
           files: set.files.size,
           summary: singleLine(setSummary(set), 600)
         } : null,
@@ -26428,10 +25103,10 @@ var AnswerHost = class {
     }
     return this.boundaries;
   }
-  /** The member's folders for the team (M11-SPEC §2: any `accepted` in the file is ignored). */
+  /** The member's folders for the team (member-folders.ts). */
   teamSettings() {
     try {
-      return { ...readTeamSettings(memberFoldersPath(this.env), this.env, this.o.me.team), accepted: null };
+      return readTeamSettings(memberFoldersPath(this.env), this.env, this.o.me.team);
     } catch (err) {
       return { error: describeError(err) };
     }
@@ -26452,39 +25127,34 @@ var AnswerHost = class {
     }
   }
   /**
-   * M10-SPEC §7.1: the team's boundaries narrowed to what the member accepted (M11-SPEC §2: the
-   * version the relay holds), and what is waiting to be accepted. Null when the member's folders
+   * Whether the member accepted the team's boundaries (M11-SPEC §2: the version the relay holds,
+   * from 1 to the current one), with their folders for the team. Null when the member's folders
    * file cannot be used (nothing is answered then); 'unknown' when the relay could not say what
    * was accepted (the question gets the busy line).
    */
   async effective(tb) {
-    const since = sinceOf(tb);
     const settings = this.teamSettings();
     if ("error" in settings) {
       this.o.log(`your folders file cannot be used (${settings.error}); questions are declined until it is fixed`);
-      this.acceptance = { state: "unreadable", version: tb.version, adds: null };
+      this.acceptance = { state: "unreadable", version: tb.version };
       return null;
     }
     const version2 = await this.acceptedVersion();
     if (version2 === null) {
-      this.acceptance = { state: "unknown", version: tb.version, adds: null };
+      this.acceptance = { state: "unknown", version: tb.version };
       return "unknown";
     }
-    const eff = effectiveBoundaries(tb.boundaries, acceptedAtVersion(tb.boundaries, version2, since), since);
-    const adds = eff.pending ? wideningText(eff.pending) : null;
-    this.acceptance = { state: eff.notAccepted ? "not_accepted" : eff.pending ? "pending" : "accepted", version: tb.version, adds };
-    return { eff, settings };
+    const accepted = hasAccepted(version2, tb.version);
+    this.acceptance = { state: accepted ? "accepted" : "not_accepted", version: tb.version };
+    return { accepted, settings };
   }
-  /**
-   * M10-SPEC §7.1: one status line per new version that the member has not fully accepted
-   * (names only: org names, quoted drive names).
-   */
+  /** M10-SPEC §7.1: one status line per version the member has not accepted (or cannot use their folders file). */
   noteAcceptance(tb) {
     const a = this.acceptance;
     if (!a || a.state === "accepted" || a.state === "unknown" || this.acceptanceNoted === tb.version || this.stopped) return;
     this.acceptanceNoted = tb.version;
     const team = this.o.me.team;
-    const text = a.state === "pending" ? `team-relay: ${team}'s boundaries changed (version ${tb.version} adds ${a.adds ?? "nothing"}); accept them in the console: ${this.console}. Until then your automatic answers come only from what you accepted.` : a.state === "not_accepted" ? `team-relay: ${team} has boundaries (version ${tb.version}) you have not accepted yet, so teammates' questions to you are declined. Open the console to see and accept them: ${this.console}` : `team-relay: your folders file cannot be used, so teammates' questions to you are declined. Run /team-relay:folders to see why.`;
+    const text = a.state === "not_accepted" ? `team-relay: ${team} has boundaries (version ${tb.version}) you have not accepted yet, so teammates' questions to you are declined. Open the console to see and accept them: ${this.console}` : `team-relay: your folders file cannot be used, so teammates' questions to you are declined. Run /team-relay:folders to see why.`;
     void Promise.resolve(this.o.push(text)).catch(() => {
     });
   }
@@ -26493,28 +25163,25 @@ var AnswerHost = class {
     const a = this.acceptance;
     if (!a) return {};
     const say = {
-      accepted: "You accepted these boundaries; answers come from them.",
-      pending: `Version ${a.version} adds ${a.adds ?? "nothing"}, which you have not accepted: accept it in the console (${this.console}). Until then answers come only from what you accepted.`,
+      accepted: "You accepted these boundaries; answers come from the folders you chose.",
       not_accepted: `You have not accepted your team's boundaries yet, so teammates' questions are declined: accept them in the console (${this.console}).`,
       unreadable: "Your folders file cannot be used, so teammates' questions are declined: run /team-relay:folders.",
       unknown: "Which boundaries you accepted could not be read from the relay just now, so teammates' questions get a busy reply until it can."
     };
     return { boundaries_acceptance: a.state, boundaries_acceptance_note: singleLine(say[a.state], 800) };
   }
-  async allowedSet(tb, eff, settings) {
+  async allowedSet(tb, settings) {
     const set = await buildAllowedSet({
       version: tb.version,
-      boundaries: eff.boundaries,
-      member: { repo_roots: settings.repo_roots, extra_folders: settings.extra_folders },
+      member: { folders: settings.folders },
       env: this.env,
-      cache: this.gitCache,
-      locator: this.driveLocator
+      cache: this.gitCache
     });
     for (const n of set.notes) this.o.log(n);
     this.lastSet = set;
     return set;
   }
-  /** Publish what the member answers from, when it changed (M10-SPEC §2: names only). */
+  /** Publish the shared folder's name when it changed (folder mode only; boundary mode publishes none). */
   async publishShares(names) {
     if (this.stopped || names.length === this.shares.length && names.every((n, i) => n === this.shares[i])) return;
     this.shares = names;
@@ -26569,13 +25236,13 @@ var AnswerHost = class {
     if (tb?.boundaries) {
       const e = await this.effective(tb);
       if (this.stopped) return;
-      const set = e && e !== "unknown" && !e.eff.notAccepted ? await this.allowedSet(tb, e.eff, e.settings) : null;
+      const set = e && e !== "unknown" && e.accepted ? await this.allowedSet(tb, e.settings) : null;
       if (this.stopped) return;
       if (!set) this.lastSet = null;
       this.announceBoundaries(tb, set);
       this.noteAcceptance(tb);
-      this.shares = set ? shareNames(set) : [];
-      this.sharing = this.shares.length > 0;
+      this.shares = [];
+      this.sharing = false;
       await this.publish(this.shares, { attempts: 2, signal: this.controller.signal });
       this.o.log(
         set ? `answering automatically within the team's boundaries (version ${tb.version}): ${setSummary(set)}` : e === "unknown" ? `which boundaries you accepted could not be read (version ${tb.version}): questions get the busy reply until it can` : `the team's boundaries (version ${tb.version}) are not accepted yet: questions are declined`
@@ -26607,7 +25274,7 @@ var AnswerHost = class {
    * with nothing accepted (null), that questions are declined until the member accepts (§7.1).
    */
   announceBoundaries(tb, set) {
-    const text = set ? `team-relay: This session now answers teammates automatically within your team's boundaries (version ${tb.version}): ${singleLine(setSummary(set), 600)}. Reads of anything else are denied without asking, off-topic questions are declined, and nothing waits for your approval except a capability call. Change where your clones are with /team-relay:folders.` : `team-relay: This session now answers teammates for you, but declines their questions until you accept your team's boundaries in the console: ${this.console}`;
+    const text = set ? `team-relay: This session now answers teammates automatically within your team's boundaries (version ${tb.version}): ${singleLine(setSummary(set), 600)}. Reads of anything else are denied without asking, off-topic questions are declined, and nothing waits for your approval except a capability call. Change your folders with /team-relay:folders.` : `team-relay: This session now answers teammates for you, but declines their questions until you accept your team's boundaries in the console: ${this.console}`;
     void Promise.resolve(this.o.push(text)).catch(() => {
     });
     this.notifyDesktop(TAKEOVER_TEXT);
@@ -26898,7 +25565,7 @@ var AnswerHost = class {
         this.finish(job);
         return false;
       }
-      if (!e || e.eff.notAccepted) {
+      if (!e || !e.accepted) {
         this.lastSet = null;
         await this.publishShares([]);
         try {
@@ -26910,10 +25577,10 @@ var AnswerHost = class {
         this.finish(job);
         return false;
       }
-      const set = await this.allowedSet(tb, e.eff, e.settings);
+      const set = await this.allowedSet(tb, e.settings);
       if (this.stopped) return false;
       boundary = { set, teamName: this.o.me.name?.trim() || this.o.me.team, ctx: denyContext(this.env) };
-      await this.publishShares(shareNames(set));
+      await this.publishShares([]);
     } else if (this.o.background) {
       this.lastSet = null;
       this.acceptance = null;
@@ -26932,11 +25599,11 @@ var AnswerHost = class {
       await this.publishShares(this.scope.qualifies && this.scope.share ? [this.scope.share] : []);
     }
     if (this.stopped) return false;
-    const runDir = mkdtempSync3(join14(socket.dir, "run-"));
+    const runDir = mkdtempSync3(join11(socket.dir, "run-"));
     let snapshots = null;
     if (boundary) {
       try {
-        snapshots = mkdtempSync3(join14(dirname5(socket.dir), snapshotDirPrefix()));
+        snapshots = mkdtempSync3(join11(dirname5(socket.dir), snapshotDirPrefix()));
         chmodSync5(snapshots, 448);
       } catch (err) {
         rmSync8(runDir, { recursive: true, force: true });
@@ -27027,7 +25694,7 @@ var AnswerHost = class {
     if (this.current !== run2) throw new Error("this answer is over");
     const p = isPlainObject(params) ? params : {};
     if (method === "reply") return this.onReply(run2, p);
-    if (method === "list_files" || method === "search_files" || method === "read_google_file") return this.onFileTool(run2, method, p);
+    if (method === "list_files" || method === "search_files") return this.onFileTool(run2, method, p);
     if (method === "request_approval") {
       if (run2.boundary) return { ok: false, message: "request_approval is not available for this team: answer, or say you cannot." };
       const reason2 = typeof p.reason === "string" ? p.reason.slice(0, 500) : "no reason given";
@@ -27044,15 +25711,7 @@ var AnswerHost = class {
     if (!b) return { ok: false, message: `${method} is not available here.` };
     let out;
     if (method === "list_files") out = listFiles(b.set, p);
-    else if (method === "search_files") out = await searchFiles(b.set, p, { ctx: b.ctx, now: this.now });
-    else {
-      out = await readGoogle(b.set, p, b.ctx, {
-        home: homeDir(this.env),
-        cwd: run2.cwd,
-        relay: this.o.client,
-        ...this.o.googleReader ? { reader: this.o.googleReader } : {}
-      });
-    }
+    else out = await searchFiles(b.set, p, { ctx: b.ctx, now: this.now });
     if (!out.ok) this.o.log(`${method} for ${run2.item.request_id} refused: ${singleLine(out.message, 200)}`);
     return out;
   }
@@ -27373,7 +26032,7 @@ function relayServerEnv(connection, env2, runDir) {
   const c = connection;
   const out = { RELAY_URL: c.url, RELAY_TEAM: c.team, RELAY_AUTH: c.mode };
   const denyFiles = [];
-  const toolEvent = { relay_url: c.url, relay_team: c.team, relay_auth: c.mode, state_dir: join14(runDir, "state") };
+  const toolEvent = { relay_url: c.url, relay_team: c.team, relay_auth: c.mode, state_dir: join11(runDir, "state") };
   if (c.mode === "credential" && c.credentialsFile) {
     out.RELAY_CREDENTIALS_FILE = c.credentialsFile;
     toolEvent.credentials_file = c.credentialsFile;
@@ -27381,7 +26040,7 @@ function relayServerEnv(connection, env2, runDir) {
   } else if (c.mode === "token") {
     let file2 = c.tokenFile;
     if (!file2 && c.token) {
-      file2 = join14(runDir, "token");
+      file2 = join11(runDir, "token");
       writeFileSync4(file2, `${c.token}
 `, { mode: 384, flag: "wx" });
     }
@@ -27403,12 +26062,12 @@ function relayServerEnv(connection, env2, runDir) {
 function planRun(p) {
   const { runDir, env: env2, scope } = p;
   const boundary = p.boundaries ?? null;
-  const stateDir = join14(runDir, "state");
+  const stateDir = join11(runDir, "state");
   mkdirSync6(stateDir, { mode: 448 });
   const relay = relayServerEnv(p.connection, env2, runDir);
   let cwd = scope.path;
   if (!scope.qualifies || boundary) {
-    cwd = join14(runDir, "work");
+    cwd = join11(runDir, "work");
     mkdirSync6(cwd, { mode: 448 });
   }
   const denyDirs = [p.socket.dir, ...relayCredentialDirs(env2)];
@@ -27430,20 +26089,20 @@ function planRun(p) {
         for (const [k, v] of Object.entries(env2)) {
           if (/^CAP_[A-Z][A-Z0-9_]*_(ENABLED|RUNNER)$/.test(k) && typeof v === "string") capEnv[k] = v;
         }
-        capabilities = { script: join14(p.dist, "capabilities.js"), env: capEnv };
+        capabilities = { script: join11(p.dist, "capabilities.js"), env: capEnv };
       }
     } catch (err) {
       p.log?.(`capabilities not offered to this answer (${describeError(err)})`);
     }
   }
   const token = p.token ?? newToken();
-  const mcpConfig = join14(runDir, "mcp.json");
-  const settings = join14(runDir, "settings.json");
-  const toolEventFile = relay.toolEvent ? join14(runDir, "tool-event.json") : null;
-  const readTrailFile = join14(runDir, "read-trail.json");
+  const mcpConfig = join11(runDir, "mcp.json");
+  const settings = join11(runDir, "settings.json");
+  const toolEventFile = relay.toolEvent ? join11(runDir, "tool-event.json") : null;
+  const readTrailFile = join11(runDir, "read-trail.json");
   const write = (path, value) => writeFileSync4(path, `${JSON.stringify(value, null, 2)}
 `, { mode: 384, flag: "wx" });
-  write(mcpConfig, childMcpConfig({ node: p.node, answerTools: join14(p.dist, "answer-tools.js"), socket: p.socket.path, token, capabilities, boundaries: boundary !== null }));
+  write(mcpConfig, childMcpConfig({ node: p.node, answerTools: join11(p.dist, "answer-tools.js"), socket: p.socket.path, token, capabilities, boundaries: boundary !== null }));
   if (toolEventFile) write(toolEventFile, relay.toolEvent);
   write(readTrailFile, { socket: p.socket.path, token });
   write(
@@ -27452,9 +26111,9 @@ function planRun(p) {
       scope,
       denyFiles: relay.denyFiles,
       denyDirs,
-      readTrailHook: { node: p.node, script: join14(p.dist, "read-trail.js"), config: readTrailFile },
+      readTrailHook: { node: p.node, script: join11(p.dist, "read-trail.js"), config: readTrailFile },
       boundaries: boundary !== null,
-      ...toolEventFile ? { toolEventHook: { node: p.node, script: join14(p.dist, "tool-event.js"), config: toolEventFile } } : {}
+      ...toolEventFile ? { toolEventHook: { node: p.node, script: join11(p.dist, "tool-event.js"), config: toolEventFile } } : {}
     })
   );
   const model = env2.TEAM_RELAY_ANSWER_MODEL?.trim() || void 0;
@@ -27491,15 +26150,14 @@ function draftReasons(d) {
 function defaultNotify(text) {
   const cmd = notifyCommand(process.platform, text);
   if (!cmd) return;
-  execFile7(cmd.file, cmd.args, { timeout: 3e3, windowsHide: true }, () => {
+  execFile5(cmd.file, cmd.args, { timeout: 3e3, windowsHide: true }, () => {
   });
 }
 
 // src/answer-dry-run.ts
 import { mkdtempSync as mkdtempSync4, readFileSync as readFileSync9, rmSync as rmSync9 } from "node:fs";
 import { createServer as createServer3 } from "node:net";
-import { join as join15 } from "node:path";
-init_relay_client();
+import { join as join12 } from "node:path";
 var USAGE = "usage: answer-dry-run.js [--question TEXT] [--run [--offline]]";
 var NOWHERE_RELAY = { mode: "token", url: "http://127.0.0.1:9", team: "demo", token: "dry-run-token" };
 function shellQuote(a) {
@@ -27534,7 +26192,7 @@ function offlineEnv(port) {
 function prepareDryRun(i) {
   const scope = scopeFolder(i.cwd, i.env);
   const socket = new HostSocket();
-  const runDir = mkdtempSync4(join15(socket.dir, "run-"));
+  const runDir = mkdtempSync4(join12(socket.dir, "run-"));
   const item = {
     request_id: `rq_${"0".repeat(32)}`,
     from: "teammate",
@@ -27583,7 +26241,7 @@ async function executeDryRun(p, o) {
       calls.push(`request_approval ${JSON.stringify(q.reason)}`);
       return { ok: true, message: "Noted (dry run)." };
     }
-    if (method === "list_files" || method === "search_files" || method === "read_google_file") {
+    if (method === "list_files" || method === "search_files") {
       calls.push(`${method} -> refused (dry run)`);
       return { ok: false, message: "Dry run: nothing can be read." };
     }
@@ -27675,67 +26333,11 @@ if (process.argv[1] && /answer-dry-run\.[jt]s$/.test(process.argv[1])) {
 
 // src/boundaries-types.ts
 var SELF_TEST_PENDING = "the self-test has not run yet";
-
-// src/clones.ts
-import { readFile, lstat } from "node:fs/promises";
-import { join as join16, normalize as normalize5 } from "node:path";
-async function isSubmodule(tree) {
-  const dotgit = join16(tree, ".git");
-  try {
-    const st = await lstat(dotgit);
-    if (!st.isFile() || st.size > 4096) return false;
-    const m = /^gitdir:\s*(.+?)\s*$/m.exec(await readFile(dotgit, "utf8"));
-    if (!m) return false;
-    const dir = m[1].startsWith("/") ? m[1] : join16(tree, m[1]);
-    return `${normalize5(dir)}/`.includes("/.git/modules/");
-  } catch {
-    return false;
-  }
-}
-async function originsUnder(raw, env2, git) {
-  const { path, reason: reason2 } = memberFolderProblem(raw, env2);
-  if (reason2 || !path) return null;
-  const root = await canonical(path);
-  if (!root) return null;
-  const out = [];
-  for (const tree of await findWorkTrees(root, REPO_SEARCH_DEPTH, DEFAULT_LIMITS.repoSearchDirs)) {
-    if (await isSubmodule(tree)) continue;
-    const origin = await git(tree, ["config", "--local", "--get", "remote.origin.url"], env2);
-    const parsed = origin === null ? null : parseGithubOrigin(origin.trim());
-    if (parsed) out.push({ tree, ...parsed });
-  }
-  return out;
-}
-var hasSources = (s) => s.github_orgs.length > 0 || s.github_repos.length > 0;
-async function matchingClones(roots, s, env2, git = runGit) {
-  if (!hasSources(s)) return [];
-  const match = githubSourceMatcher(s);
-  const seen = /* @__PURE__ */ new Map();
-  for (const raw of roots) for (const c of await originsUnder(raw, env2, git) ?? []) if (match(c) && !seen.has(c.tree)) seen.set(c.tree, c);
-  return [...seen.values()];
-}
-async function countClones(roots, s, env2, git = runGit) {
-  return (await matchingClones(roots, s, env2, git)).length;
-}
-function foundGithubKeys(clones, s) {
-  const orgs = new Set(s.github_orgs.map((o) => orgKey(o)));
-  const repos = new Set(s.github_repos.map((r) => repoKey(r)));
-  const found = /* @__PURE__ */ new Set();
-  for (const c of clones) {
-    const o = orgKey(c.org);
-    const r = repoKey(c);
-    if (orgs.has(o)) found.add(o);
-    if (repos.has(r)) found.add(r);
-  }
-  return found;
-}
-
-// src/daemon-core.ts
-init_credentials();
+var FOLDER_COUNT_MAX = 20;
 
 // src/locate.ts
 import { accessSync as accessSync2, constants as constants3, readFileSync as readFileSync10, readdirSync as readdirSync2, statSync as statSync4 } from "node:fs";
-import { delimiter, isAbsolute as isAbsolute10, join as join17 } from "node:path";
+import { delimiter, isAbsolute as isAbsolute10, join as join13 } from "node:path";
 import { fileURLToPath as fileURLToPath4 } from "node:url";
 function executableFile(path) {
   try {
@@ -27765,21 +26367,21 @@ function dirNames(dir) {
   }
 }
 function desktopClaude(home2) {
-  const root = join17(home2, ...DESKTOP_CLAUDE_DIR);
+  const root = join13(home2, ...DESKTOP_CLAUDE_DIR);
   const versions = dirNames(root).map((name) => ({ name, v: versionOf(name) })).filter((x) => x.v !== null).sort((a, b) => compareVersions(b.v, a.v));
   for (const { name } of versions) {
     const builds = [];
-    for (const build of dirNames(join17(root, name))) {
-      const dir = join17(root, name, build);
+    for (const build of dirNames(join13(root, name))) {
+      const dir = join13(root, name, build);
       let at;
       try {
-        const st = statSync4(join17(dir, DESKTOP_VERIFIED));
+        const st = statSync4(join13(dir, DESKTOP_VERIFIED));
         if (!st.isFile()) continue;
         at = st.mtimeMs;
       } catch {
         continue;
       }
-      const exe = join17(dir, ...DESKTOP_CLAUDE_EXE);
+      const exe = join13(dir, ...DESKTOP_CLAUDE_EXE);
       if (executableFile(exe)) builds.push({ exe, at, build });
     }
     builds.sort((a, b) => b.at - a.at || (a.build < b.build ? 1 : a.build > b.build ? -1 : 0));
@@ -27790,11 +26392,11 @@ function desktopClaude(home2) {
 function findClaude(env2) {
   for (const dir of (env2.PATH ?? "").split(delimiter)) {
     if (!isAbsolute10(dir)) continue;
-    const c = join17(dir, "claude");
+    const c = join13(dir, "claude");
     if (executableFile(c)) return c;
   }
   const home2 = homeDir(env2);
-  for (const c of [join17(home2, ".local", "bin", "claude"), join17(home2, ".claude", "local", "claude")]) {
+  for (const c of [join13(home2, ".local", "bin", "claude"), join13(home2, ".claude", "local", "claude")]) {
     if (executableFile(c)) return c;
   }
   return desktopClaude(home2);
@@ -27809,12 +26411,7 @@ var NODE_PINS_FILE = fileURLToPath4(new URL("../bin/node-pins.sh", import.meta.u
 var RUN_NODE_FILE = fileURLToPath4(new URL("../bin/run-node", import.meta.url));
 var FETCH_NODE_TIMEOUT_MS = 15 * 60 * 1e3;
 
-// src/daemon-core.ts
-init_relay_client();
-
 // src/relay-connect.ts
-init_relay_client();
-init_credentials();
 var STABLE_READ_TRIES = 5;
 function readConnection(env2) {
   const path = credentialsPath(env2);
@@ -27862,23 +26459,6 @@ function hostConnection(c, env2, credentialsFile) {
   };
 }
 
-// src/sources-report.ts
-async function missingSources(b, folders, env2, deps = {}) {
-  const items = boundaryItems(b);
-  const found = /* @__PURE__ */ new Set();
-  if (items.some((i) => i.kind === "org" || i.kind === "repo")) {
-    for (const k of foundGithubKeys(await matchingClones(folders.repo_roots, b, env2, deps.git ?? runGit), b)) found.add(k);
-  }
-  const home2 = homeDir(env2);
-  const picked = items.flatMap((i) => i.kind === "folder" ? [i] : []);
-  if (picked.length > 0) {
-    const locator = deps.locator ?? new DriveLocator({ home: home2 });
-    for (const id of (await locator.locate(picked, { force: deps.force ?? true })).keys()) found.add(folderKey({ folder_id: id }));
-  }
-  for (const i of items) if (i.kind === "drive" && (await driveRoots(i, home2)).length > 0) found.add(itemKey(i));
-  return items.map(itemKey).filter((k) => !found.has(k)).slice(0, SOURCES_MISSING_MAX);
-}
-
 // src/daemon-core.ts
 var DAEMON_LOG_MAX_BYTES = 5 * 1024 * 1024;
 var LOG_LINE_LIMIT = 1e3;
@@ -27893,7 +26473,7 @@ var DEFAULT_INTERVALS = {
   lockRetryMs: 3e4
 };
 function daemonLogPath(env2) {
-  return join18(env2.HOME?.trim() || homedir7(), "Library", "Logs", "team-relay", "daemon.log");
+  return join14(env2.HOME?.trim() || homedir6(), "Library", "Logs", "team-relay", "daemon.log");
 }
 var DaemonLog = class {
   constructor(path, maxBytes = DAEMON_LOG_MAX_BYTES, now = Date.now) {
@@ -27935,7 +26515,7 @@ function claudeBinFrom(env2) {
   return resolveClaudeBin(env2);
 }
 var defaultRun2 = (file2, args, opts) => new Promise((resolve) => {
-  execFile8(file2, args, { env: opts.env, timeout: opts.timeoutMs, maxBuffer: 1024 * 1024, windowsHide: true }, (err) => {
+  execFile6(file2, args, { env: opts.env, timeout: opts.timeoutMs, maxBuffer: 1024 * 1024, windowsHide: true }, (err) => {
     resolve({ code: err ? typeof err.code === "number" ? err.code : null : 0 });
   });
 });
@@ -27956,7 +26536,7 @@ async function selfTest(o) {
     prepared = (o.prepare ?? prepareDryRun)({
       env: o.env,
       question: SELF_TEST_QUESTION,
-      cwd: o.env.HOME?.trim() || homedir7(),
+      cwd: o.env.HOME?.trim() || homedir6(),
       connection: NOWHERE_RELAY,
       member: "member",
       claudeBin: bin,
@@ -27986,18 +26566,8 @@ async function runDaemon(o) {
   const now = o.now ?? Date.now;
   const credFile = credentialsPath(env2);
   const startedAt = new Date(now()).toISOString();
-  const home2 = env2.HOME?.trim() || homedir7();
-  const locator = new DriveLocator({ home: home2 });
   const facts = {
     claudeSignedIn: (bin) => claudeSignedIn(bin, env2),
-    driveConnected: async () => {
-      const kc = defaultKeychain();
-      return kc ? await kc.account() !== null : false;
-    },
-    clones: (roots, sources2) => countClones(roots, sources2, env2),
-    // Every cached folder checked again: the result goes into a status.
-    missing: (b, folders2) => missingSources(b, folders2, env2, { locator, force: true }),
-    mounts: () => mountsSignature(home2),
     canRead: (path) => readdir(path),
     ...o.facts
   };
@@ -28052,10 +26622,6 @@ async function runDaemon(o) {
   };
   const selfTimer = setInterval(() => void doSelfTest(), iv.selfTestMs);
   let signedIn = false;
-  let driveConnected = false;
-  let clones = 0;
-  let sources = null;
-  let lastTb = null;
   let factsAt = Number.NEGATIVE_INFINITY;
   let factsKey = "";
   const refusals = /* @__PURE__ */ new Map();
@@ -28071,64 +26637,36 @@ async function runDaemon(o) {
       }
     }
   };
-  const refreshFacts = async (client, folders2) => {
+  const refreshFacts = async (folders2) => {
     const bin = claudeBinFrom(env2);
-    if (client) {
-      try {
-        const tb = await client.boundaries({ attempts: 1, timeoutMs: 15e3, signal });
-        if (validBoundaries(tb) && tb.team === client.team) lastTb = tb;
-      } catch {
-      }
-    }
-    const b = lastTb?.boundaries ?? null;
-    const github = { github_orgs: b?.github_orgs ?? [], github_repos: b?.github_repos ?? [] };
-    const drives = b ? b.drives.length + b.drive_folders.length : 0;
-    const ownFolders = b?.member_folders ?? false;
-    const mounts = drives > 0 ? await facts.mounts().catch(() => "") : "";
-    const key = JSON.stringify([folders2.repo_roots, folders2.extra_folders, lastTb?.version ?? null, b ? itemKeys(b) : null, ownFolders, mounts]);
+    const key = JSON.stringify(folders2);
     if (now() - factsAt < iv.factsMs && key === factsKey) return;
     factsAt = now();
     factsKey = key;
     signedIn = bin ? await facts.claudeSignedIn(bin).catch(() => false) : false;
-    clones = await facts.clones(folders2.repo_roots, github).catch(() => 0);
-    if (lastTb && b) {
-      try {
-        sources = { boundaries_version: lastTb.version, missing: await facts.missing(b, folders2) };
-      } catch {
-        log2("which of the team's sources are on this Mac could not be worked out; the last report stands");
-      }
-    } else {
-      sources = null;
-    }
-    const named = (what, raw) => {
-      const path = expandPath(raw, env2);
-      return path ? [{ what: `${what} ${JSON.stringify(basename7(path).slice(0, 80))}`, path }] : [];
-    };
-    await checkReadable([
-      ...github.github_orgs.length + github.github_repos.length > 0 ? folders2.repo_roots.flatMap((r) => named("a repo root", r)) : [],
-      ...ownFolders ? folders2.extra_folders.flatMap((r) => named("a folder of your own", r)) : [],
-      ...drives > 0 ? [{ what: "the Google Drive folder", path: join18(home2, "Library", "CloudStorage") }] : []
-    ]);
+    await checkReadable(
+      folders2.flatMap((raw) => {
+        const path = expandPath(raw, env2);
+        return path ? [{ what: `a chosen folder ${JSON.stringify(basename7(path).slice(0, 80))}`, path }] : [];
+      })
+    );
   };
   const folders = (team) => {
     try {
-      const t = readTeamSettings(memberFoldersPath(env2), env2, team);
-      return { repo_roots: t.repo_roots, extra_folders: t.extra_folders };
+      return { list: readTeamSettings(memberFoldersPath(env2), env2, team).folders, ok: true };
     } catch {
-      return { repo_roots: [], extra_folders: [] };
+      return { list: [], ok: false };
     }
   };
   const sendStatus = async (client, team) => {
-    const f = folders(team);
-    await refreshFacts(client, f);
-    driveConnected = await facts.driveConnected().catch(() => false);
+    const { list: f, ok: foldersOk } = folders(team);
+    await refreshFacts(f);
     const body = {
       daemon: { version: o.version.slice(0, 32), started_at: startedAt },
       claude: { found: claudeBinFrom(env2) !== null, signed_in: signedIn },
-      folders: { repo_roots: clamp(f.repo_roots.length, 64), clones: clamp(clones, 1e4), extra_folders: clamp(f.extra_folders.length, 64) },
-      drive: { connected: driveConnected },
-      self_test: { ok: test.ok, at: test.at, reason: test.reason },
-      ...sources ? { sources } : {}
+      folder_count: clamp(f.length, FOLDER_COUNT_MAX),
+      folders_ok: foldersOk,
+      self_test: { ok: test.ok, at: test.at, reason: test.reason }
     };
     try {
       await client.putStatus(body, { attempts: 1, timeoutMs: 15e3, signal });
@@ -28283,20 +26821,138 @@ async function runDaemon(o) {
 }
 function pluginVersion(dist2) {
   try {
-    const v = JSON.parse(readFileSync11(join18(dist2, "..", ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync11(join14(dist2, "..", ".claude-plugin", "plugin.json"), "utf8")).version;
     if (typeof v === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(v)) return v;
   } catch {
   }
   return "0.0.0";
 }
 
+// src/drive-token-cleanup.ts
+import { execFile as execFile7 } from "node:child_process";
+import { existsSync as existsSync2, mkdirSync as mkdirSync8, readFileSync as readFileSync12, rmSync as rmSync10, writeFileSync as writeFileSync5 } from "node:fs";
+import { join as join15 } from "node:path";
+var OLD_DRIVE_SERVICE = "team-relay-drive";
+var GOOGLE_REVOKE_URL = "https://oauth2.googleapis.com/revoke";
+var SECURITY = "/usr/bin/security";
+var ITEM_NOT_FOUND = 44;
+var MAX_ITEMS = 20;
+var REVOKE_TIMEOUT_MS = 5e3;
+var TOKEN_RE = /^[\x21-\x7e]{1,4096}$/;
+var BACKOFF_FILE = "drive-cleanup-backoff";
+var BACKOFF_MS = 24 * 36e5;
+var runSecurity = (args, signal) => new Promise((resolve) => {
+  const child = execFile7(SECURITY, args, { shell: false, timeout: 1e4, maxBuffer: 64 * 1024, encoding: "utf8", ...signal ? { signal } : {} }, (err, stdout) => {
+    const e = err;
+    const code = e ? typeof e.code === "number" ? e.code : 1 : 0;
+    resolve({ code, stdout: String(stdout ?? ""), timedOut: e !== null && (e.killed === true || e.name === "AbortError") });
+  });
+  child.stdin?.end();
+});
+function backoffPath(env2) {
+  return join15(configDir(env2), BACKOFF_FILE);
+}
+function backedOff(env2, now) {
+  try {
+    const at = Date.parse(readFileSync12(backoffPath(env2), "utf8").trim());
+    return Number.isFinite(at) && now - at >= 0 && now - at < BACKOFF_MS;
+  } catch {
+    return false;
+  }
+}
+function rememberTimeout(env2, now) {
+  try {
+    mkdirSync8(configDir(env2), { recursive: true, mode: 448 });
+    const file2 = backoffPath(env2);
+    rmSync10(file2, { force: true });
+    writeFileSync5(file2, `${new Date(now).toISOString()}
+`, { mode: 384, flag: "wx" });
+  } catch {
+  }
+}
+function forgetTimeout(env2) {
+  try {
+    rmSync10(backoffPath(env2), { force: true });
+  } catch {
+  }
+}
+async function revoke(doFetch, token, stop2) {
+  try {
+    const timeout = AbortSignal.timeout(REVOKE_TIMEOUT_MS);
+    const r = await doFetch(GOOGLE_REVOKE_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token }).toString(),
+      signal: stop2 ? AbortSignal.any([timeout, stop2]) : timeout
+    });
+    if (r.status === 200) return true;
+    if (r.status !== 400) return false;
+    const j = await r.json().catch(() => null);
+    return j?.error === "invalid_token";
+  } catch {
+    return false;
+  }
+}
+function loginKeychainPath(env2) {
+  return join15(homeDir(env2), "Library", "Keychains", "login.keychain-db");
+}
+async function removeOldDriveSignIn(o) {
+  if ((o.platform ?? process.platform) !== "darwin") return "not_macos";
+  const keychain = loginKeychainPath(o.env);
+  try {
+    if (!existsSync2(keychain)) return "no_keychain";
+  } catch {
+    return "no_keychain";
+  }
+  const now = o.now ?? Date.now;
+  if (backedOff(o.env, now())) return "backed_off";
+  const run2 = o.run ?? runSecurity;
+  const doFetch = o.fetch ?? globalThis.fetch;
+  let removed = 0;
+  let revoked = 0;
+  try {
+    for (let i = 0; i < MAX_ITEMS; i++) {
+      const found = await run2(["find-generic-password", "-s", OLD_DRIVE_SERVICE, "-w", keychain], o.signal);
+      if (found.timedOut) {
+        rememberTimeout(o.env, now());
+        o.log("the Keychain did not answer in time (it may be locked); not looking for the old Google Drive sign-in again for a day");
+        return removed > 0 ? report() : "timed_out";
+      }
+      if (found.code === ITEM_NOT_FOUND) break;
+      if (found.code !== 0) {
+        o.log(`could not check the Keychain for the old Google Drive sign-in (security exit ${found.code}); trying again next start`);
+        return removed > 0 ? report() : "failed";
+      }
+      const token = found.stdout.replace(/\r?\n$/, "");
+      if (TOKEN_RE.test(token) && await revoke(doFetch, token, o.signal)) revoked++;
+      const del = await run2(["delete-generic-password", "-s", OLD_DRIVE_SERVICE, keychain], o.signal);
+      if (del.code === ITEM_NOT_FOUND) break;
+      if (del.code !== 0) {
+        o.log(`could not remove the old Google Drive sign-in from the Keychain (security exit ${del.code}); trying again next start`);
+        return removed > 0 ? report() : "failed";
+      }
+      removed++;
+    }
+  } catch {
+    o.log("could not check the Keychain for the old Google Drive sign-in; trying again next start");
+    return removed > 0 ? report() : "failed";
+  }
+  forgetTimeout(o.env);
+  return removed > 0 ? report() : "absent";
+  function report() {
+    const google = revoked === removed ? "Google revoked it" : revoked === 0 ? "Google could not be asked to revoke it" : `Google revoked ${revoked} of ${removed}`;
+    o.log(`removed the old Google Drive sign-in from the Keychain (${google})`);
+    return "removed";
+  }
+}
+
 // src/daemon-launch.ts
-import { accessSync as accessSync3, chmodSync as chmodSync7, closeSync as closeSync5, constants as constants4, fsyncSync as fsyncSync3, lstatSync as lstatSync4, mkdirSync as mkdirSync8, openSync as openSync5, readFileSync as readFileSync12, renameSync as renameSync7, rmSync as rmSync10, statSync as statSync5, writeSync as writeSync4 } from "node:fs";
-import { basename as basename8, dirname as dirname7, isAbsolute as isAbsolute11, join as join19 } from "node:path";
+import { accessSync as accessSync3, chmodSync as chmodSync7, closeSync as closeSync4, constants as constants4, fsyncSync as fsyncSync3, lstatSync as lstatSync4, mkdirSync as mkdirSync9, openSync as openSync4, readFileSync as readFileSync13, renameSync as renameSync7, rmSync as rmSync11, statSync as statSync5, writeSync as writeSync4 } from "node:fs";
+import { basename as basename8, dirname as dirname7, isAbsolute as isAbsolute11, join as join16 } from "node:path";
 var PLUGIN_KEY_RE = /^team-relay@[A-Za-z0-9._-]{1,100}$/;
 var PLUGIN_KEY_ENV = "TEAM_RELAY_PLUGIN_KEY";
 function installedPluginsPath(home2) {
-  return join19(home2, ".claude", "plugins", "installed_plugins.json");
+  return join16(home2, ".claude", "plugins", "installed_plugins.json");
 }
 var isObj4 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function pickPluginEntry(json, key) {
@@ -28311,7 +26967,7 @@ function pickPluginEntry(json, key) {
 }
 function readInstalledPlugin(home2, key) {
   try {
-    return pickPluginEntry(JSON.parse(readFileSync12(installedPluginsPath(home2), "utf8")), key);
+    return pickPluginEntry(JSON.parse(readFileSync13(installedPluginsPath(home2), "utf8")), key);
   } catch {
     return null;
   }
@@ -28341,6 +26997,7 @@ var keyGiven = env[PLUGIN_KEY_ENV]?.trim() ?? "";
 var pluginKey = PLUGIN_KEY_RE.test(keyGiven) ? keyGiven : null;
 if (!pluginKey) log("not started by the launcher (no plugin key): updates of the plugin are not watched");
 log(`starting the background answerer (version ${version}, pid ${process.pid})`);
+void removeOldDriveSignIn({ env, log });
 runDaemon({
   env,
   log,

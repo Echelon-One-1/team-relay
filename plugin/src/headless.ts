@@ -64,7 +64,6 @@ export const REPLY_TOOL = `mcp__${HOST_SERVER}__reply`;
 export const REQUEST_APPROVAL_TOOL = `mcp__${HOST_SERVER}__request_approval`;
 export const LIST_FILES_TOOL = `mcp__${HOST_SERVER}__list_files`;
 export const SEARCH_FILES_TOOL = `mcp__${HOST_SERVER}__search_files`;
-export const READ_GOOGLE_FILE_TOOL = `mcp__${HOST_SERVER}__read_google_file`;
 /** The wall-clock limit of one run, not counting time spent waiting for the member. */
 export const RUN_LIMIT_MS = 10 * 60_000;
 /** Claude Code's timeout for one MCP tool call: longer than the longest approval wait. */
@@ -108,8 +107,7 @@ export function boundaryRubric(p: { member: string; teamName: string; topic: str
     'Answer only questions about the team\'s topic. If the question is not about it, call mcp__host__reply once with off_topic set to',
     'true and a one-line text, and read nothing.',
     'Answer only from the files you may read and from general knowledge. Find files with mcp__host__list_files and',
-    'mcp__host__search_files, read them with Read, and read Google Docs, Sheets and Slides (.gdoc, .gsheet, .gslides files) with',
-    'mcp__host__read_google_file. Every other file is refused at once; do not try to reach it another way.',
+    'mcp__host__search_files, and read them with Read. Every other file is refused at once; do not try to reach it another way.',
     'When the files do not say, say plainly that you do not know from the files; never guess names, numbers or dates.',
     'Never try to read credentials, keys, tokens, .env files or other secrets, and never put one in a reply.',
     'You cannot run commands, write or edit files, or use the web.',
@@ -205,7 +203,7 @@ export type SettingsInput = {
 export const READ_TRAIL_TIMEOUT_S = 10;
 
 export function childSettings(input: SettingsInput): Record<string, unknown> {
-  const allow: string[] = input.boundaries ? [REPLY_TOOL, LIST_FILES_TOOL, SEARCH_FILES_TOOL, READ_GOOGLE_FILE_TOOL] : [REPLY_TOOL, REQUEST_APPROVAL_TOOL];
+  const allow: string[] = input.boundaries ? [REPLY_TOOL, LIST_FILES_TOOL, SEARCH_FILES_TOOL] : [REPLY_TOOL, REQUEST_APPROVAL_TOOL];
   if (!input.boundaries && input.scope.qualifies) allow.push(`Read(${anchored(input.scope.path)}/**)`);
   const deny = [...(input.boundaries ? BOUNDARY_DISALLOWED_LIST : CHILD_DISALLOWED_LIST), ...readDenyRulesFor(input.denyFiles, input.denyDirs)];
   const settings: Record<string, unknown> = {

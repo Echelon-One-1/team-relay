@@ -152,7 +152,7 @@ export async function executeDryRun(
       calls.push(`request_approval ${JSON.stringify(q.reason)}`);
       return { ok: true, message: 'Noted (dry run).' };
     }
-    if (method === 'list_files' || method === 'search_files' || method === 'read_google_file') {
+    if (method === 'list_files' || method === 'search_files') {
       calls.push(`${method} -> refused (dry run)`);
       return { ok: false, message: 'Dry run: nothing can be read.' };
     }

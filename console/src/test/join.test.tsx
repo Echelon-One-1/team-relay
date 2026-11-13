@@ -1,6 +1,6 @@
 // M11-SPEC "Simpler joining": the team page shows one small card, "Join in 2 minutes", to a
 // viewer who has not joined yet (their Mac has never reported in, or they have never accepted
-// what the team shares): open Terminal, paste the setup line (with a big Copy button), come back
+// the team's topic): open Terminal, paste the setup line (with a big Copy button), come back
 // and click Accept, and a link to their progress. It goes once they have joined. The old
 // developer join panel (plugin, marketplace, channel and read-folder commands) is gone. The
 // console server is the dev mock.
@@ -69,7 +69,7 @@ describe('the join card', () => {
     expect(document.querySelector('[data-join]')).toBeNull()
     expect(screen.queryByRole('button', { name: /Join the team/ })).toBeNull()
     // While the card shows, the accept banner (which says the same) does not.
-    expect(screen.queryByRole('region', { name: 'Accept what the team shares' })).toBeNull()
+    expect(screen.queryByRole('region', { name: "Accept the team's topic" })).toBeNull()
     await user.click(within(c).getByRole('button', { name: /See your progress/ }))
     expect(window.location.pathname).toBe('/join')
     expect(await screen.findByRole('region', { name: 'Your setup' })).toBeInTheDocument()
@@ -80,7 +80,7 @@ describe('the join card', () => {
     const user = userEvent.setup()
     renderWithClient(<App />)
     const c = await card()
-    // It only goes there: accepting is done on the Setup page, after reading what is shared.
+    // It only goes there: accepting is done on the Setup page, after reading the topic.
     expect(within(c).queryByRole('button', { name: 'Accept' })).toBeNull()
     await user.click(within(c).getByRole('button', { name: 'Go to Accept' }))
     expect(window.location.pathname).toBe('/join')
@@ -95,13 +95,19 @@ describe('the join card', () => {
       await flush(50)
       await flush(50)
       expect(screen.getByRole('region', { name: 'Join in 2 minutes' })).toBeInTheDocument()
-      // The Mac reports in (alice accepted version 1 earlier): on the next read she has joined.
-      relay.setMemberStatus('alice', mockStatus(Date.now(), { drive: false }), true)
+      // The Mac reports in: still not joined until she has accepted the topic once.
+      relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, 0)
       await flush(30_000)
       await flush(50)
+      expect(screen.getByRole('region', { name: 'Join in 2 minutes' })).toBeInTheDocument()
+      // She accepts version 2, and the topic changes since (version 3): she has joined, and her
+      // acceptance holds (the topic widens nothing), so no banner either.
+      await relay.handle('api/acceptance', { method: 'PUT', headers: { 'X-Relay-Team': 'demo' }, body: JSON.stringify({ version: 2 }) })
+      relay.setBoundariesAs('demo', 'bob', { topic: 'Example Co: payments only.' })
+      await flush(60_000)
+      await flush(50)
       expect(screen.queryByRole('region', { name: 'Join in 2 minutes' })).toBeNull()
-      // Something new to accept shows the banner, not the card.
-      expect(screen.getByRole('region', { name: 'Accept what the team shares' })).toBeInTheDocument()
+      expect(screen.queryByRole('region', { name: "Accept the team's topic" })).toBeNull()
     } finally {
       vi.useRealTimers()
     }

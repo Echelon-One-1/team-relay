@@ -204,8 +204,6 @@ function get(port: number, path: string, opts: { host?: string; assertion?: stri
 function staticDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'team-relay-hosted-'));
   writeFileSync(join(dir, 'index.html'), '<!doctype html><title>console</title>');
-  // PICKERS-SPEC §5.4: the Google Drive picker page, served only at /pick/drive.
-  writeFileSync(join(dir, 'pick-drive.html'), '<!doctype html><title>picker</title>');
   mkdirSync(join(dir, 'assets'));
   writeFileSync(join(dir, 'assets', 'app-abc123.js'), 'console.log(1)');
   return dir;
@@ -320,7 +318,7 @@ describe('hosted console server (M3-SPEC §3)', () => {
     expect(asset.headers['cache-control']).toBe('private, max-age=31536000, immutable');
   });
 
-  it("PICKERS-SPEC §5.4, ACC-017: the console's pages keep exactly today's headers; /pick/drive has exactly its own", async () => {
+  it("the console's pages keep exactly their headers; /pick/drive is no page of its own any more (13 Nov 2026)", async () => {
     const port = await hostedApp();
     const assertion = await sign(signer);
     const CONSOLE = {
@@ -332,40 +330,25 @@ describe('hosted console server (M3-SPEC §3)', () => {
       'cross-origin-opener-policy': 'same-origin',
       'cross-origin-resource-policy': 'same-origin',
     };
-    for (const path of ['/', '/team', '/pick', '/pick/drive/']) {
-      const page = await get(port, path, { assertion });
-      expect(page.status, path).toBe(200);
-      expect(pageHeaders(page), path).toEqual({
-        ...CONSOLE,
-        'content-type': 'text/html; charset=utf-8',
-        'content-length': String(Buffer.byteLength('<!doctype html><title>console</title>')),
-        'cache-control': 'no-cache',
-      });
+    for (const path of ['/', '/team', '/pick', '/pick/drive', '/pick/drive/']) {
+      for (const method of ['GET', 'HEAD']) {
+        const page = await get(port, path, { assertion, method });
+        expect(page.status, path).toBe(200);
+        expect(pageHeaders(page), `${method} ${path}`).toEqual({
+          ...CONSOLE,
+          'content-type': 'text/html; charset=utf-8',
+          'content-length': String(Buffer.byteLength('<!doctype html><title>console</title>')),
+          'cache-control': 'no-cache',
+        });
+        if (method === 'GET') expect(page.body).toBe('<!doctype html><title>console</title>');
+      }
     }
     const asset = await get(port, '/assets/app-abc123.js', { assertion });
     expect(pageHeaders(asset)).toEqual({ ...CONSOLE, 'content-type': 'text/javascript; charset=utf-8', 'content-length': '14', 'cache-control': 'private, max-age=31536000, immutable' });
     const api = await get(port, '/api/inbox/summary', { assertion });
     expect(pageHeaders(api)).toMatchObject({ ...CONSOLE, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-
-    const picker = await get(port, '/pick/drive', { assertion });
-    expect(picker.status).toBe(200);
-    expect(picker.body).toBe('<!doctype html><title>picker</title>');
-    expect(pageHeaders(picker)).toEqual({
-      'content-security-policy':
-        "default-src 'none'; script-src 'self' https://apis.google.com https://accounts.google.com/gsi/client; style-src 'self' 'unsafe-inline' https://accounts.google.com/gsi/style; img-src 'self' data:; font-src 'self'; connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/ https://oauth2.googleapis.com/revoke; frame-src https://docs.google.com https://accounts.google.com/gsi/; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-      'cross-origin-opener-policy': 'same-origin-allow-popups',
-      'referrer-policy': 'strict-origin-when-cross-origin',
-      'x-frame-options': 'DENY',
-      'x-content-type-options': 'nosniff',
-      'cross-origin-resource-policy': 'same-origin',
-      'cache-control': 'no-store',
-      'content-type': 'text/html; charset=utf-8',
-      'content-length': String(Buffer.byteLength('<!doctype html><title>picker</title>')),
-    });
-    const head = await get(port, '/pick/drive', { assertion, method: 'HEAD' });
-    expect(pageHeaders(head)).toEqual(pageHeaders(picker));
-    // The built file is never served under any headers but its route's.
-    expect((await get(port, '/pick-drive.html', { assertion })).status).toBe(404);
+    // The sources routes are gone.
+    for (const path of ['/api/sources/config', '/api/sources/github']) expect((await get(port, path, { assertion })).status, path).toBe(404);
     // Without IAP: the bare 401, as everywhere.
     expect((await get(port, '/pick/drive')).status).toBe(401);
     expect(relay.seen.filter((s) => s.path !== '/v1/me/teams' && s.path !== '/v1/teams/demo/inbox/summary')).toHaveLength(0);

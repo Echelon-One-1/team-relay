@@ -46,6 +46,7 @@ Commands (`commands/*.md`, namespaced by the plugin name):
 |---|---|
 | `/team-relay:login` | Calls the `login` tool, which takes no arguments: signs this computer in to the configured relay (below). The relay's page lists your open team invitations (Accept, Decline) and lets you create a team (at most 3 per Google account). |
 | `/team-relay:setup` | Calls the `setup` tool (no arguments): signs in first when needed (the `login` sign-in, waited for up to 5 minutes), then starts the setup page on this Mac (the console server on 127.0.0.1, a fresh key, opened on `/join` by way of a private redirect file) and returns at once. The page's own routes (`/api/local/*`, local only) show who is signed in, the one list of folders your Claude answers from (added only with the Mac's folder chooser, checked by the folder rules, at most 20; Remove only removes), background answering (the same LaunchAgent as `setup-cli daemon install`) and Done. It stops 3 s after Done, after 30 minutes without use, or with the MCP server; a second call reopens the same page. |
+| `/team-relay:folders` | Calls the `folders` tool: `list` (the default) shows the folders on this Mac your answerer may read for your team (at most 20; inside a git repository only the files git tracks), the folders you chose before 13 Nov 2026 (never read from now; add again the ones you still want), and whether you accepted your team's boundaries; `add <path>` and `remove <path>` change one folder, each only after you confirm it in a dialog. |
 | `/team-relay:logout` | Runs `dist/logout.js` itself through `bin/run-node` (the `` !`…` `` form, when the command expands): revokes this computer's credential at its relay, then deletes it. |
 | `/team-relay:approvals` | Calls the `review_approvals` tool (no arguments): each answer or step waiting for your approval opens as a dialog (MCP elicitation), and you decide there (M8, below). |
 | `/team-relay:answering` | Optional: prints the one command that starts a manual answering session (`"${CLAUDE_PLUGIN_ROOT}/bin/answerer"`), and the settings that share folders and offer capabilities (generated from `manifest.yaml`). |
@@ -377,8 +378,7 @@ holds its steps, and each can be run again:
 
 ```
 node dist/setup-cli.js login [--relay <url>]          # skipped when already signed in to that relay
-node dist/setup-cli.js folders                        # choose the folders that hold your clones
-node dist/setup-cli.js drive                          # when the team has shared drives
+node dist/setup-cli.js folders                        # choose the folders your Claude answers your team from
 node dist/setup-cli.js daemon install --claude <abs path of claude> --plugin team-relay@<marketplace>
 node dist/setup-cli.js daemon uninstall
 node dist/setup-cli.js status [--after-setup]         # your setup checklist (--after-setup: wait for the first check-in)
@@ -401,19 +401,22 @@ plugin installed for you under exactly that `team-relay@<marketplace>` key in
 LaunchAgent `~/Library/LaunchAgents/com.team-relay.answerer.plist`, then loads it. It refuses
 when nothing is installed under that key. Files are readable by you only.
 
-The first time the background answerer reads a folder in Documents, Desktop, Downloads, iCloud
-Drive or Google Drive, macOS may ask whether "node" may access it: click Allow. A refusal is
+The first time the background answerer reads a folder in Documents, Desktop, Downloads or iCloud
+Drive, macOS may ask whether "node" may access it: click Allow. A refusal is
 written to the log.
 
 The background answerer:
 
-- answers only within your team's boundaries and what you accepted; a team without boundaries
+- answers only from the folders you chose (inside a git repository only the files git tracks;
+  credentials and secret-looking names never), on your team's topic, once you accepted your
+  team's boundaries; a team without boundaries
   gets "not set up yet", it never answers from a folder, runs no capabilities and asks for no
   approvals;
 - holds the answering lock as `daemon`, so a working session or `bin/answerer` on the same
   computer does not read your inbox while it runs;
-- reports to the relay every minute only counts and yes/no facts (signed in, folders and
-  clones found, Drive connected, self-test result), never a path, question or answer;
+- reports to the relay every minute only counts and yes/no facts (signed in, how many folders
+  you chose, self-test result), never a path, question or answer; owners see the count, nobody
+  sees the folders' names;
 - runs a self-test at start and every 6 hours, with no network (the first one beside connecting);
 - writes `~/Library/Logs/team-relay/daemon.log` (yours only, 5 MB, one older file kept) with
   events and request ids, never question or answer text;

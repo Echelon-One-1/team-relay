@@ -11,38 +11,18 @@ const raw = readFileSync(path.resolve(import.meta.dirname, '../../../schema/boun
 export interface Vectors {
   valid: Record<string, unknown>[]
   invalid: Array<{ why: string; field: string | null; boundaries: Record<string, unknown> }>
-  m10_documents: Record<string, unknown>[]
+  removed: Array<{ field: string; boundaries: Record<string, unknown> }>
   normalised: Array<{ why: string; boundaries: Record<string, unknown>; expect: Record<string, unknown> }>
-  legacy_drives: Array<{ why: string; stored: unknown[] | null; sent: unknown[]; ok: boolean }>
-  keys: Array<{ kind: string; item: Record<string, unknown>; key: string }>
-  item_keys: Array<{ boundaries: Record<string, unknown>; keys: string[] }>
-  since: { start: Record<string, unknown>; steps: Record<string, unknown>[] }
-  sources: {
-    valid: unknown[]
-    invalid: Array<{ why: string; sources: unknown }>
-    kept: Array<{ why: string; boundaries: Record<string, unknown>; missing: string[]; kept: string[] }>
-  }
+  stored: Array<{ why: string; stored: Record<string, unknown>; expect: Record<string, unknown> }>
   versions: { valid: unknown[]; invalid: unknown[] }
+  folder_counts: { valid: unknown[]; invalid: unknown[] }
   placeholders: Record<string, string>
 }
 
 /** Each placeholder's value, as the file's "placeholders" texts say. */
 export const PLACEHOLDERS: Record<string, string> = {
+  TOPIC_500: 'a'.repeat(500),
   TOPIC_501: 'a'.repeat(501),
-  DOMAIN_253: `${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(57)}.com`,
-  DOMAIN_254: `${'a'.repeat(63)}.${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(58)}.com`,
-  LABEL_63_DOMAIN: `${'a'.repeat(63)}.example.com`,
-  LABEL_64_DOMAIN: `${'a'.repeat(64)}.example.com`,
-  DRIVE_100: 'd'.repeat(100),
-  DRIVE_101: 'd'.repeat(101),
-  REPO_100: 'r'.repeat(100),
-  REPO_101: 'r'.repeat(101),
-  FOLDER_NAME_255: 'f'.repeat(255),
-  FOLDER_NAME_256: 'f'.repeat(256),
-  ID_200: 'x'.repeat(200),
-  ID_201: 'x'.repeat(201),
-  KEY_400: 'k'.repeat(400),
-  KEY_401: 'k'.repeat(401),
 }
 
 function expand(v: unknown): unknown {

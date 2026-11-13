@@ -71,8 +71,8 @@ const write = (method: string, body: unknown, extra: Record<string, string> = {}
   body: body === undefined ? undefined : JSON.stringify(body),
 });
 const choose = () => req(port, '/api/local/folders/choose', write('POST', {}));
-const stored = () => readTeamSettings(memberFoldersPath(env), env, 'demo').extra_folders;
-const store = (folders: string[]) => writeMemberSettings(memberFoldersPath(env), withTeam({ teams: {} }, 'demo', { repo_roots: [], extra_folders: folders, accepted: null }), env);
+const stored = () => readTeamSettings(memberFoldersPath(env), env, 'demo').folders;
+const store = (folders: string[]) => writeMemberSettings(memberFoldersPath(env), withTeam({ teams: {} }, 'demo', { folders }), env);
 const folder = (...parts: string[]) => {
   const p = join(home, ...parts);
   mkdirSync(p, { recursive: true });
@@ -227,10 +227,31 @@ describe('GET /api/local/setup', () => {
     expect(r.json()).toEqual({
       signed_in: { member: 'bob', team: 'demo', email: 'bob@example.com' },
       folders: ['~/code/example-org'],
+      previous: [],
       chooser: true,
       background: { installed: false, available: false, reason: BACKGROUND_NO_CLAUDE },
       limits: { max_folders: 20 },
     });
+  });
+
+  it('an earlier plugin\'s lists are `previous` (never the folders); one save keeps only the chosen list', async () => {
+    const code = folder('code', 'example-org');
+    const notes = folder('work', 'notes');
+    const file = memberFoldersPath(env);
+    mkdirSync(join(xdg, 'team-relay'), { recursive: true, mode: 0o700 });
+    writeFileSync(file, JSON.stringify({ teams: { demo: { repo_roots: [code, code], extra_folders: ['~/work/notes'], accepted: null } } }), { mode: 0o600 });
+    const body = (await req(port, '/api/local/setup', { key })).json();
+    expect(body.folders).toEqual([]);
+    expect(body.previous).toEqual([
+      { path: '~/code/example-org', kind: 'repo_root' },
+      { path: '~/work/notes', kind: 'own_folder' },
+    ]);
+    expect(body).not.toHaveProperty('dropped');
+    // Added again only through the chooser; then the file holds exactly what was chosen.
+    chooserAnswers.push({ kind: 'chosen', paths: [notes] });
+    expect((await choose()).json().folders).toEqual(['~/work/notes']);
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ teams: { demo: { folders: [notes] } } });
+    expect((await req(port, '/api/local/setup', { key })).json().previous).toEqual([]);
   });
 
   it('background answering is available on a Mac where Claude Code is found (the desktop app\'s own counts); else why not', async () => {
@@ -294,7 +315,7 @@ describe('ACC-3: choosing folders', () => {
   });
 
   it('is allowed for every member, whatever the team shares', async () => {
-    relay.setBoundaries({ topic: 'T', github_orgs: [], drives: [], member_folders: false });
+    relay.setBoundaries({ topic: 'T' });
     chooserAnswers.push({ kind: 'chosen', paths: [folder('work', 'mine')] });
     const r = await choose();
     expect(r.status).toBe(200);

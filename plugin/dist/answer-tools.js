@@ -17096,7 +17096,7 @@ var BOUNDARY_TOOLS = [
   },
   {
     name: "list_files",
-    description: `List the files you may read (absolute paths, for Read), with the areas they are in (GitHub repositories, shared drives, the member's folders). Optionally only one area, and only paths matching a glob relative to the area (for example "**/*.md"; without a "/", it also matches file names). At most 500 paths per call.`,
+    description: 'List the files you may read (absolute paths, for Read), with the areas they are in (the folders the member chose). Optionally only one area, and only paths matching a glob relative to the area (for example "**/*.md"; without a "/", it also matches file names). At most 500 paths per call.',
     inputSchema: {
       type: "object",
       properties: {
@@ -17108,7 +17108,7 @@ var BOUNDARY_TOOLS = [
   },
   {
     name: "search_files",
-    description: "Search the files you may read for lines matching an RE2 regular expression ((?i) at the start ignores case). Optionally one area and a glob, as for list_files. Returns path, line number and the line (clipped). Google Docs/Sheets/Slides are not searched: read them with read_google_file.",
+    description: "Search the files you may read for lines matching an RE2 regular expression ((?i) at the start ignores case). Optionally one area and a glob, as for list_files. Returns path, line number and the line (clipped).",
     inputSchema: {
       type: "object",
       properties: {
@@ -17118,16 +17118,6 @@ var BOUNDARY_TOOLS = [
         max_results: { type: "integer", minimum: 1, maximum: 200 }
       },
       required: ["pattern"],
-      additionalProperties: false
-    }
-  },
-  {
-    name: "read_google_file",
-    description: "Read a Google Doc, Sheet or Slides file from the team's shared drive: give the path of its .gdoc, .gsheet or .gslides file (from list_files). Returns its text (Docs as Markdown, Sheets as CSV, Slides as text), at most 200 KB.",
-    inputSchema: {
-      type: "object",
-      properties: { path: { type: "string", minLength: 1, maxLength: 4096 } },
-      required: ["path"],
       additionalProperties: false
     }
   },
@@ -17181,7 +17171,7 @@ async function main() {
         const text = typeof r.message === "string" ? r.message : "done";
         return r.ok === false ? toolError(text) : { content: [{ type: "text", text }] };
       }
-      if (name === "list_files" || name === "search_files" || name === "read_google_file") {
+      if (name === "list_files" || name === "search_files") {
         const out = await host.call(name, args);
         const r = isPlainObject3(out) ? out : {};
         if (r.ok !== true) return toolError(typeof r.message === "string" ? r.message : "failed");

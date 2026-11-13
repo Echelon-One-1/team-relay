@@ -10,14 +10,14 @@ import { join } from 'node:path';
 import { permissionResult } from '../src/answer-tools.js';
 import { buildAllowedSet, denyContext, type AllowedSet, type Area } from '../src/boundary-set.js';
 import { MAX_RUN_SNAPSHOT_BYTES, MAX_SNAPSHOT_BYTES, removeStaleSnapshotDirs, snapshotDirPrefix, snapshotRead, snapshotRun } from '../src/snapshot.js';
-import { BOUNDARIES, REPO_ROOT, makeFixture, type Fixture } from './helpers/boundary-fixture.js';
+import { REPO_ROOT, makeFixture, type Fixture } from './helpers/boundary-fixture.js';
 
 let f: Fixture;
 let set: AllowedSet;
 
 beforeAll(async () => {
   f = makeFixture();
-  set = await buildAllowedSet({ version: 1, boundaries: BOUNDARIES, member: { repo_roots: [REPO_ROOT], extra_folders: [] }, env: f.env });
+  set = await buildAllowedSet({ version: 1, member: { folders: [REPO_ROOT] }, env: f.env });
 });
 
 function runDir(): string {

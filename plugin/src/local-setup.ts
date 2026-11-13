@@ -4,7 +4,11 @@
 // LOCAL_BODY_LIMIT bytes with only the route's fields, no query); this file answers them.
 //
 //   GET  /api/local/setup            what the page shows: who is signed in, the folders the
-//                                    member's Claude answers from, whether the Mac's folder chooser
+//                                    member's Claude answers from, `previous` (the folders an
+//                                    earlier plugin's file held, each with its kind: never read
+//                                    from, shown so the member can pick again the ones they
+//                                    still want; saving the folders removes them from the file),
+//                                    whether the Mac's folder chooser
 //                                    is here, the background answerer (installed, and whether it
 //                                    can be turned on here: a Mac with Claude Code; else why not)
 //   POST /api/local/folders/choose   opens the Mac's folder chooser and adds what was chosen
@@ -13,8 +17,8 @@
 //   PUT  /api/local/background       {"on"}: installs or removes the background answerer
 //   POST /api/local/done             the member is done: the server stops shortly after
 //
-// One list of folders, every member's own (owners included). It is kept in the folders file's
-// `extra_folders` list (member-folders.ts).
+// One list of folders, every member's own (owners included), at most 20: the folders file's
+// `folders` (member-folders.ts).
 //
 // No route takes a folder to add: added folders come only from the Mac's chooser, which the
 // member works on their own screen. So a script on any page, even one holding the key, can add
@@ -22,7 +26,7 @@
 
 import { homeDir } from './boundary-set.js';
 import { AgentError } from './daemon-launch.js';
-import { MAX_FOLDERS, MemberFoldersError, changeMemberFolders, memberFoldersPath, readTeamSettings } from './member-folders.js';
+import { MAX_FOLDERS, MemberFoldersError, changeMemberFolders, memberFoldersPath, readTeamSettings, type TeamSettings } from './member-folders.js';
 import { addFolder, saveTeamFolders, type FolderChooser } from './setup-steps.js';
 import { describeError } from './tool-util.js';
 
@@ -37,9 +41,6 @@ export const LOCAL_ROUTES: Readonly<Record<string, { method: 'GET' | 'POST' | 'P
   '/api/local/background': { method: 'PUT', fields: ['on'] },
   '/api/local/done': { method: 'POST', fields: [] },
 });
-
-/** Where the one folder list is stored in the folders file. */
-const LIST = 'extra_folders' as const;
 
 export type LocalAnswer = { status: number; body: unknown };
 
@@ -94,13 +95,13 @@ export function createLocalSetup(d: LocalSetupDeps): LocalSetup {
   const team = d.signedIn.team;
   let chooserOpen = false;
 
-  const stored = (): string[] => readTeamSettings(file, env, team)[LIST];
+  const stored = (): TeamSettings => readTeamSettings(file, env, team);
   const shown = (list: string[]) => list.map((p) => displayPath(p, env));
 
   function state(): LocalAnswer {
-    let folders: string[];
+    let mine: TeamSettings;
     try {
-      folders = stored();
+      mine = stored();
     } catch (err) {
       return { status: 500, body: { error: 'folders_unreadable', detail: `Your saved folders cannot be read (${describeError(err)}).` } };
     }
@@ -108,7 +109,8 @@ export function createLocalSetup(d: LocalSetupDeps): LocalSetup {
       status: 200,
       body: {
         signed_in: d.signedIn,
-        folders: shown(folders),
+        folders: shown(mine.folders),
+        previous: mine.previous.map((x) => ({ path: displayPath(x.path, env), kind: x.kind })),
         chooser: d.chooser !== null,
         background: { installed: d.background.installed(), ...d.background.availability() },
         limits: { max_folders: MAX_FOLDERS },
@@ -126,11 +128,11 @@ export function createLocalSetup(d: LocalSetupDeps): LocalSetup {
       if (r.kind === 'unavailable') {
         return { status: 503, body: { error: 'chooser_unavailable', detail: 'The folder chooser could not open (or was left open too long). Try again.' } };
       }
-      if (r.kind === 'cancelled' || r.paths.length === 0) return { status: 200, body: { added: [], refused: [], cancelled: true, folders: shown(stored()) } };
+      if (r.kind === 'cancelled' || r.paths.length === 0) return { status: 200, body: { added: [], refused: [], cancelled: true, folders: shown(stored().folders) } };
       const added: string[] = [];
       const refused: Array<{ path: string; reason: string }> = [];
       const saved = saveTeamFolders(env, team, (cur) => {
-        const list = [...cur[LIST]];
+        const list = [...cur];
         for (const raw of r.paths) {
           const o = addFolder(list, raw, env);
           if (o.kind === 'added') added.push(displayPath(raw, env));
@@ -140,10 +142,10 @@ export function createLocalSetup(d: LocalSetupDeps): LocalSetup {
               reason: o.kind === 'refused' ? o.reason : o.kind === 'duplicate' ? 'it is already in the list' : `at most ${MAX_FOLDERS} folders`,
             });
         }
-        return { ...cur, [LIST]: list };
+        return list;
       });
       log(`setup page: ${added.length} folders added, ${refused.length} not used`);
-      return { status: 200, body: { added, refused, cancelled: false, folders: shown(saved[LIST]) } };
+      return { status: 200, body: { added, refused, cancelled: false, folders: shown(saved) } };
     } catch (err) {
       return notSaved(err);
     } finally {
@@ -155,12 +157,12 @@ export function createLocalSetup(d: LocalSetupDeps): LocalSetup {
     const path = body?.path;
     if (typeof path !== 'string' || path.length === 0 || path.length > MAX_PATH) return bad('path must be a stored folder');
     try {
-      const cur = readTeamSettings(file, env, team);
-      if (!changeMemberFolders(cur, LIST, 'remove', path, env).changed) return { status: 404, body: { error: 'not_found', detail: 'That folder is not in the list.' } };
+      const cur = readTeamSettings(file, env, team).folders;
+      if (!changeMemberFolders(cur, 'remove', path, env).changed) return { status: 404, body: { error: 'not_found', detail: 'That folder is not in the list.' } };
       // Removing only ever narrows: nothing is added here, whatever the path says.
-      const saved = saveTeamFolders(env, team, (c) => changeMemberFolders(c, LIST, 'remove', path, env).value);
+      const saved = saveTeamFolders(env, team, (c) => changeMemberFolders(c, 'remove', path, env).folders);
       log('setup page: removed a folder');
-      return { status: 200, body: { folders: shown(saved[LIST]) } };
+      return { status: 200, body: { folders: shown(saved) } };
     } catch (err) {
       return notSaved(err);
     }

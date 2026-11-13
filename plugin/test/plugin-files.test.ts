@@ -50,7 +50,7 @@ describe('commands (M5-SPEC §6, §9)', () => {
 
   it('the model can invoke none of them on its own', () => {
     const names = readdirSync(join(PLUGIN_ROOT, 'commands')).filter((f) => f.endsWith('.md')).sort();
-    expect(names).toEqual(['answering.md', 'approvals.md', 'console.md', 'drive.md', 'folders.md', 'login.md', 'logout.md', 'setup.md']);
+    expect(names).toEqual(['answering.md', 'approvals.md', 'console.md', 'folders.md', 'login.md', 'logout.md', 'setup.md']);
     for (const f of names) expect(frontmatter(command(f.slice(0, -3))), f).toMatch(/^disable-model-invocation: true$/m);
   });
 
@@ -106,7 +106,7 @@ describe('SessionStart hook', () => {
         [join(DIST, 'session-start.js')],
         {
           // A channel session unless the test says otherwise (the process-tree check is channel-mode.test.ts).
-          env: { PATH: process.env.PATH ?? '', XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME ?? '', TEAM_RELAY_CHANNEL: '1', ...env },
+          env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME ?? '', TEAM_RELAY_CHANNEL: '1', ...env },
           encoding: 'utf8',
           timeout: 10_000,
         },

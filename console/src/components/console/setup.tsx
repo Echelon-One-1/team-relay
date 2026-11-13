@@ -1,8 +1,8 @@
-import { CircleAlert, CircleCheck, ExternalLink, Folder, FolderGit2, FolderOpen, HardDrive, LoaderCircle, MessageSquare, SearchX, ShieldAlert } from 'lucide-react'
+import { CircleAlert, CircleCheck, LoaderCircle, MessageSquare, ShieldAlert } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 
 import type { ChangeError } from '@/api/client'
-import type { MemberStatusEntry, TeamBoundaries } from '@/api/types'
+import type { TeamBoundaries } from '@/api/types'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -20,10 +20,9 @@ import { acceptRefusal } from '@/lib/ask'
 import {
   acceptedVersion,
   boundariesSet,
-  boundaryItems,
   CHECKING,
   currentVersion,
-  missingSources,
+  isAccepted,
   publicOrigin,
   SETUP_STEPS,
   setupCommand,
@@ -37,7 +36,7 @@ import { Panel } from './primitives'
 
 // M11 §6 and "Simpler joining": the Setup page. Two plain steps that tick on their own (read
 // every 5 s while the page is visible): set up your Mac with one line in Terminal, and accept
-// what the team shares (the member, for themselves). Inside the first step, only what is not
+// the team's topic (the member, for themselves). Inside the first step, only what is not
 // done yet shows, each as one sentence of what to do. Below them, always: Ask the team (never a
 // step: asking is what the setup is for, and works whatever the steps say).
 
@@ -72,26 +71,7 @@ export function useViewerSetup(intervalMs?: number) {
   }
 }
 
-function NewMark() {
-  return (
-    <span className="inline-flex h-[17px] items-center rounded bg-signal-soft px-1.5 text-[10.5px] font-medium text-signal" data-new>
-      new
-    </span>
-  )
-}
-
-function Line({ icon, children }: { icon: ReactNode; children: ReactNode }) {
-  return (
-    <li className="flex min-w-0 items-center gap-2 text-[12.5px]">
-      <span aria-hidden className="text-subtle [&_svg]:size-3.5">
-        {icon}
-      </span>
-      <span className="flex min-w-0 flex-wrap items-center gap-1.5">{children}</span>
-    </li>
-  )
-}
-
-/** Step 2: what the team shares, with what is new since the viewer last accepted, and Accept. */
+/** Step 2: the team's topic, and Accept. An acceptance of any version up to the current one holds. */
 export function AcceptBoundaries({
   bounds,
   accepted,
@@ -103,10 +83,9 @@ export function AcceptBoundaries({
 }) {
   const accept = useSetAcceptance()
   const [error, setError] = useState<string | null>(null)
-  const items = boundaryItems(bounds, accepted)
   // members-status already names a newer version: the one on screen is about to be replaced.
   const stale = bounds.version < current
-  const done = accepted === bounds.version && !stale
+  const done = isAccepted(accepted, bounds.version) && !stale
   const submit = () => {
     setError(null)
     accept.mutate({ version: bounds.version }, { onError: (err: ChangeError) => setError(acceptRefusal(err)) })
@@ -114,50 +93,11 @@ export function AcceptBoundaries({
   return (
     <div className="flex flex-col gap-2.5 rounded-md border bg-canvas px-3 py-2.5" data-accept-boundaries={bounds.version}>
       <p className="text-[12px] text-subtle">
-        Your Mac answers teammates from these only.{' '}
-        {accepted > 0 && !done ? 'Anything added since you last accepted is marked new.' : null}
+        Your Mac answers teammates&apos; questions on this topic only, from the folders you chose on it.
       </p>
       <p className="text-[12.5px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]" data-topic>
-        {items.topic}
+        {bounds.boundaries.topic}
       </p>
-      <ul className="flex flex-col gap-1.5" aria-label="What the team shares">
-        {items.orgs.map((o) => (
-          <Line key={`org-${o.name}`} icon={<FolderGit2 />}>
-            <span>
-              GitHub: <span className="font-mono text-[12px]">{o.name}</span> <span className="text-subtle">(whole organisation)</span>
-            </span>
-            {o.isNew ? <NewMark /> : null}
-          </Line>
-        ))}
-        {items.repos.map((r) => (
-          <Line key={`repo-${r.name}`} icon={<FolderGit2 />}>
-            <span>
-              GitHub: <span className="font-mono text-[12px]">{r.name}</span>
-            </span>
-            {r.isNew ? <NewMark /> : null}
-          </Line>
-        ))}
-        {items.folders.map((f) => (
-          <Line key={f.key} icon={<Folder />}>
-            <span className="[overflow-wrap:anywhere]">
-              Google Drive: <span className="font-medium">{f.name}</span> <span className="text-subtle">({f.where})</span>
-            </span>
-            {f.isNew ? <NewMark /> : null}
-          </Line>
-        ))}
-        {items.drives.map((d) => (
-          <Line key={`drive-${d.domain}-${d.shared_drive}`} icon={<HardDrive />}>
-            <span className="[overflow-wrap:anywhere]">
-              Shared drive <span className="font-medium">{d.shared_drive}</span> <span className="text-subtle">({d.domain})</span>
-            </span>
-            {d.isNew ? <NewMark /> : null}
-          </Line>
-        ))}
-        <Line icon={<FolderOpen />}>
-          <span>{items.memberFolders.allowed ? 'You may add folders of your own' : 'No folders of your own'}</span>
-          {items.memberFolders.isNew ? <NewMark /> : null}
-        </Line>
-      </ul>
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" onClick={submit} disabled={done || stale || accept.isPending} data-accept-version={bounds.version}>
           {done ? 'Accepted' : accept.isPending ? 'Accepting…' : 'Accept'}
@@ -168,72 +108,6 @@ export function AcceptBoundaries({
         <p role="alert" className="text-[12px] leading-snug text-bad" data-error>
           {error}
         </p>
-      ) : null}
-    </div>
-  )
-}
-
-/**
- * PICKERS-SPEC §7.4: what the viewer's Mac can't find of what the team shares, one line each
- * (a repository with the line that clones it). Never part of "Set up your Mac": the Mac answers
- * from the rest.
- */
-function MissingSources({ entry, bounds }: { entry: MemberStatusEntry | null; bounds: TeamBoundaries | undefined }) {
-  const { missing, checking } = missingSources(entry, bounds)
-  if (missing.length === 0 && checking.length === 0) return null
-  return (
-    <div className="flex flex-col gap-2.5 rounded-md border border-warn/30 bg-warn-soft/50 px-3 py-2.5" data-missing-sources={missing.length}>
-      {missing.length > 0 ? (
-        <p className="flex items-start gap-2 text-[12.5px] leading-relaxed">
-          <SearchX aria-hidden className="mt-0.5 size-3.5 shrink-0 text-warn" />
-          <span>
-            Your Mac can&apos;t find {missing.length} of the things your team shares. It answers from the rest.
-          </span>
-        </p>
-      ) : null}
-      {missing.length > 0 ? (
-        <ul className="flex flex-col gap-2.5" aria-label="Not found on your Mac">
-          {missing.map((m) => (
-            <li key={m.key} className="flex min-w-0 flex-col gap-1.5 text-[12.5px] leading-relaxed" data-missing={m.key}>
-              {m.kind === 'repo' ? (
-                <>
-                  <span>
-                    <span className="font-mono text-[12px]">{m.name}</span> isn&apos;t on this Mac.
-                  </span>
-                  <CopyCommand text={m.command} label={`clone line for ${m.name}`} />
-                  <span className="text-[12px] text-subtle">{m.todo}</span>
-                </>
-              ) : m.kind === 'org' ? (
-                <>
-                  <span className="[overflow-wrap:anywhere]">{m.todo}</span>
-                  <a
-                    href={m.link}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex w-fit items-center gap-1 text-[12px] font-medium underline underline-offset-2 hover:text-foreground"
-                  >
-                    See {m.name}&apos;s projects on GitHub
-                    <ExternalLink aria-hidden className="size-3" />
-                  </a>
-                </>
-              ) : (
-                <span className="[overflow-wrap:anywhere]">{m.todo}</span>
-              )}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {checking.length > 0 ? (
-        <ul className="flex flex-col gap-1" aria-label="Your Mac is still checking">
-          {checking.map((c) => (
-            <li key={c.key} className="flex min-w-0 items-center gap-2 text-[12px] text-subtle" data-checking={c.key}>
-              <LoaderCircle aria-hidden className="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
-              <span className="min-w-0 [overflow-wrap:anywhere]">
-                {c.name}: checking…
-              </span>
-            </li>
-          ))}
-        </ul>
       ) : null}
     </div>
   )
@@ -342,7 +216,6 @@ export function SetupPage() {
       ) : (
         <OpenChecks checks={step.checks} />
       )}
-      <MissingSources entry={v.entry} bounds={bounds.data} />
     </>
   )
 
@@ -352,10 +225,10 @@ export function SetupPage() {
     ) : boundariesSet(bounds.data) ? (
       <AcceptBoundaries bounds={bounds.data} accepted={v.accepted} current={v.current} />
     ) : bounds.isError && !bounds.data ? (
-      <p className="text-[12.5px] text-subtle">What the team shares didn&apos;t load. It is read again in a moment.</p>
+      <p className="text-[12.5px] text-subtle">The team&apos;s topic didn&apos;t load. It is read again in a moment.</p>
     ) : step.done ? null : (
       <p className="text-[12.5px] leading-relaxed text-subtle">
-        A team owner hasn&apos;t chosen what the team shares yet. Nothing is answered until they do.
+        A team owner hasn&apos;t set the team&apos;s topic yet. Nothing is answered until they do.
       </p>
     )
 
@@ -413,29 +286,26 @@ export function SetupPage() {
 }
 
 /**
- * On the team page, once the viewer has joined: what the team shares changed since they last
- * accepted it (or was never accepted). A link to the Setup page, where they read and accept it.
- * Hidden while the join card shows (it says the same).
+ * On the team page, once the viewer has joined: they have not accepted the team's topic (never,
+ * or only on an earlier team under the same id). A link to the Setup page, where they read and
+ * accept it. Hidden while the join card shows (it says the same).
  */
 export function AcceptBanner() {
   const acceptance = useAcceptance()
   const bounds = useBoundaries()
   const nav = useNav()
   if (!acceptance.data || !boundariesSet(bounds.data)) return null
-  if (acceptance.data.version === bounds.data.version) return null
-  const first = acceptance.data.version === 0
+  if (isAccepted(acceptance.data.version, bounds.data.version)) return null
   return (
     <div
       role="region"
-      aria-label="Accept what the team shares"
+      aria-label="Accept the team's topic"
       className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-warn/30 bg-warn-soft px-4 py-2.5"
       data-accept-banner={bounds.data.version}
     >
       <ShieldAlert aria-hidden className="size-4 shrink-0 text-warn" />
       <p className="min-w-0 flex-1 text-[12.5px] leading-snug">
-        {first
-          ? 'Accept what the team shares, so your Mac can answer teammates.'
-          : 'What the team shares has changed. Accept it again, so your Mac answers from it.'}
+        Accept the team&apos;s topic, so your Mac can answer teammates.
       </p>
       <Button size="xs" variant="outline" onClick={() => nav.setView('join')}>
         Review and accept

@@ -11,14 +11,6 @@ var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require
   if (typeof require !== "undefined") return require.apply(this, arguments);
   throw Error('Dynamic require of "' + x + '" is not supported');
 });
-var __esm = (fn, res, err) => function __init() {
-  if (err) throw err[0];
-  try {
-    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
-  } catch (e) {
-    throw err = [e], e;
-  }
-};
 var __commonJS = (cb, mod) => function __require2() {
   try {
     return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -42,427 +34,6 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
   mod
 ));
-
-// src/relay-client-core.ts
-function parseRelayUrl(raw) {
-  if (!raw) throw new Error("RELAY_URL must be set");
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error("RELAY_URL is not a valid URL");
-  }
-  if (url.username || url.password) throw new Error("RELAY_URL must not carry credentials");
-  if (url.search || url.hash) throw new Error("RELAY_URL must not carry a query or fragment");
-  if (url.protocol === "https:") return url;
-  if (url.protocol === "http:" && LOOPBACK.has(url.hostname)) return url;
-  throw new Error("RELAY_URL must be https (plain http is allowed only to localhost)");
-}
-var TEAM_RE, MEMBER_RE, LOOPBACK;
-var init_relay_client_core = __esm({
-  "src/relay-client-core.ts"() {
-    "use strict";
-    TEAM_RE = /^[a-z][a-z0-9_-]{1,31}$/;
-    MEMBER_RE = /^[a-z][a-z0-9_]{1,31}$/;
-    LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
-  }
-});
-
-// src/credentials.ts
-import {
-  chmodSync,
-  closeSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  unlinkSync,
-  writeSync
-} from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
-function credentialsPath(env = process.env) {
-  const explicit = env.RELAY_CREDENTIALS_FILE?.trim();
-  if (explicit) {
-    if (!isAbsolute(explicit)) throw new CredentialFileError("RELAY_CREDENTIALS_FILE must be an absolute path");
-    return explicit;
-  }
-  const xdg = env.XDG_CONFIG_HOME?.trim();
-  const base = xdg && isAbsolute(xdg) ? xdg : join(env.HOME?.trim() || homedir(), ".config");
-  return join(base, CREDENTIALS_DIR, CREDENTIALS_FILE);
-}
-function uid() {
-  return typeof process.getuid === "function" ? process.getuid() : null;
-}
-function checkOwnedPrivate(st, what, kind) {
-  if (st.isSymbolicLink()) throw new CredentialFileError(`${what} is a symbolic link; refusing to use it`);
-  if (kind === "file" ? !st.isFile() : !st.isDirectory()) throw new CredentialFileError(`${what} is not a ${kind}; refusing to use it`);
-  const me = uid();
-  if (me !== null && st.uid !== me) throw new CredentialFileError(`${what} is owned by another user; refusing to use it`);
-  if ((st.mode & 63) !== 0) {
-    const mode = (st.mode & 511).toString(8).padStart(3, "0");
-    throw new CredentialFileError(
-      `${what} has mode ${mode}, readable or writable by others; refusing to use it (run /team-relay:logout and /team-relay:login again, or chmod ${kind === "file" ? "600" : "700"} it)`
-    );
-  }
-}
-function normaliseRelayUrl(raw) {
-  const url = parseRelayUrl(raw);
-  const path = url.pathname.replace(/\/+$/, "");
-  return `${url.protocol}//${url.host}${path}`;
-}
-function parseStoredCredential(raw) {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new CredentialFileError("the credential file is not a JSON object");
-  const c = raw;
-  const { relay_url, team, member, credential, expires_at, email } = c;
-  if (typeof relay_url !== "string") throw new CredentialFileError("the credential file has no relay_url");
-  let url;
-  try {
-    url = normaliseRelayUrl(relay_url);
-  } catch {
-    throw new CredentialFileError("the credential file has an invalid relay_url");
-  }
-  if (typeof team !== "string" || !TEAM_RE.test(team)) throw new CredentialFileError("the credential file has an invalid team");
-  if (typeof member !== "string" || !MEMBER_RE.test(member)) throw new CredentialFileError("the credential file has an invalid member");
-  if (typeof credential !== "string" || !CREDENTIAL_RE.test(credential)) throw new CredentialFileError("the credential file has an invalid credential");
-  if (expires_at !== void 0 && expires_at !== null && (typeof expires_at !== "string" || !RFC3339.test(expires_at))) {
-    throw new CredentialFileError("the credential file has an invalid expires_at");
-  }
-  if (email !== void 0 && email !== null && (typeof email !== "string" || email.length > 254 || !EMAIL_RE.test(email))) {
-    throw new CredentialFileError("the credential file has an invalid email");
-  }
-  return {
-    relay_url: url,
-    team,
-    member,
-    credential,
-    expires_at: typeof expires_at === "string" ? expires_at : null,
-    ...typeof email === "string" ? { email } : {}
-  };
-}
-function readCredential(path) {
-  let st;
-  try {
-    st = lstatSync(path);
-  } catch (err) {
-    if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
-    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
-  }
-  checkOwnedPrivate(lstatSync(dirname(path)), "the credential directory", "directory");
-  checkOwnedPrivate(st, "the credential file", "file");
-  if (st.size > MAX_FILE_BYTES) throw new CredentialFileError("the credential file is too large");
-  let text;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (err) {
-    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
-  }
-  let json;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    throw new CredentialFileError("the credential file is not valid JSON");
-  }
-  return parseStoredCredential(json);
-}
-function credentialFileExists(path) {
-  try {
-    lstatSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-var CREDENTIAL_RE, EMAIL_RE, CREDENTIALS_DIR, CREDENTIALS_FILE, MAX_FILE_BYTES, CredentialFileError, RFC3339;
-var init_credentials = __esm({
-  "src/credentials.ts"() {
-    "use strict";
-    init_relay_client_core();
-    CREDENTIAL_RE = /^trc_[A-Za-z0-9_-]{43}$/;
-    EMAIL_RE = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})+$/;
-    CREDENTIALS_DIR = "team-relay";
-    CREDENTIALS_FILE = "credentials.json";
-    MAX_FILE_BYTES = 16 * 1024;
-    CredentialFileError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "CredentialFileError";
-      }
-    };
-    RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
-  }
-});
-
-// src/relay-default.ts
-import { readFileSync as readFileSync2 } from "node:fs";
-import { fileURLToPath } from "node:url";
-function defaultRelayFile() {
-  return fileURLToPath(new URL("../relay.default.json", import.meta.url));
-}
-function defaultRelayUrl(file = defaultRelayFile()) {
-  try {
-    const raw = JSON.parse(readFileSync2(file, "utf8"));
-    if (typeof raw.relay_url !== "string") return null;
-    parseRelayUrl(raw.relay_url);
-    return raw.relay_url;
-  } catch {
-    return null;
-  }
-}
-var init_relay_default = __esm({
-  "src/relay-default.ts"() {
-    "use strict";
-    init_relay_client_core();
-  }
-});
-
-// src/relay-client.ts
-import { execFile } from "node:child_process";
-import { readFileSync as readFileSync3 } from "node:fs";
-function configValue(v) {
-  if (v === void 0) return void 0;
-  const t = v.trim();
-  if (!t || /^\$\{user_config\.[A-Za-z0-9_]+\}$/.test(t)) return void 0;
-  return t;
-}
-function staticTokenProvider(read) {
-  return Object.assign(typeof read === "string" ? () => read : read, { kind: "static" });
-}
-function tokenProviderFromEnv(env) {
-  const file = configValue(env.RELAY_TOKEN_FILE);
-  if (file) {
-    return staticTokenProvider(() => {
-      let raw;
-      try {
-        raw = readFileSync3(file, "utf8");
-      } catch (err) {
-        throw new Error(`cannot read RELAY_TOKEN_FILE (${err.code ?? "error"})`);
-      }
-      const token2 = raw.replace(/[\r\n]+$/, "");
-      if (!token2) throw new Error("RELAY_TOKEN_FILE is empty");
-      return token2;
-    });
-  }
-  const token = configValue(env.RELAY_TOKEN);
-  if (!token) throw new Error('RELAY_AUTH is "token", so RELAY_TOKEN or RELAY_TOKEN_FILE must be set');
-  return staticTokenProvider(token);
-}
-function checkGcloudAccount(account) {
-  if (account.length > 254 || !ACCOUNT_RE.test(account)) {
-    throw new Error("RELAY_GCLOUD_ACCOUNT must be an account email address");
-  }
-  return account;
-}
-function jwtExpiryMs(token) {
-  const payload = token.split(".")[1];
-  if (!payload) return null;
-  try {
-    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-    return typeof claims.exp === "number" && Number.isFinite(claims.exp) ? claims.exp * 1e3 : null;
-  } catch {
-    return null;
-  }
-}
-function scrub(text) {
-  return text.replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/ya29\.[A-Za-z0-9_.-]+/g, "[redacted]").replace(/[\x00-\x1f\x7f]+/g, " ").trim().slice(0, 200);
-}
-function gcloudTokenProvider(opts = {}) {
-  const now = opts.now ?? Date.now;
-  const env = opts.env ?? process.env;
-  const timeoutMs = opts.timeoutMs ?? 3e4;
-  const args = ["auth", "print-identity-token"];
-  if (opts.account !== void 0) args.push(`--account=${checkGcloudAccount(opts.account)}`);
-  let cached = null;
-  let inflight = null;
-  const mint = () => new Promise((resolve, reject) => {
-    execFile(
-      "gcloud",
-      args,
-      { env, timeout: timeoutMs, maxBuffer: GCLOUD_OUTPUT_LIMIT, shell: false, windowsHide: true, encoding: "utf8" },
-      (err, stdout, stderr) => {
-        if (err) {
-          const e = err;
-          if (e.code === "ENOENT") return reject(new Error("gcloud was not found on PATH (RELAY_AUTH=google needs the Google Cloud CLI)"));
-          if (e.killed) return reject(new Error("gcloud auth print-identity-token timed out"));
-          const why = scrub(String(stderr ?? "").split("\n").find((l) => l.trim()) ?? "");
-          return reject(new Error(`gcloud auth print-identity-token failed${why ? `: ${why}` : ""}`));
-        }
-        const token = String(stdout).trim();
-        if (!JWT_RE.test(token)) return reject(new Error("gcloud auth print-identity-token did not print an ID token"));
-        resolve(token);
-      }
-    );
-  });
-  const provider = Object.assign(async () => {
-    if (cached && now() < cached.until) return cached.token;
-    inflight ??= mint().then((token) => {
-      const exp = jwtExpiryMs(token);
-      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
-      return token;
-    }).finally(() => {
-      inflight = null;
-    });
-    return inflight;
-  }, {
-    invalidate: () => {
-      cached = null;
-    }
-  });
-  return provider;
-}
-function metadataTokenProvider(opts) {
-  const now = opts.now ?? Date.now;
-  const doFetch = opts.fetch ?? ((u, i) => fetch(u, i));
-  const timeoutMs = opts.timeoutMs ?? 5e3;
-  if (!opts.audience) throw new Error("RELAY_AUTH=metadata needs RELAY_URL as the token audience");
-  const url = new URL(METADATA_IDENTITY_PATH, opts.base ?? METADATA_BASE);
-  url.searchParams.set("audience", opts.audience);
-  url.searchParams.set("format", "full");
-  const target = url.toString();
-  let cached = null;
-  let inflight = null;
-  const mint = async () => {
-    let res;
-    try {
-      res = await doFetch(target, {
-        method: "GET",
-        headers: { "Metadata-Flavor": "Google" },
-        redirect: "error",
-        signal: AbortSignal.timeout(timeoutMs)
-      });
-    } catch {
-      throw new Error("the metadata server did not answer (RELAY_AUTH=metadata runs only on Google Cloud)");
-    }
-    const text = await res.text().catch(() => "");
-    if (!res.ok) throw new Error(`the metadata server refused an identity token (${res.status})`);
-    const token = text.trim();
-    if (token.length > METADATA_OUTPUT_LIMIT || !JWT_RE.test(token)) throw new Error("the metadata server did not return an ID token");
-    return token;
-  };
-  return Object.assign(async () => {
-    if (cached && now() < cached.until) return cached.token;
-    inflight ??= mint().then((token) => {
-      const exp = jwtExpiryMs(token);
-      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
-      return token;
-    }).finally(() => {
-      inflight = null;
-    });
-    return inflight;
-  }, {
-    invalidate: () => {
-      cached = null;
-    }
-  });
-}
-function authModeFromEnv(env) {
-  const explicit = configValue(env.RELAY_AUTH);
-  if (explicit === void 0) return credentialFileExists(credentialsPath(env)) ? "credential" : "google";
-  if (explicit !== "credential" && explicit !== "google" && explicit !== "token" && explicit !== "metadata") {
-    throw new Error('RELAY_AUTH must be "credential", "google" or "token" (or "metadata" on Google Cloud)');
-  }
-  return explicit;
-}
-function credentialTokenProvider(path, bound) {
-  const relay = normaliseRelayUrl(bound.relay_url);
-  return Object.assign(
-    () => {
-      const stored = readCredential(path);
-      if (!stored) throw new NotConnected();
-      if (stored.relay_url !== relay || stored.team !== bound.team) {
-        throw new NotConnected("you signed in to another relay or team since this started: restart it");
-      }
-      return stored.credential;
-    },
-    { kind: "credential", path }
-  );
-}
-function connectionFromEnv(env, gcloud = {}) {
-  const explicitMode = configValue(env.RELAY_AUTH) !== void 0;
-  const mode = authModeFromEnv(env);
-  if (mode === "credential") {
-    const path = credentialsPath(env);
-    const stored = readCredential(path);
-    if (!stored) throw new NotConnected();
-    const envUrl = configValue(env.RELAY_URL);
-    if (envUrl !== void 0) {
-      let same = false;
-      try {
-        same = normaliseRelayUrl(envUrl) === stored.relay_url;
-      } catch {
-        same = false;
-      }
-      if (!same) {
-        throw new Error("RELAY_URL is not the relay you signed in to: unset it, or run /team-relay:logout and then /team-relay:login to sign in to it");
-      }
-    }
-    const envTeam = configValue(env.RELAY_TEAM);
-    if (envTeam !== void 0 && envTeam !== stored.team) {
-      throw new Error("RELAY_TEAM is not the team you signed in to: unset it, or run /team-relay:login again");
-    }
-    return { mode, url: stored.relay_url, team: stored.team, member: stored.member, token: credentialTokenProvider(path, stored) };
-  }
-  const team = configValue(env.RELAY_TEAM);
-  if (!team) {
-    if (!explicitMode) throw new NotConnected();
-    throw new Error("RELAY_TEAM must be set");
-  }
-  const url = configValue(env.RELAY_URL) ?? (mode === "google" ? defaultRelayUrl() : null) ?? "";
-  let token;
-  if (mode === "token") token = tokenProviderFromEnv(env);
-  else if (mode === "metadata") token = metadataTokenProvider({ audience: configValue(env.RELAY_URL) ?? "" });
-  else {
-    const account = configValue(env.RELAY_GCLOUD_ACCOUNT);
-    token = gcloudTokenProvider({ env, ...gcloud, ...account !== void 0 ? { account } : {} });
-  }
-  return { mode, url, team, token };
-}
-var RelayError, RelayNetworkError, TOKEN_REFRESH_MARGIN_MS, JWT_RE, ACCOUNT_RE, GCLOUD_OUTPUT_LIMIT, METADATA_BASE, METADATA_IDENTITY_PATH, METADATA_OUTPUT_LIMIT, NotConnected;
-var init_relay_client = __esm({
-  "src/relay-client.ts"() {
-    "use strict";
-    init_credentials();
-    init_relay_client_core();
-    init_relay_default();
-    RelayError = class extends Error {
-      status;
-      code;
-      detail;
-      /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
-      retryAfter;
-      constructor(status, code, detail, retryAfter) {
-        super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
-        this.name = "RelayError";
-        this.status = status;
-        this.code = code;
-        this.detail = detail;
-        this.retryAfter = retryAfter;
-      }
-    };
-    RelayNetworkError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "RelayNetworkError";
-      }
-    };
-    TOKEN_REFRESH_MARGIN_MS = 5 * 6e4;
-    JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
-    ACCOUNT_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
-    GCLOUD_OUTPUT_LIMIT = 64 * 1024;
-    METADATA_BASE = "http://metadata.google.internal";
-    METADATA_IDENTITY_PATH = "/computeMetadata/v1/instance/service-accounts/default/identity";
-    METADATA_OUTPUT_LIMIT = 16 * 1024;
-    NotConnected = class extends Error {
-      constructor(message = "Not connected: run /team-relay:login") {
-        super(message);
-        this.name = "NotConnected";
-      }
-    };
-  }
-});
 
 // node_modules/.pnpm/yaml@2.9.1/node_modules/yaml/dist/nodes/identity.js
 var require_identity = __commonJS({
@@ -15227,8 +14798,404 @@ import { join as join6 } from "node:path";
 import { chmodSync as chmodSync3, mkdirSync as mkdirSync2, mkdtempSync as mkdtempSync2, rmSync as rmSync3, writeFileSync } from "node:fs";
 import { basename as basename3, dirname as dirname3, isAbsolute as isAbsolute5, join as join5, resolve as resolvePath } from "node:path";
 
+// src/relay-client.ts
+import { execFile } from "node:child_process";
+import { readFileSync as readFileSync3 } from "node:fs";
+
+// src/credentials.ts
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeSync
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
+
+// src/relay-client-core.ts
+var TEAM_RE = /^[a-z][a-z0-9_-]{1,31}$/;
+var MEMBER_RE = /^[a-z][a-z0-9_]{1,31}$/;
+var LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+function parseRelayUrl(raw) {
+  if (!raw) throw new Error("RELAY_URL must be set");
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("RELAY_URL is not a valid URL");
+  }
+  if (url.username || url.password) throw new Error("RELAY_URL must not carry credentials");
+  if (url.search || url.hash) throw new Error("RELAY_URL must not carry a query or fragment");
+  if (url.protocol === "https:") return url;
+  if (url.protocol === "http:" && LOOPBACK.has(url.hostname)) return url;
+  throw new Error("RELAY_URL must be https (plain http is allowed only to localhost)");
+}
+
+// src/credentials.ts
+var CREDENTIAL_RE = /^trc_[A-Za-z0-9_-]{43}$/;
+var EMAIL_RE = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})+$/;
+var CREDENTIALS_DIR = "team-relay";
+var CREDENTIALS_FILE = "credentials.json";
+var MAX_FILE_BYTES = 16 * 1024;
+var CredentialFileError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "CredentialFileError";
+  }
+};
+function credentialsPath(env = process.env) {
+  const explicit = env.RELAY_CREDENTIALS_FILE?.trim();
+  if (explicit) {
+    if (!isAbsolute(explicit)) throw new CredentialFileError("RELAY_CREDENTIALS_FILE must be an absolute path");
+    return explicit;
+  }
+  const xdg = env.XDG_CONFIG_HOME?.trim();
+  const base = xdg && isAbsolute(xdg) ? xdg : join(env.HOME?.trim() || homedir(), ".config");
+  return join(base, CREDENTIALS_DIR, CREDENTIALS_FILE);
+}
+function uid() {
+  return typeof process.getuid === "function" ? process.getuid() : null;
+}
+function checkOwnedPrivate(st, what, kind) {
+  if (st.isSymbolicLink()) throw new CredentialFileError(`${what} is a symbolic link; refusing to use it`);
+  if (kind === "file" ? !st.isFile() : !st.isDirectory()) throw new CredentialFileError(`${what} is not a ${kind}; refusing to use it`);
+  const me = uid();
+  if (me !== null && st.uid !== me) throw new CredentialFileError(`${what} is owned by another user; refusing to use it`);
+  if ((st.mode & 63) !== 0) {
+    const mode = (st.mode & 511).toString(8).padStart(3, "0");
+    throw new CredentialFileError(
+      `${what} has mode ${mode}, readable or writable by others; refusing to use it (run /team-relay:logout and /team-relay:login again, or chmod ${kind === "file" ? "600" : "700"} it)`
+    );
+  }
+}
+var RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+function normaliseRelayUrl(raw) {
+  const url = parseRelayUrl(raw);
+  const path = url.pathname.replace(/\/+$/, "");
+  return `${url.protocol}//${url.host}${path}`;
+}
+function parseStoredCredential(raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new CredentialFileError("the credential file is not a JSON object");
+  const c = raw;
+  const { relay_url, team, member, credential, expires_at, email } = c;
+  if (typeof relay_url !== "string") throw new CredentialFileError("the credential file has no relay_url");
+  let url;
+  try {
+    url = normaliseRelayUrl(relay_url);
+  } catch {
+    throw new CredentialFileError("the credential file has an invalid relay_url");
+  }
+  if (typeof team !== "string" || !TEAM_RE.test(team)) throw new CredentialFileError("the credential file has an invalid team");
+  if (typeof member !== "string" || !MEMBER_RE.test(member)) throw new CredentialFileError("the credential file has an invalid member");
+  if (typeof credential !== "string" || !CREDENTIAL_RE.test(credential)) throw new CredentialFileError("the credential file has an invalid credential");
+  if (expires_at !== void 0 && expires_at !== null && (typeof expires_at !== "string" || !RFC3339.test(expires_at))) {
+    throw new CredentialFileError("the credential file has an invalid expires_at");
+  }
+  if (email !== void 0 && email !== null && (typeof email !== "string" || email.length > 254 || !EMAIL_RE.test(email))) {
+    throw new CredentialFileError("the credential file has an invalid email");
+  }
+  return {
+    relay_url: url,
+    team,
+    member,
+    credential,
+    expires_at: typeof expires_at === "string" ? expires_at : null,
+    ...typeof email === "string" ? { email } : {}
+  };
+}
+function readCredential(path) {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (err) {
+    if (err.code === "ENOENT" || err.code === "ENOTDIR") return null;
+    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
+  }
+  checkOwnedPrivate(lstatSync(dirname(path)), "the credential directory", "directory");
+  checkOwnedPrivate(st, "the credential file", "file");
+  if (st.size > MAX_FILE_BYTES) throw new CredentialFileError("the credential file is too large");
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    throw new CredentialFileError(`cannot read the credential file (${err.code ?? "error"})`);
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new CredentialFileError("the credential file is not valid JSON");
+  }
+  return parseStoredCredential(json);
+}
+function credentialFileExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// src/relay-default.ts
+import { readFileSync as readFileSync2 } from "node:fs";
+import { fileURLToPath } from "node:url";
+function defaultRelayFile() {
+  return fileURLToPath(new URL("../relay.default.json", import.meta.url));
+}
+function defaultRelayUrl(file = defaultRelayFile()) {
+  try {
+    const raw = JSON.parse(readFileSync2(file, "utf8"));
+    if (typeof raw.relay_url !== "string") return null;
+    parseRelayUrl(raw.relay_url);
+    return raw.relay_url;
+  } catch {
+    return null;
+  }
+}
+
+// src/relay-client.ts
+var RelayError = class extends Error {
+  status;
+  code;
+  detail;
+  /** The relay's Retry-After, in whole seconds (0..RETRY_AFTER_MAX_S), when it sent one. */
+  retryAfter;
+  constructor(status, code, detail, retryAfter) {
+    super(`relay ${status} ${code}${detail ? `: ${detail}` : ""}`);
+    this.name = "RelayError";
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+    this.retryAfter = retryAfter;
+  }
+};
+var RelayNetworkError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RelayNetworkError";
+  }
+};
+function configValue(v) {
+  if (v === void 0) return void 0;
+  const t = v.trim();
+  if (!t || /^\$\{user_config\.[A-Za-z0-9_]+\}$/.test(t)) return void 0;
+  return t;
+}
+function staticTokenProvider(read) {
+  return Object.assign(typeof read === "string" ? () => read : read, { kind: "static" });
+}
+function tokenProviderFromEnv(env) {
+  const file = configValue(env.RELAY_TOKEN_FILE);
+  if (file) {
+    return staticTokenProvider(() => {
+      let raw;
+      try {
+        raw = readFileSync3(file, "utf8");
+      } catch (err) {
+        throw new Error(`cannot read RELAY_TOKEN_FILE (${err.code ?? "error"})`);
+      }
+      const token2 = raw.replace(/[\r\n]+$/, "");
+      if (!token2) throw new Error("RELAY_TOKEN_FILE is empty");
+      return token2;
+    });
+  }
+  const token = configValue(env.RELAY_TOKEN);
+  if (!token) throw new Error('RELAY_AUTH is "token", so RELAY_TOKEN or RELAY_TOKEN_FILE must be set');
+  return staticTokenProvider(token);
+}
+var TOKEN_REFRESH_MARGIN_MS = 5 * 6e4;
+var JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+var ACCOUNT_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
+var GCLOUD_OUTPUT_LIMIT = 64 * 1024;
+function checkGcloudAccount(account) {
+  if (account.length > 254 || !ACCOUNT_RE.test(account)) {
+    throw new Error("RELAY_GCLOUD_ACCOUNT must be an account email address");
+  }
+  return account;
+}
+function jwtExpiryMs(token) {
+  const payload = token.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return typeof claims.exp === "number" && Number.isFinite(claims.exp) ? claims.exp * 1e3 : null;
+  } catch {
+    return null;
+  }
+}
+function scrub(text) {
+  return text.replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/ya29\.[A-Za-z0-9_.-]+/g, "[redacted]").replace(/[\x00-\x1f\x7f]+/g, " ").trim().slice(0, 200);
+}
+function gcloudTokenProvider(opts = {}) {
+  const now = opts.now ?? Date.now;
+  const env = opts.env ?? process.env;
+  const timeoutMs = opts.timeoutMs ?? 3e4;
+  const args = ["auth", "print-identity-token"];
+  if (opts.account !== void 0) args.push(`--account=${checkGcloudAccount(opts.account)}`);
+  let cached = null;
+  let inflight = null;
+  const mint = () => new Promise((resolve, reject) => {
+    execFile(
+      "gcloud",
+      args,
+      { env, timeout: timeoutMs, maxBuffer: GCLOUD_OUTPUT_LIMIT, shell: false, windowsHide: true, encoding: "utf8" },
+      (err, stdout, stderr) => {
+        if (err) {
+          const e = err;
+          if (e.code === "ENOENT") return reject(new Error("gcloud was not found on PATH (RELAY_AUTH=google needs the Google Cloud CLI)"));
+          if (e.killed) return reject(new Error("gcloud auth print-identity-token timed out"));
+          const why = scrub(String(stderr ?? "").split("\n").find((l) => l.trim()) ?? "");
+          return reject(new Error(`gcloud auth print-identity-token failed${why ? `: ${why}` : ""}`));
+        }
+        const token = String(stdout).trim();
+        if (!JWT_RE.test(token)) return reject(new Error("gcloud auth print-identity-token did not print an ID token"));
+        resolve(token);
+      }
+    );
+  });
+  const provider = Object.assign(async () => {
+    if (cached && now() < cached.until) return cached.token;
+    inflight ??= mint().then((token) => {
+      const exp = jwtExpiryMs(token);
+      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
+      return token;
+    }).finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  }, {
+    invalidate: () => {
+      cached = null;
+    }
+  });
+  return provider;
+}
+var METADATA_BASE = "http://metadata.google.internal";
+var METADATA_IDENTITY_PATH = "/computeMetadata/v1/instance/service-accounts/default/identity";
+var METADATA_OUTPUT_LIMIT = 16 * 1024;
+function metadataTokenProvider(opts) {
+  const now = opts.now ?? Date.now;
+  const doFetch = opts.fetch ?? ((u, i) => fetch(u, i));
+  const timeoutMs = opts.timeoutMs ?? 5e3;
+  if (!opts.audience) throw new Error("RELAY_AUTH=metadata needs RELAY_URL as the token audience");
+  const url = new URL(METADATA_IDENTITY_PATH, opts.base ?? METADATA_BASE);
+  url.searchParams.set("audience", opts.audience);
+  url.searchParams.set("format", "full");
+  const target = url.toString();
+  let cached = null;
+  let inflight = null;
+  const mint = async () => {
+    let res;
+    try {
+      res = await doFetch(target, {
+        method: "GET",
+        headers: { "Metadata-Flavor": "Google" },
+        redirect: "error",
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+    } catch {
+      throw new Error("the metadata server did not answer (RELAY_AUTH=metadata runs only on Google Cloud)");
+    }
+    const text = await res.text().catch(() => "");
+    if (!res.ok) throw new Error(`the metadata server refused an identity token (${res.status})`);
+    const token = text.trim();
+    if (token.length > METADATA_OUTPUT_LIMIT || !JWT_RE.test(token)) throw new Error("the metadata server did not return an ID token");
+    return token;
+  };
+  return Object.assign(async () => {
+    if (cached && now() < cached.until) return cached.token;
+    inflight ??= mint().then((token) => {
+      const exp = jwtExpiryMs(token);
+      cached = exp !== null && exp - TOKEN_REFRESH_MARGIN_MS > now() ? { token, until: exp - TOKEN_REFRESH_MARGIN_MS } : null;
+      return token;
+    }).finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  }, {
+    invalidate: () => {
+      cached = null;
+    }
+  });
+}
+function authModeFromEnv(env) {
+  const explicit = configValue(env.RELAY_AUTH);
+  if (explicit === void 0) return credentialFileExists(credentialsPath(env)) ? "credential" : "google";
+  if (explicit !== "credential" && explicit !== "google" && explicit !== "token" && explicit !== "metadata") {
+    throw new Error('RELAY_AUTH must be "credential", "google" or "token" (or "metadata" on Google Cloud)');
+  }
+  return explicit;
+}
+var NotConnected = class extends Error {
+  constructor(message = "Not connected: run /team-relay:login") {
+    super(message);
+    this.name = "NotConnected";
+  }
+};
+function credentialTokenProvider(path, bound) {
+  const relay = normaliseRelayUrl(bound.relay_url);
+  return Object.assign(
+    () => {
+      const stored = readCredential(path);
+      if (!stored) throw new NotConnected();
+      if (stored.relay_url !== relay || stored.team !== bound.team) {
+        throw new NotConnected("you signed in to another relay or team since this started: restart it");
+      }
+      return stored.credential;
+    },
+    { kind: "credential", path }
+  );
+}
+function connectionFromEnv(env, gcloud = {}) {
+  const explicitMode = configValue(env.RELAY_AUTH) !== void 0;
+  const mode = authModeFromEnv(env);
+  if (mode === "credential") {
+    const path = credentialsPath(env);
+    const stored = readCredential(path);
+    if (!stored) throw new NotConnected();
+    const envUrl = configValue(env.RELAY_URL);
+    if (envUrl !== void 0) {
+      let same = false;
+      try {
+        same = normaliseRelayUrl(envUrl) === stored.relay_url;
+      } catch {
+        same = false;
+      }
+      if (!same) {
+        throw new Error("RELAY_URL is not the relay you signed in to: unset it, or run /team-relay:logout and then /team-relay:login to sign in to it");
+      }
+    }
+    const envTeam = configValue(env.RELAY_TEAM);
+    if (envTeam !== void 0 && envTeam !== stored.team) {
+      throw new Error("RELAY_TEAM is not the team you signed in to: unset it, or run /team-relay:login again");
+    }
+    return { mode, url: stored.relay_url, team: stored.team, member: stored.member, token: credentialTokenProvider(path, stored) };
+  }
+  const team = configValue(env.RELAY_TEAM);
+  if (!team) {
+    if (!explicitMode) throw new NotConnected();
+    throw new Error("RELAY_TEAM must be set");
+  }
+  const url = configValue(env.RELAY_URL) ?? (mode === "google" ? defaultRelayUrl() : null) ?? "";
+  let token;
+  if (mode === "token") token = tokenProviderFromEnv(env);
+  else if (mode === "metadata") token = metadataTokenProvider({ audience: configValue(env.RELAY_URL) ?? "" });
+  else {
+    const account = configValue(env.RELAY_GCLOUD_ACCOUNT);
+    token = gcloudTokenProvider({ env, ...gcloud, ...account !== void 0 ? { account } : {} });
+  }
+  return { mode, url, team, token };
+}
+
 // src/active.ts
-init_relay_client();
 var READ_LIMIT = 64 * 1024;
 
 // src/answering-lock.ts
@@ -15244,7 +15211,6 @@ function configDir(env) {
 var MAX_WAIT_MS = 30 * 6e4;
 
 // src/notify.ts
-init_relay_client();
 var DATA_JSON_LIMIT = 16 * 1024;
 function neutraliseChannelTags(text) {
   return text.replace(/<(\/?)(channel)/gi, "&lt;$1$2");
@@ -15265,7 +15231,6 @@ var CONTENT_SECURITY_POLICY = [
 ].join("; ");
 
 // src/boundaries-rule.ts
-var REPO_ID_MAX = Number.MAX_SAFE_INTEGER;
 var BOUNDARIES_VERSION_MAX = 2 ** 31 - 1;
 
 // src/deny-list.ts
@@ -15390,25 +15355,10 @@ function credentialHit(p, ctx) {
   return null;
 }
 
-// src/drive-locate.ts
-var DEFAULT_LOCATE_LIMITS = {
-  rootsPerMount: 50,
-  depth: 8,
-  hintDirs: 5e3,
-  blindReads: 300,
-  blindMs: 1e4,
-  verifyMs: 6e4,
-  notFoundMs: 10 * 6e4
-};
-
-// src/member-folders.ts
-init_relay_client_core();
-
 // src/scope.ts
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { basename as basename2, dirname as dirname2, isAbsolute as isAbsolute3, join as join3, normalize as normalize2 } from "node:path";
-init_credentials();
 function relayCredentialDirs(env) {
   const dirs = [configDir(env)];
   try {
@@ -15487,10 +15437,13 @@ function inGitWorkTree(path, homeReal) {
 // src/member-folders.ts
 var MAX_FILE_BYTES2 = 256 * 1024;
 
-// src/manifest.ts
-var import_yaml = __toESM(require_dist(), 1);
-var import__ = __toESM(require__(), 1);
-import { readFileSync as readFileSync4 } from "node:fs";
+// src/boundary-set.ts
+var MAX_WALK_FILE_BYTES = 5 * 1024 * 1024;
+var ANY_DEPTH_RES = ANY_DEPTH.map((rule) => globRe(rule.replace(/^\*\*\//, "").replace(/\/\*\*$/, "")));
+function quotedOwnerText(text, limit) {
+  const flat = neutraliseChannelTags(text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim());
+  return JSON.stringify(flat.length <= limit ? flat : flat.slice(0, limit));
+}
 
 // node_modules/.pnpm/re2js@2.8.6/node_modules/re2js/build/index.js
 var RE2Flags = class RE2Flags2 {
@@ -21787,6 +21740,280 @@ var RE2JS = class RE2JS2 {
   }
 };
 
+// src/secret-screen.ts
+var PREFIXED = [
+  { kind: "a private key", re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/ },
+  { kind: "a PGP private key", re: /-----BEGIN PGP PRIVATE KEY BLOCK-----/ },
+  { kind: "a key or certificate body", re: /\bMI[IGH][A-Za-z0-9+/]{40,}/ },
+  { kind: "an AWS access key id", re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[0-9A-Z]{16}\b/ },
+  { kind: "a GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\b/ },
+  { kind: "a GitLab token", re: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },
+  { kind: "a Slack token", re: /\bxox[abprsoe]-[A-Za-z0-9-]{10,}\b/ },
+  { kind: "a Slack webhook", re: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]{20,}/ },
+  { kind: "an Anthropic API key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/ },
+  { kind: "an OpenAI-style API key", re: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/ },
+  { kind: "a Stripe key", re: /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b/ },
+  { kind: "a Stripe webhook secret", re: /\bwhsec_[A-Za-z0-9]{24,}\b/ },
+  { kind: "a Google API key", re: /\bAIza[0-9A-Za-z_-]{35}\b/ },
+  { kind: "a Google OAuth token", re: /\bya29\.[0-9A-Za-z_-]{20,}/ },
+  { kind: "a Google OAuth client secret", re: /\bGOCSPX-[A-Za-z0-9_-]{20,}/ },
+  { kind: "a Google service account key", re: /"private_key_id"\s*:\s*"[0-9a-f]{20,}"/ },
+  { kind: "an npm token", re: /\bnpm_[A-Za-z0-9]{36}\b/ },
+  { kind: "a PyPI token", re: /\bpypi-[A-Za-z0-9_-]{50,}/ },
+  { kind: "a SendGrid key", re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/ },
+  { kind: "a Twilio key", re: /\bSK[0-9a-fA-F]{32}\b/ },
+  { kind: "a Hugging Face token", re: /\bhf_[A-Za-z0-9]{30,}\b/ },
+  { kind: "a DigitalOcean token", re: /\bdo[oprs]_v1_[a-f0-9]{64}\b/ },
+  { kind: "a Shopify token", re: /\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b/ },
+  { kind: "an Azure storage key", re: /AccountKey=[A-Za-z0-9+/=]{40,}/ },
+  { kind: "a team relay credential", re: /\btrc_[A-Za-z0-9_-]{43}\b/ },
+  { kind: "a JSON web token", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/ },
+  { kind: "a basic-auth header", re: /\bAuthorization:\s*(?:Basic|Bearer)\s+[A-Za-z0-9+/=._-]{12,}/i }
+];
+var INVISIBLE = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0]/g;
+var CONFUSABLES = {
+  "\u0410": "A",
+  "\u0412": "B",
+  "\u0415": "E",
+  "\u041A": "K",
+  "\u041C": "M",
+  "\u041D": "H",
+  "\u041E": "O",
+  "\u0420": "P",
+  "\u0421": "C",
+  "\u0422": "T",
+  "\u0425": "X",
+  "\u0423": "Y",
+  "\u0405": "S",
+  "\u0406": "I",
+  "\u0408": "J",
+  "\u0500": "d",
+  "\u0430": "a",
+  "\u0432": "b",
+  "\u0435": "e",
+  "\u043A": "k",
+  "\u043C": "m",
+  "\u043D": "h",
+  "\u043E": "o",
+  "\u0440": "p",
+  "\u0441": "c",
+  "\u0442": "t",
+  "\u0445": "x",
+  "\u0443": "y",
+  "\u0455": "s",
+  "\u0456": "i",
+  "\u0458": "j",
+  "\u04BB": "h",
+  "\u0501": "d",
+  "\u051B": "q",
+  "\u051D": "w",
+  "\u04CF": "l",
+  "\u0391": "A",
+  "\u0392": "B",
+  "\u0395": "E",
+  "\u0396": "Z",
+  "\u0397": "H",
+  "\u0399": "I",
+  "\u039A": "K",
+  "\u039C": "M",
+  "\u039D": "N",
+  "\u039F": "O",
+  "\u03A1": "P",
+  "\u03A4": "T",
+  "\u03A5": "Y",
+  "\u03A7": "X",
+  "\u03BF": "o",
+  "\u03BD": "v",
+  "\u03B1": "a",
+  "\u03B9": "i",
+  "\u03BA": "k",
+  "\u03C1": "p",
+  "\u03C4": "t",
+  "\u03C5": "u",
+  "\u03C7": "x"
+};
+function normalise(text) {
+  let out = "";
+  for (const c of text.normalize("NFKC").replace(INVISIBLE, "")) out += CONFUSABLES[c] ?? c;
+  return out;
+}
+function joinLines(text) {
+  return text.replace(/(?<=[A-Za-z0-9+/_=.-]{4})[ \t]*\r?\n[ \t>*-]*(?=[A-Za-z0-9+/_=-]{4})/g, "");
+}
+function closeUp(text) {
+  return text.replace(/(?:\S[ \t\u00A0]){7,}\S/g, (run2) => run2.replace(/[ \t\u00A0]/g, ""));
+}
+var SECRET_KEY_SUBSTRING = /PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API[_-]?KEY|APIKEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|CLIENT[_-]?SECRET|AUTH[_-]?KEY|SIGNING[_-]?KEY|ENCRYPTION[_-]?KEY|SESSION[_-]?KEY|DSN|CONN(?:ECTION)?[_-]?STRING/;
+var SECRET_KEY_WORDS = /* @__PURE__ */ new Set(["pass", "pwd", "pw", "passwd", "passcode", "passphrase", "creds", "pat"]);
+function isSecretKey(key) {
+  const k = normalise(key);
+  if (SECRET_KEY_SUBSTRING.test(k.toUpperCase())) return true;
+  const words = k.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[\s_.:-]+/).map((w) => w.toLowerCase()).filter(Boolean);
+  return words.some((w) => SECRET_KEY_WORDS.has(w));
+}
+var ASSIGNMENT = /(?:^|[\s"'`{,;(])["'`]?([A-Za-z_][A-Za-z0-9_.-]{0,79})["'`]?\s*(?::=|=>|=|:)\s*["'`]?([^\s"'`,;}]+)/gm;
+function placeholder(value, minLength = 6) {
+  const v = value.trim().replace(/^["'`]|["'`]$/g, "");
+  if (v.length < minLength) return true;
+  if (/^(?:x+|\*+|•+|\.+|-+|_+|<[^>]*>|\{\{.*\}\}|\$\{[^}]*\}?|\$[A-Z_][A-Z0-9_]*|%[A-Z_]+%|null|none|nil|true|false|undefined|changeme|change_me|your[_-]?\w*|example\w*|placeholder|redacted|\[redacted\]|todo|tbd|secret|password|token)$/i.test(v)) {
+    return true;
+  }
+  if (/^(?:process\.env|os\.environ|env\.|secrets\.|vault:|projects\/[^/]+\/secrets\/)/i.test(v)) return true;
+  return false;
+}
+var PROSE = /\b(passwords?|passphrase|passcode|passwd|pwd|pass|pin|secret|token|(?:api|access|secret|private|signing)[ _-]?key|key)\b(?:\s+(?:for|of|to|on|in|at)(?:\s+[^\s.,;:!?]{1,40}){1,3}?)?\s+(?:is|was|=|would be|will be|should be|reads|equals|is set to|was set to)\s*:?\s*(["'`“”‘’]?)([^\s"'`“”‘’]{1,256})/gi;
+var PROSE_WORDS = new Set(
+  "a an the not no now also still only just then this that these those it its your our my his her their what whatever which stored kept saved held set reset changed rotated managed required needed used missing wrong invalid expired correct same different located encrypted hashed salted sent provided generated defined configured found empty blank shown visible hidden secure private public available unavailable being from at on in under via inside outside there here too very rotated important optional mandatory case-sensitive sensitive unknown unset known given shared read loaded fetched pulled injected passed checked verified validated refreshed renewed revoked issued signed short long weak strong random different".split(" ")
+);
+function proseSecret(word, quoted, rawValue) {
+  const value = rawValue.replace(/[.,;:!?)\]]+$/, "");
+  if (value === "" || PROSE_WORDS.has(value.toLowerCase())) return false;
+  if (placeholder(value, 4)) return false;
+  const w = word.toLowerCase();
+  const passwordLike = /^(?:passwords?|passphrase|passcode|passwd|pwd|pass|pin|secret)$/.test(w);
+  if (quoted || passwordLike) return true;
+  return value.length >= 8 && (/[0-9]/.test(value) || /[a-z]/.test(value) && /[A-Z]/.test(value) || /[_+/=!@#$%^&*-]/.test(value));
+}
+var URL_USERINFO = /(?:\b[a-z][a-z0-9+.-]{0,20}:)?\/\/([^\s/?#@"'<>]{1,256})@[^\s/?#@"'<>]{1,255}/gi;
+var URL_PARAM = /[?&;#]([A-Za-z0-9_.-]{1,64})=([^&#\s"'<>]{1,512})/g;
+var SECRET_PARAMS = /* @__PURE__ */ new Set([
+  "key",
+  "sig",
+  "signature",
+  "auth",
+  "access_token",
+  "id_token",
+  "refresh_token",
+  "client_secret",
+  "apikey",
+  "api_key",
+  "x-amz-signature",
+  "x-amz-credential",
+  "x-amz-security-token",
+  "x-goog-signature",
+  "x-goog-credential",
+  "sas",
+  "sv",
+  "code"
+]);
+function decode(s) {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+function urlCredentials(text) {
+  for (const m of text.matchAll(URL_USERINFO)) {
+    const info = m[1] ?? "";
+    const colon = info.indexOf(":");
+    if (colon >= 0) {
+      const password = decode(info.slice(colon + 1));
+      if (password !== "" && !placeholder(password, 1)) return true;
+    } else {
+      const user = decode(info);
+      if (!placeholder(user, 12) && (user.length >= 20 || /[0-9]/.test(user) && /[A-Za-z]/.test(user))) return true;
+    }
+  }
+  for (const m of text.matchAll(URL_PARAM)) {
+    const name = (m[1] ?? "").toLowerCase();
+    if ((SECRET_PARAMS.has(name) || isSecretKey(name)) && !placeholder(decode(m[2] ?? ""))) return true;
+  }
+  return false;
+}
+function entropy(s) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const c of s) counts.set(c, (counts.get(c) ?? 0) + 1);
+  let h = 0;
+  for (const n of counts.values()) {
+    const p = n / s.length;
+    h -= p * Math.log2(p);
+  }
+  return h;
+}
+var CANDIDATE = /[A-Za-z0-9+/_=-]{32,}/g;
+function highEntropy(text) {
+  for (const m of text.matchAll(CANDIDATE)) {
+    const s = m[0].replace(/=+$/, "");
+    if (s.length < 32) continue;
+    if (/^[0-9a-f]+$/i.test(s)) continue;
+    if (!/[0-9]/.test(s) || !/[a-z]/.test(s) || !/[A-Z]/.test(s)) continue;
+    if ((s.match(/\//g) ?? []).length > 2) continue;
+    if (entropy(s) >= 4.3) return true;
+  }
+  return false;
+}
+var HEX = /(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])/g;
+var HEX_GROUPS = /(?<![0-9A-Za-z])(?:[0-9a-fA-F]{2,8}[ :-]){3,}[0-9a-fA-F]{2,8}(?![0-9A-Za-z])/g;
+function hexSecret(text) {
+  const mixed = (s) => /[0-9]/.test(s) && /[a-f]/i.test(s);
+  for (const m of text.matchAll(HEX)) if (mixed(m[0])) return true;
+  for (const m of text.matchAll(HEX_GROUPS)) {
+    const digits = m[0].replace(/[ :-]/g, "");
+    if (digits.length >= 32 && mixed(digits)) return true;
+  }
+  return false;
+}
+var BASE64_PADDED = /(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{14,}={1,2}(?![A-Za-z0-9+/=])/g;
+function paddedBase64(text) {
+  for (const m of text.matchAll(BASE64_PADDED)) {
+    const s = m[0];
+    if (s.length % 4 !== 0) continue;
+    const body = s.replace(/=+$/, "");
+    if (/[0-9]/.test(body) && /[A-Za-z]/.test(body) || /[a-z]/.test(body) && /[A-Z]/.test(body)) return true;
+  }
+  return false;
+}
+function screenForm(text, add) {
+  for (const { kind, re } of PREFIXED) if (re.test(text)) add(kind);
+  for (const m of text.matchAll(ASSIGNMENT)) {
+    if (isSecretKey(m[1] ?? "") && !placeholder(m[2] ?? "")) add("a secret-looking KEY=value pair");
+  }
+  for (const m of text.matchAll(PROSE)) {
+    if (proseSecret(m[1] ?? "", (m[2] ?? "") !== "", m[3] ?? "")) add("a secret stated in words");
+  }
+  if (urlCredentials(text)) add("a URL with credentials");
+  if (hexSecret(text)) add("a long hex string");
+  if (paddedBase64(text)) add("a base64-encoded value");
+  if (highEntropy(text)) add("a long random-looking token");
+}
+function screenSecrets(text) {
+  const found = [];
+  const add = (kind) => {
+    if (!found.some((f) => f.kind === kind)) found.push({ kind });
+  };
+  const norm = normalise(text);
+  const forms = /* @__PURE__ */ new Set([norm, joinLines(norm), closeUp(norm), closeUp(joinLines(norm))]);
+  for (const form of forms) screenForm(form, add);
+  const stripped = norm.replace(/\s+/g, "");
+  for (const { kind, re } of PREFIXED) if (re.test(stripped)) add(kind);
+  return found;
+}
+function screenDraft(text, data) {
+  const parts = [text];
+  if (data !== void 0 && data !== null) parts.push(JSON.stringify(data));
+  return screenSecrets(parts.join("\n"));
+}
+
+// src/snapshot.ts
+var MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
+var MAX_RUN_SNAPSHOT_BYTES = 100 * 1024 * 1024;
+var PID_MAX = 2 ** 31 - 1;
+
+// src/boundary-tools.ts
+var SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
+var SEARCH_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+
+// src/exposed.ts
+import { statSync as statSync2, accessSync, constants } from "node:fs";
+import { isAbsolute as isAbsolute4 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+
+// src/manifest.ts
+var import_yaml = __toESM(require_dist(), 1);
+var import__ = __toESM(require__(), 1);
+import { readFileSync as readFileSync4 } from "node:fs";
+
 // ../schema/manifest.schema.json
 var manifest_schema_default = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -22124,289 +22351,7 @@ function validateOne(name, p, v) {
   }
 }
 
-// src/boundary-set.ts
-var MAX_WALK_FILE_BYTES = 5 * 1024 * 1024;
-var ANY_DEPTH_RES = ANY_DEPTH.map((rule) => globRe(rule.replace(/^\*\*\//, "").replace(/\/\*\*$/, "")));
-function quotedOwnerText(text, limit) {
-  const flat = neutraliseChannelTags(text.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim());
-  return JSON.stringify(flat.length <= limit ? flat : flat.slice(0, limit));
-}
-
-// src/google-drive.ts
-init_credentials();
-var MAX_LINK_FILE_BYTES = 4 * 1024;
-var MAX_TEXT_BYTES = 200 * 1024;
-var MAX_JSON_BYTES = 1024 * 1024;
-var MAX_SHEET_JSON_BYTES = 8 * 1024 * 1024;
-
-// src/secret-screen.ts
-var PREFIXED = [
-  { kind: "a private key", re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----/ },
-  { kind: "a PGP private key", re: /-----BEGIN PGP PRIVATE KEY BLOCK-----/ },
-  { kind: "a key or certificate body", re: /\bMI[IGH][A-Za-z0-9+/]{40,}/ },
-  { kind: "an AWS access key id", re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA|ANVA|AIPA)[0-9A-Z]{16}\b/ },
-  { kind: "a GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\b/ },
-  { kind: "a GitLab token", re: /\bglpat-[A-Za-z0-9_-]{20,}\b/ },
-  { kind: "a Slack token", re: /\bxox[abprsoe]-[A-Za-z0-9-]{10,}\b/ },
-  { kind: "a Slack webhook", re: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]{20,}/ },
-  { kind: "an Anthropic API key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}/ },
-  { kind: "an OpenAI-style API key", re: /\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}/ },
-  { kind: "a Stripe key", re: /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}\b/ },
-  { kind: "a Stripe webhook secret", re: /\bwhsec_[A-Za-z0-9]{24,}\b/ },
-  { kind: "a Google API key", re: /\bAIza[0-9A-Za-z_-]{35}\b/ },
-  { kind: "a Google OAuth token", re: /\bya29\.[0-9A-Za-z_-]{20,}/ },
-  { kind: "a Google OAuth client secret", re: /\bGOCSPX-[A-Za-z0-9_-]{20,}/ },
-  { kind: "a Google service account key", re: /"private_key_id"\s*:\s*"[0-9a-f]{20,}"/ },
-  { kind: "an npm token", re: /\bnpm_[A-Za-z0-9]{36}\b/ },
-  { kind: "a PyPI token", re: /\bpypi-[A-Za-z0-9_-]{50,}/ },
-  { kind: "a SendGrid key", re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/ },
-  { kind: "a Twilio key", re: /\bSK[0-9a-fA-F]{32}\b/ },
-  { kind: "a Hugging Face token", re: /\bhf_[A-Za-z0-9]{30,}\b/ },
-  { kind: "a DigitalOcean token", re: /\bdo[oprs]_v1_[a-f0-9]{64}\b/ },
-  { kind: "a Shopify token", re: /\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b/ },
-  { kind: "an Azure storage key", re: /AccountKey=[A-Za-z0-9+/=]{40,}/ },
-  { kind: "a team relay credential", re: /\btrc_[A-Za-z0-9_-]{43}\b/ },
-  { kind: "a JSON web token", re: /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/ },
-  { kind: "a basic-auth header", re: /\bAuthorization:\s*(?:Basic|Bearer)\s+[A-Za-z0-9+/=._-]{12,}/i }
-];
-var INVISIBLE = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0]/g;
-var CONFUSABLES = {
-  "\u0410": "A",
-  "\u0412": "B",
-  "\u0415": "E",
-  "\u041A": "K",
-  "\u041C": "M",
-  "\u041D": "H",
-  "\u041E": "O",
-  "\u0420": "P",
-  "\u0421": "C",
-  "\u0422": "T",
-  "\u0425": "X",
-  "\u0423": "Y",
-  "\u0405": "S",
-  "\u0406": "I",
-  "\u0408": "J",
-  "\u0500": "d",
-  "\u0430": "a",
-  "\u0432": "b",
-  "\u0435": "e",
-  "\u043A": "k",
-  "\u043C": "m",
-  "\u043D": "h",
-  "\u043E": "o",
-  "\u0440": "p",
-  "\u0441": "c",
-  "\u0442": "t",
-  "\u0445": "x",
-  "\u0443": "y",
-  "\u0455": "s",
-  "\u0456": "i",
-  "\u0458": "j",
-  "\u04BB": "h",
-  "\u0501": "d",
-  "\u051B": "q",
-  "\u051D": "w",
-  "\u04CF": "l",
-  "\u0391": "A",
-  "\u0392": "B",
-  "\u0395": "E",
-  "\u0396": "Z",
-  "\u0397": "H",
-  "\u0399": "I",
-  "\u039A": "K",
-  "\u039C": "M",
-  "\u039D": "N",
-  "\u039F": "O",
-  "\u03A1": "P",
-  "\u03A4": "T",
-  "\u03A5": "Y",
-  "\u03A7": "X",
-  "\u03BF": "o",
-  "\u03BD": "v",
-  "\u03B1": "a",
-  "\u03B9": "i",
-  "\u03BA": "k",
-  "\u03C1": "p",
-  "\u03C4": "t",
-  "\u03C5": "u",
-  "\u03C7": "x"
-};
-function normalise(text) {
-  let out = "";
-  for (const c of text.normalize("NFKC").replace(INVISIBLE, "")) out += CONFUSABLES[c] ?? c;
-  return out;
-}
-function joinLines(text) {
-  return text.replace(/(?<=[A-Za-z0-9+/_=.-]{4})[ \t]*\r?\n[ \t>*-]*(?=[A-Za-z0-9+/_=-]{4})/g, "");
-}
-function closeUp(text) {
-  return text.replace(/(?:\S[ \t\u00A0]){7,}\S/g, (run2) => run2.replace(/[ \t\u00A0]/g, ""));
-}
-var SECRET_KEY_SUBSTRING = /PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API[_-]?KEY|APIKEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|CLIENT[_-]?SECRET|AUTH[_-]?KEY|SIGNING[_-]?KEY|ENCRYPTION[_-]?KEY|SESSION[_-]?KEY|DSN|CONN(?:ECTION)?[_-]?STRING/;
-var SECRET_KEY_WORDS = /* @__PURE__ */ new Set(["pass", "pwd", "pw", "passwd", "passcode", "passphrase", "creds", "pat"]);
-function isSecretKey(key) {
-  const k = normalise(key);
-  if (SECRET_KEY_SUBSTRING.test(k.toUpperCase())) return true;
-  const words = k.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(/[\s_.:-]+/).map((w) => w.toLowerCase()).filter(Boolean);
-  return words.some((w) => SECRET_KEY_WORDS.has(w));
-}
-var ASSIGNMENT = /(?:^|[\s"'`{,;(])["'`]?([A-Za-z_][A-Za-z0-9_.-]{0,79})["'`]?\s*(?::=|=>|=|:)\s*["'`]?([^\s"'`,;}]+)/gm;
-function placeholder(value, minLength = 6) {
-  const v = value.trim().replace(/^["'`]|["'`]$/g, "");
-  if (v.length < minLength) return true;
-  if (/^(?:x+|\*+|•+|\.+|-+|_+|<[^>]*>|\{\{.*\}\}|\$\{[^}]*\}?|\$[A-Z_][A-Z0-9_]*|%[A-Z_]+%|null|none|nil|true|false|undefined|changeme|change_me|your[_-]?\w*|example\w*|placeholder|redacted|\[redacted\]|todo|tbd|secret|password|token)$/i.test(v)) {
-    return true;
-  }
-  if (/^(?:process\.env|os\.environ|env\.|secrets\.|vault:|projects\/[^/]+\/secrets\/)/i.test(v)) return true;
-  return false;
-}
-var PROSE = /\b(passwords?|passphrase|passcode|passwd|pwd|pass|pin|secret|token|(?:api|access|secret|private|signing)[ _-]?key|key)\b(?:\s+(?:for|of|to|on|in|at)(?:\s+[^\s.,;:!?]{1,40}){1,3}?)?\s+(?:is|was|=|would be|will be|should be|reads|equals|is set to|was set to)\s*:?\s*(["'`“”‘’]?)([^\s"'`“”‘’]{1,256})/gi;
-var PROSE_WORDS = new Set(
-  "a an the not no now also still only just then this that these those it its your our my his her their what whatever which stored kept saved held set reset changed rotated managed required needed used missing wrong invalid expired correct same different located encrypted hashed salted sent provided generated defined configured found empty blank shown visible hidden secure private public available unavailable being from at on in under via inside outside there here too very rotated important optional mandatory case-sensitive sensitive unknown unset known given shared read loaded fetched pulled injected passed checked verified validated refreshed renewed revoked issued signed short long weak strong random different".split(" ")
-);
-function proseSecret(word, quoted, rawValue) {
-  const value = rawValue.replace(/[.,;:!?)\]]+$/, "");
-  if (value === "" || PROSE_WORDS.has(value.toLowerCase())) return false;
-  if (placeholder(value, 4)) return false;
-  const w = word.toLowerCase();
-  const passwordLike = /^(?:passwords?|passphrase|passcode|passwd|pwd|pass|pin|secret)$/.test(w);
-  if (quoted || passwordLike) return true;
-  return value.length >= 8 && (/[0-9]/.test(value) || /[a-z]/.test(value) && /[A-Z]/.test(value) || /[_+/=!@#$%^&*-]/.test(value));
-}
-var URL_USERINFO = /(?:\b[a-z][a-z0-9+.-]{0,20}:)?\/\/([^\s/?#@"'<>]{1,256})@[^\s/?#@"'<>]{1,255}/gi;
-var URL_PARAM = /[?&;#]([A-Za-z0-9_.-]{1,64})=([^&#\s"'<>]{1,512})/g;
-var SECRET_PARAMS = /* @__PURE__ */ new Set([
-  "key",
-  "sig",
-  "signature",
-  "auth",
-  "access_token",
-  "id_token",
-  "refresh_token",
-  "client_secret",
-  "apikey",
-  "api_key",
-  "x-amz-signature",
-  "x-amz-credential",
-  "x-amz-security-token",
-  "x-goog-signature",
-  "x-goog-credential",
-  "sas",
-  "sv",
-  "code"
-]);
-function decode(s) {
-  try {
-    return decodeURIComponent(s);
-  } catch {
-    return s;
-  }
-}
-function urlCredentials(text) {
-  for (const m of text.matchAll(URL_USERINFO)) {
-    const info = m[1] ?? "";
-    const colon = info.indexOf(":");
-    if (colon >= 0) {
-      const password = decode(info.slice(colon + 1));
-      if (password !== "" && !placeholder(password, 1)) return true;
-    } else {
-      const user = decode(info);
-      if (!placeholder(user, 12) && (user.length >= 20 || /[0-9]/.test(user) && /[A-Za-z]/.test(user))) return true;
-    }
-  }
-  for (const m of text.matchAll(URL_PARAM)) {
-    const name = (m[1] ?? "").toLowerCase();
-    if ((SECRET_PARAMS.has(name) || isSecretKey(name)) && !placeholder(decode(m[2] ?? ""))) return true;
-  }
-  return false;
-}
-function entropy(s) {
-  const counts = /* @__PURE__ */ new Map();
-  for (const c of s) counts.set(c, (counts.get(c) ?? 0) + 1);
-  let h = 0;
-  for (const n of counts.values()) {
-    const p = n / s.length;
-    h -= p * Math.log2(p);
-  }
-  return h;
-}
-var CANDIDATE = /[A-Za-z0-9+/_=-]{32,}/g;
-function highEntropy(text) {
-  for (const m of text.matchAll(CANDIDATE)) {
-    const s = m[0].replace(/=+$/, "");
-    if (s.length < 32) continue;
-    if (/^[0-9a-f]+$/i.test(s)) continue;
-    if (!/[0-9]/.test(s) || !/[a-z]/.test(s) || !/[A-Z]/.test(s)) continue;
-    if ((s.match(/\//g) ?? []).length > 2) continue;
-    if (entropy(s) >= 4.3) return true;
-  }
-  return false;
-}
-var HEX = /(?<![0-9A-Za-z])[0-9a-fA-F]{32,}(?![0-9A-Za-z])/g;
-var HEX_GROUPS = /(?<![0-9A-Za-z])(?:[0-9a-fA-F]{2,8}[ :-]){3,}[0-9a-fA-F]{2,8}(?![0-9A-Za-z])/g;
-function hexSecret(text) {
-  const mixed = (s) => /[0-9]/.test(s) && /[a-f]/i.test(s);
-  for (const m of text.matchAll(HEX)) if (mixed(m[0])) return true;
-  for (const m of text.matchAll(HEX_GROUPS)) {
-    const digits = m[0].replace(/[ :-]/g, "");
-    if (digits.length >= 32 && mixed(digits)) return true;
-  }
-  return false;
-}
-var BASE64_PADDED = /(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{14,}={1,2}(?![A-Za-z0-9+/=])/g;
-function paddedBase64(text) {
-  for (const m of text.matchAll(BASE64_PADDED)) {
-    const s = m[0];
-    if (s.length % 4 !== 0) continue;
-    const body = s.replace(/=+$/, "");
-    if (/[0-9]/.test(body) && /[A-Za-z]/.test(body) || /[a-z]/.test(body) && /[A-Z]/.test(body)) return true;
-  }
-  return false;
-}
-function screenForm(text, add) {
-  for (const { kind, re } of PREFIXED) if (re.test(text)) add(kind);
-  for (const m of text.matchAll(ASSIGNMENT)) {
-    if (isSecretKey(m[1] ?? "") && !placeholder(m[2] ?? "")) add("a secret-looking KEY=value pair");
-  }
-  for (const m of text.matchAll(PROSE)) {
-    if (proseSecret(m[1] ?? "", (m[2] ?? "") !== "", m[3] ?? "")) add("a secret stated in words");
-  }
-  if (urlCredentials(text)) add("a URL with credentials");
-  if (hexSecret(text)) add("a long hex string");
-  if (paddedBase64(text)) add("a base64-encoded value");
-  if (highEntropy(text)) add("a long random-looking token");
-}
-function screenSecrets(text) {
-  const found = [];
-  const add = (kind) => {
-    if (!found.some((f) => f.kind === kind)) found.push({ kind });
-  };
-  const norm = normalise(text);
-  const forms = /* @__PURE__ */ new Set([norm, joinLines(norm), closeUp(norm), closeUp(joinLines(norm))]);
-  for (const form of forms) screenForm(form, add);
-  const stripped = norm.replace(/\s+/g, "");
-  for (const { kind, re } of PREFIXED) if (re.test(stripped)) add(kind);
-  return found;
-}
-function screenDraft(text, data) {
-  const parts = [text];
-  if (data !== void 0 && data !== null) parts.push(JSON.stringify(data));
-  return screenSecrets(parts.join("\n"));
-}
-
-// src/snapshot.ts
-var MAX_SNAPSHOT_BYTES = 10 * 1024 * 1024;
-var MAX_RUN_SNAPSHOT_BYTES = 100 * 1024 * 1024;
-var PID_MAX = 2 ** 31 - 1;
-
-// src/boundary-tools.ts
-var SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
-var SEARCH_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
-
 // src/exposed.ts
-import { statSync as statSync2, accessSync, constants } from "node:fs";
-import { isAbsolute as isAbsolute4 } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
 function envKey(name) {
   return name.toUpperCase();
 }
@@ -22474,7 +22419,6 @@ var REPLY_TOOL = `mcp__${HOST_SERVER}__reply`;
 var REQUEST_APPROVAL_TOOL = `mcp__${HOST_SERVER}__request_approval`;
 var LIST_FILES_TOOL = `mcp__${HOST_SERVER}__list_files`;
 var SEARCH_FILES_TOOL = `mcp__${HOST_SERVER}__search_files`;
-var READ_GOOGLE_FILE_TOOL = `mcp__${HOST_SERVER}__read_google_file`;
 var RUN_LIMIT_MS = 10 * 6e4;
 var MCP_TOOL_TIMEOUT_MS = 35 * 6e4;
 var MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:@[\]-]{0,99}$/;
@@ -22507,8 +22451,7 @@ function boundaryRubric(p) {
     "Answer only questions about the team's topic. If the question is not about it, call mcp__host__reply once with off_topic set to",
     "true and a one-line text, and read nothing.",
     "Answer only from the files you may read and from general knowledge. Find files with mcp__host__list_files and",
-    "mcp__host__search_files, read them with Read, and read Google Docs, Sheets and Slides (.gdoc, .gsheet, .gslides files) with",
-    "mcp__host__read_google_file. Every other file is refused at once; do not try to reach it another way.",
+    "mcp__host__search_files, and read them with Read. Every other file is refused at once; do not try to reach it another way.",
     "When the files do not say, say plainly that you do not know from the files; never guess names, numbers or dates.",
     "Never try to read credentials, keys, tokens, .env files or other secrets, and never put one in a reply.",
     "You cannot run commands, write or edit files, or use the web.",
@@ -22571,7 +22514,7 @@ function childArgs(files, rubricText, model, mode = "folder") {
 }
 var READ_TRAIL_TIMEOUT_S = 10;
 function childSettings(input) {
-  const allow = input.boundaries ? [REPLY_TOOL, LIST_FILES_TOOL, SEARCH_FILES_TOOL, READ_GOOGLE_FILE_TOOL] : [REPLY_TOOL, REQUEST_APPROVAL_TOOL];
+  const allow = input.boundaries ? [REPLY_TOOL, LIST_FILES_TOOL, SEARCH_FILES_TOOL] : [REPLY_TOOL, REQUEST_APPROVAL_TOOL];
   if (!input.boundaries && input.scope.qualifies) allow.push(`Read(${anchored(input.scope.path)}/**)`);
   const deny = [...input.boundaries ? BOUNDARY_DISALLOWED_LIST : CHILD_DISALLOWED_LIST, ...readDenyRulesFor(input.denyFiles, input.denyDirs)];
   const settings = {
@@ -22918,11 +22861,7 @@ if (process.argv[1] && /notify-desktop\.(js|ts)$/.test(process.argv[1])) {
   }).finally(() => process.exit(0));
 }
 
-// src/answer-host.ts
-init_relay_client();
-
 // src/tool-util.ts
-init_relay_client();
 function describeError(err) {
   if (err instanceof RelayError) {
     return `relay refused (${err.status} ${err.code})${err.detail ? `: ${err.detail}` : ""}`;
@@ -23065,7 +23004,6 @@ function draftReasons(d) {
 }
 
 // src/answer-dry-run.ts
-init_relay_client();
 var USAGE = "usage: answer-dry-run.js [--question TEXT] [--run [--offline]]";
 var NOWHERE_RELAY = { mode: "token", url: "http://127.0.0.1:9", team: "demo", token: "dry-run-token" };
 function shellQuote(a) {
@@ -23149,7 +23087,7 @@ async function executeDryRun(p, o) {
       calls.push(`request_approval ${JSON.stringify(q.reason)}`);
       return { ok: true, message: "Noted (dry run)." };
     }
-    if (method === "list_files" || method === "search_files" || method === "read_google_file") {
+    if (method === "list_files" || method === "search_files") {
       calls.push(`${method} -> refused (dry run)`);
       return { ok: false, message: "Dry run: nothing can be read." };
     }
