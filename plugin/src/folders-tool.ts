@@ -1,11 +1,9 @@
-// M10-SPEC §2, §7.1: /team-relay:folders, the `folders` tool of a working session's relay server.
-// It shows the member's local settings for the team they are signed in to (member-folders.ts):
-// repo roots, their own folders, the boundaries version they accepted (M11-SPEC §2: as the relay
-// holds it) and what a newer version adds, and what the answerer would read with them. It adds
-// or removes a repo root or an extra folder.
-//
-// Accepting the team's boundaries is no longer done here (M11-SPEC §2): the member accepts in
-// the console, where only they can, and the `accept` action says where.
+// /team-relay:folders, the `folders` tool of a working session's relay server (13 Nov 2026,
+// local folders only). It lists the folders the member chose for the team they are signed in to
+// (member-folders.ts: one list, at most 20), any an earlier plugin's lists dropped past 20, the
+// team's boundaries version and whether the member accepted it (M11-SPEC §2: as the relay holds
+// it; accepting is done in the console, by the member only), and what the answerer would read.
+// It adds or removes one folder.
 //
 // A change is never the model's to make: every add or remove opens a dialog (MCP elicitation)
 // that says exactly what changes (which folder, resolved) and only the member's choice there
@@ -14,20 +12,18 @@
 
 import type { Elicit } from './approvals-review.js';
 import type { TeamBoundaries } from './boundaries-types.js';
-import { buildAllowedSet, folderText, quotedOwnerText, setSummary, wideningText, type GitCache } from './boundary-set.js';
+import { buildAllowedSet, quotedOwnerText, setSummary, type GitCache } from './boundary-set.js';
 import {
-  acceptedAtVersion,
+  MAX_FOLDERS,
   changeMemberFolders,
-  effectiveBoundaries,
+  droppedSentence,
+  hasAccepted,
   memberFolderProblem,
   memberFoldersPath,
   readMemberSettings,
-  sinceOf,
   teamSettings,
   withTeam,
   writeMemberSettings,
-  type FolderList,
-  type MemberFolders,
   type TeamSettings,
 } from './member-folders.js';
 import { describeError, isPlainObject, toolError, toolJson, type ToolResult } from './tool-util.js';
@@ -35,15 +31,14 @@ import { describeError, isPlainObject, toolError, toolJson, type ToolResult } fr
 export const FOLDERS_TOOL = {
   name: 'folders',
   description:
-    'Show or change where your automatic answerer looks when your team has boundaries (/team-relay:folders): repo roots (folders ' +
-    'searched 3 levels deep for clones of the team\'s GitHub repositories; only files git tracks are read), folders of your own when ' +
-    'the team allows them, and which version of the team\'s boundaries you accepted. action "show" (default) lists them and what they give; ' +
-    '"add_root", "remove_root", "add_folder" and "remove_folder" take a path (absolute or starting with ~/); "accept" says where to ' +
-    'accept the team\'s boundaries (the team console, in the browser). Every change asks the user in a dialog first: only the user decides there.',
+    'Show or change the folders on this Mac your automatic answerer may read for your team (/team-relay:folders): at most ' +
+    `${MAX_FOLDERS}; inside a git repository only the files git tracks are read. action "list" (default) lists them, whether you ` +
+    'accepted your team\'s boundaries and what answers come from; "add" and "remove" take a path (absolute or starting with ~/). ' +
+    'Every change asks the user in a dialog first: only the user decides there.',
   inputSchema: {
     type: 'object',
     properties: {
-      action: { type: 'string', enum: ['show', 'add_root', 'remove_root', 'add_folder', 'remove_folder', 'accept'] },
+      action: { type: 'string', enum: ['list', 'add', 'remove'] },
       path: { type: 'string', minLength: 1, maxLength: 1024 },
     },
     additionalProperties: false,
@@ -74,45 +69,33 @@ function whereToAccept(url: string | null): string {
     : "Accept your team's boundaries in the team console (sign in first with /team-relay:login to see its address). Only you can accept for yourself.";
 }
 
-function describeFolders(v: MemberFolders, env: NodeJS.ProcessEnv) {
-  const one = (raw: string) => {
-    const { path, reason } = memberFolderProblem(raw, env);
-    return { path: raw, resolved: path, ...(reason ? { not_used: reason } : {}) };
+function describeFolders(folders: readonly string[], env: NodeJS.ProcessEnv) {
+  return {
+    folders: folders.map((raw) => {
+      const { path, reason } = memberFolderProblem(raw, env);
+      return { path: raw, resolved: path, ...(reason ? { not_used: reason } : {}) };
+    }),
   };
-  return { repo_roots: v.repo_roots.map(one), extra_folders: v.extra_folders.map(one) };
+}
+
+function droppedPart(v: TeamSettings) {
+  const sentence = droppedSentence(v.dropped);
+  return sentence ? { dropped: v.dropped, dropped_note: sentence } : {};
 }
 
 function teamPart(tb: TeamBoundaries | null, otherTeam = false) {
   if (otherTeam) return { team_boundaries: "unknown (the relay answered with another team's boundaries)" };
   if (!tb) return { team_boundaries: 'unknown (not signed in, or the relay could not be reached)' };
   if (!tb.boundaries) return { team_boundaries: 'none: your team has no boundaries, so your answerer reads only the folder your working session is in (and asks you for anything else)' };
-  const b = tb.boundaries;
-  return {
-    team_boundaries: {
-      version: tb.version,
-      github_orgs: b.github_orgs,
-      // PICKERS-SPEC §2: single repositories and picked Drive folders, when the team has any.
-      ...(b.github_repos.length > 0 ? { github_repos: b.github_repos.map((r) => `${r.org}/${r.repo}`) } : {}),
-      // Owner-written names: data, quoted.
-      ...(b.drive_folders.length > 0 ? { drive_folders: b.drive_folders.map((x) => folderText(x, true)) } : {}),
-      shared_drives: b.drives.map((d) => `${quotedOwnerText(d.shared_drive, 100)} (${d.domain})`),
-      member_folders_allowed: b.member_folders,
-    },
-  };
+  // The topic is owner-written: data, quoted.
+  return { team_boundaries: { version: tb.version, topic: quotedOwnerText(tb.boundaries.topic, 500) } };
 }
 
-/** What the member accepted (M11-SPEC §2: the relay's version), and what the team's current boundaries add to it (§7.1). */
-function acceptancePart(tb: TeamBoundaries | null, version: number | null, url: string | null) {
+/** What the member accepted (M11-SPEC §2: the relay's version). */
+function acceptancePart(tb: TeamBoundaries, version: number | null, url: string | null) {
   if (version === null) return { accepted: 'unknown (the relay could not say which version you accepted)' };
   const where = url ? `in the console (${url})` : 'in the console';
-  const accepted = version > 0 ? { version } : `nothing yet: teammates' questions to you are declined until you accept your team's boundaries ${where}`;
-  if (!tb?.boundaries) return { accepted };
-  const since = sinceOf(tb);
-  const eff = effectiveBoundaries(tb.boundaries, acceptedAtVersion(tb.boundaries, version, since), since);
-  return {
-    accepted,
-    ...(eff.pending && !eff.notAccepted ? { not_accepted_yet: `version ${tb.version} adds ${wideningText(eff.pending)}: accept it ${where}` } : {}),
-  };
+  return { accepted: hasAccepted(version, tb.version) ? { version } : `nothing yet: teammates' questions to you are declined until you accept your team's boundaries ${where}` };
 }
 
 async function decide(elicit: Elicit, message: string, yes: string, no: string): Promise<boolean> {
@@ -142,7 +125,7 @@ async function decide(elicit: Elicit, message: string, yes: string, no: string):
 
 export async function foldersTool(args: Record<string, unknown>, deps: FoldersDeps): Promise<ToolResult> {
   for (const k of Object.keys(args)) if (k !== 'action' && k !== 'path') return toolError(`unknown argument: ${k}`);
-  const action = args.action ?? 'show';
+  const action = args.action ?? 'list';
   const team = deps.team();
   if (!team) return toolError('Not signed in to a team: run /team-relay:login first. Your folders are kept per team.');
   const file = memberFoldersPath(deps.env);
@@ -153,8 +136,8 @@ export async function foldersTool(args: Record<string, unknown>, deps: FoldersDe
     return toolError(`your folders file cannot be used (${describeError(err)}): fix or remove ${file}`);
   }
 
-  if (action === 'show') {
-    if (args.path !== undefined) return toolError('show takes no path');
+  if (action === 'list') {
+    if (args.path !== undefined) return toolError('list takes no path');
     const read = await deps.boundaries().catch(() => null);
     // Another team's document is used for nothing: not shown, not worked out.
     const otherTeam = read !== null && read.team !== team;
@@ -162,15 +145,13 @@ export async function foldersTool(args: Record<string, unknown>, deps: FoldersDe
     const version = tb?.boundaries ? await deps.acceptance().catch(() => null) : null;
     let gives: string | null = null;
     if (tb?.boundaries) {
-      const since = sinceOf(tb);
-      const eff = effectiveBoundaries(tb.boundaries, version === null ? null : acceptedAtVersion(tb.boundaries, version, since), since);
       if (version === null) {
         gives = 'unknown: the relay could not say which version you accepted';
-      } else if (eff.notAccepted) {
+      } else if (!hasAccepted(version, tb.version)) {
         gives = "nothing: teammates' questions are declined until you accept your team's boundaries";
       } else {
         try {
-          const set = await buildAllowedSet({ version: tb.version, boundaries: eff.boundaries, member: current, env: deps.env, cache: deps.cache ?? null });
+          const set = await buildAllowedSet({ version: tb.version, member: current, env: deps.env, cache: deps.cache ?? null });
           gives = setSummary(set);
         } catch (err) {
           gives = `could not be worked out (${describeError(err)})`;
@@ -180,58 +161,41 @@ export async function foldersTool(args: Record<string, unknown>, deps: FoldersDe
     return toolJson({
       file,
       team,
-      ...describeFolders(current, deps.env),
+      ...describeFolders(current.folders, deps.env),
+      ...droppedPart(current),
       ...teamPart(tb, otherTeam),
       ...(tb?.boundaries ? acceptancePart(tb, version, deps.console()) : {}),
       ...(gives ? { answers_come_from: gives } : {}),
-      how_to_change: `Ask to add or remove a repo root or a folder; each change opens a dialog where you decide. ${whereToAccept(deps.console())}`,
+      how_to_change: `Ask to add or remove a folder (/team-relay:folders add <path> or remove <path>); each change opens a dialog where you decide. ${whereToAccept(deps.console())}`,
     });
   }
 
-  if (action === 'accept') {
-    // M11-SPEC §2: accepting is done in the browser, by the member only.
-    if (args.path !== undefined) return toolError('accept takes no path');
-    return toolJson({ message: whereToAccept(deps.console()) });
-  }
-
-  const ops: Record<string, [FolderList, 'add' | 'remove']> = {
-    add_root: ['repo_roots', 'add'],
-    remove_root: ['repo_roots', 'remove'],
-    add_folder: ['extra_folders', 'add'],
-    remove_folder: ['extra_folders', 'remove'],
-  };
-  const op = typeof action === 'string' ? ops[action] : undefined;
-  if (!op) return toolError('action must be show, add_root, remove_root, add_folder, remove_folder or accept');
+  if (action !== 'add' && action !== 'remove') return toolError('action must be list, add or remove');
   const raw = args.path;
-  if (typeof raw !== 'string' || raw.length === 0) return toolError(`${String(action)} needs a path (absolute, or starting with ~/)`);
-  const [list, kind] = op;
-  let change: ReturnType<typeof changeMemberFolders<TeamSettings>>;
+  if (typeof raw !== 'string' || raw.length === 0) return toolError(`${action} needs a path (absolute, or starting with ~/)`);
+  let change: ReturnType<typeof changeMemberFolders>;
   try {
-    change = changeMemberFolders(current, list, kind, raw, deps.env);
+    change = changeMemberFolders(current.folders, action, raw, deps.env);
   } catch (err) {
     return toolError(describeError(err));
   }
   if (!change.changed) {
-    return toolJson({ message: kind === 'add' ? 'It is already there; nothing changed.' : 'It is not in the list; nothing changed.', ...describeFolders(current, deps.env) });
+    return toolJson({ message: action === 'add' ? 'It is already there; nothing changed.' : 'It is not in the list; nothing changed.', ...describeFolders(current.folders, deps.env), ...droppedPart(current) });
   }
   if (!deps.elicit) {
     return toolError(
       `${NO_DIALOGS}, so your folders cannot be changed from here. ` +
-        `Edit ${file} yourself (mode 600): {"teams": {"${team}": {"repo_roots": [...], "extra_folders": [...]}}}.`,
+        `Use /team-relay:setup, or edit ${file} yourself (mode 600): {"teams": {"${team}": {"folders": [...]}}}.`,
     );
   }
   const where = change.resolved && change.resolved !== raw ? `${raw} (${change.resolved})` : raw;
   const what =
-    list === 'repo_roots'
-      ? kind === 'add'
-        ? `Let your automatic answerer search ${where}, 3 levels deep, for clones of your team's GitHub repositories? Teammates' questions may then be answered, without asking you, from every file git tracks in those clones.`
-        : `Stop your automatic answerer searching ${where} for clones of your team's GitHub repositories?`
-      : kind === 'add'
-        ? `Let your automatic answerer read ${where}? Teammates' questions may then be answered, without asking you, from its files (only the files git tracks, when it is in a repository), if your team allows members' own folders.`
-        : `Stop your automatic answerer reading ${where}?`;
+    action === 'add'
+      ? `Let your automatic answerer read ${where}? Teammates' questions may then be answered, without asking you, from its files (inside a git repository, only the files git tracks).`
+      : `Stop your automatic answerer reading ${where}?`;
   let yes: boolean;
   try {
-    yes = await decide(deps.elicit, what, kind === 'add' ? 'Yes, add it' : 'Yes, remove it', 'No, leave it as it is');
+    yes = await decide(deps.elicit, what, action === 'add' ? 'Yes, add it' : 'Yes, remove it', 'No, leave it as it is');
   } catch (err) {
     return toolError(`the dialog could not be shown (${describeError(err)}); nothing changed`);
   }
@@ -239,9 +203,9 @@ export async function foldersTool(args: Record<string, unknown>, deps: FoldersDe
   try {
     // Read again: the file may have changed while the dialog was open.
     const fresh = readMemberSettings(file, deps.env);
-    const again = changeMemberFolders(teamSettings(fresh, team), list, kind, raw, deps.env);
-    writeMemberSettings(file, withTeam(fresh, team, again.value), deps.env);
-    return toolJson({ message: `${kind === 'add' ? 'Added' : 'Removed'}. Your automatic answerer uses it from its next answer.`, ...describeFolders(again.value, deps.env) });
+    const again = changeMemberFolders(teamSettings(fresh, team).folders, action, raw, deps.env);
+    writeMemberSettings(file, withTeam(fresh, team, { folders: again.folders }), deps.env);
+    return toolJson({ message: `${action === 'add' ? 'Added' : 'Removed'}. Your automatic answerer uses it from its next answer.`, ...describeFolders(again.folders, deps.env) });
   } catch (err) {
     return toolError(`nothing changed (${describeError(err)})`);
   }

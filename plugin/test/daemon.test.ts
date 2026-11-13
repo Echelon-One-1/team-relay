@@ -231,7 +231,7 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     };
   }
   const intervals = { statusMs: 150, tickMs: 20, pluginCheckMs: 30, factsMs: 60_000, restartMs: 50, lockRetryMs: 50, selfTestMs: 3_600_000 };
-  const facts = { claudeSignedIn: async () => true, driveConnected: async () => false, clones: async () => 0 };
+  const facts = { claudeSignedIn: async () => true };
 
   it('answers in background mode and reports only counts and yes/no facts, every interval', async () => {
     const { hosts, make } = fakeHosts();
@@ -244,12 +244,11 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     expect(o.me.member).toBe('bob');
     expect(o.lockRetryMs).toBe(50);
     const st = relay.memberStatus.get('bob')!;
-    expect(Object.keys(st).sort()).toEqual(['claude', 'daemon', 'drive', 'folders', 'seen_at', 'self_test']);
+    expect(Object.keys(st).sort()).toEqual(['claude', 'daemon', 'folder_count', 'seen_at', 'self_test']);
     expect(st).toMatchObject({
       daemon: { version: '0.11.0', started_at: expect.any(String) },
       claude: { found: true, signed_in: true },
-      folders: { repo_roots: 0, clones: 0, extra_folders: 0 },
-      drive: { connected: false },
+      folder_count: 0,
       self_test: PASSED,
     });
     const puts = () => relay.requests.filter((r) => r.member === 'bob' && r.method === 'PUT' && r.path.endsWith('/me/status')).length;
@@ -401,32 +400,49 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     expect(await done).toBe('stopped');
   });
 
-  it('a folder macOS refuses (EPERM) is logged by kind and folder name only, and counted; other errors are not', async () => {
-    relay.setBoundaries({ topic: 'T', github_orgs: ['example-org'], drives: [{ domain: 'example.com', shared_drive: 'Team Drive' }], member_folders: true });
+  it('a chosen folder macOS refuses (EPERM) is logged by folder name only, and counted; other errors are not', async () => {
+    relay.setBoundaries({ topic: 'T' });
     for (const d of ['Documents/code', 'work/repos', 'Desktop/notes']) mkdirSync(join(tmp, d), { recursive: true });
     const e = env();
-    writeMemberSettings(memberFoldersPath(e), { teams: { demo: { repo_roots: ['~/Documents/code', '~/work/repos'], extra_folders: ['~/Desktop/notes'], accepted: null } } }, e);
+    writeMemberSettings(memberFoldersPath(e), { teams: { demo: { folders: ['~/Documents/code', '~/work/repos', '~/Desktop/notes'], dropped: [] } } }, e);
     const probed: string[] = [];
     const refuse = (code: string, p: string) => Object.assign(new Error(`${code}: operation not permitted, scandir '${p}'`), { code });
     const canRead = async (p: string) => {
       probed.push(p);
-      if (p.endsWith('code') || p.endsWith('CloudStorage') || p.endsWith('notes')) throw refuse('EPERM', p);
+      if (p.endsWith('code') || p.endsWith('notes')) throw refuse('EPERM', p);
       throw refuse('ENOENT', p);
     };
     const { make } = fakeHosts();
     const ac = new AbortController();
     const done = runDaemon({ env: e, log: (l) => logs.push(l), dist: DIST, version: '1', signal: ac.signal, makeHost: make, selfTest: async () => PASSED, facts: { ...facts, canRead }, intervals: { ...intervals, factsMs: 100 } });
-    await waitFor(() => logs.filter((l) => l.includes('repo root "code"')).length >= 2, 10_000, 'two refusals of the same root');
+    await waitFor(() => logs.filter((l) => l.includes('chosen folder "code"')).length >= 2, 10_000, 'two refusals of the same folder');
     ac.abort();
     await done;
     const refused = logs.filter((l) => l.startsWith('macOS refused'));
-    expect(refused).toContain('macOS refused the background answerer access to a repo root "code" (EPERM, 1 time so far): allow "node" when macOS asks, or in System Settings > Privacy & Security');
-    expect(refused.some((l) => l.includes('repo root "code" (EPERM, 2 times so far)'))).toBe(true);
-    expect(refused.some((l) => l.startsWith('macOS refused the background answerer access to the Google Drive folder (EPERM, 1 time'))).toBe(true);
-    expect(refused.some((l) => l.startsWith('macOS refused the background answerer access to a folder of your own "notes" (EPERM, 1 time'))).toBe(true);
+    expect(refused).toContain('macOS refused the background answerer access to a chosen folder "code" (EPERM, 1 time so far): allow "node" when macOS asks, or in System Settings > Privacy & Security');
+    expect(refused.some((l) => l.includes('chosen folder "code" (EPERM, 2 times so far)'))).toBe(true);
+    expect(refused.some((l) => l.startsWith('macOS refused the background answerer access to a chosen folder "notes" (EPERM, 1 time'))).toBe(true);
     expect(refused.some((l) => l.includes('repos'))).toBe(false);
     for (const l of logs) expect(l).not.toContain(tmp);
-    expect(probed).toContain(join(tmp, 'Library', 'CloudStorage'));
+    expect(probed.slice(0, 3)).toEqual([join(tmp, 'Documents', 'code'), join(tmp, 'work', 'repos'), join(tmp, 'Desktop', 'notes')]);
+    // The status carries the count of chosen folders, never their paths or names.
+    expect(relay.memberStatus.get('bob')).toMatchObject({ folder_count: 3 });
+    expect(JSON.stringify(relay.memberStatus.get('bob'))).not.toMatch(/code|repos|notes/);
+  });
+
+  it('folder_count counts an earlier plugin\'s lists read as one (duplicates once, at most 20)', async () => {
+    const e = env();
+    const many = Array.from({ length: 22 }, (_, i) => `~/many/f${i}`);
+    for (const m of many) mkdirSync(join(tmp, m.slice(2)), { recursive: true });
+    mkdirSync(join(tmp, 'xdg', 'team-relay'), { recursive: true, mode: 0o700 });
+    writeFileSync(memberFoldersPath(e), JSON.stringify({ teams: { demo: { repo_roots: many.slice(0, 12), extra_folders: [...many.slice(12), many[0]], accepted: null } } }), { mode: 0o600 });
+    const { make } = fakeHosts();
+    const ac = new AbortController();
+    const done = runDaemon({ env: e, log: (l) => logs.push(l), dist: DIST, version: '1', signal: ac.signal, makeHost: make, selfTest: async () => PASSED, facts, intervals });
+    await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the first status');
+    expect(relay.memberStatus.get('bob')).toMatchObject({ folder_count: 20 });
+    ac.abort();
+    await done;
   });
 
   it('a self-test error reaches the local log with its detail; the status sent to the relay carries only the fixed reason', async () => {
@@ -449,85 +465,6 @@ describe('the daemon loop (M11-SPEC §1, §3)', () => {
     await done;
     expect(JSON.stringify(relay.memberStatus.get('bob'))).not.toContain(tmp);
     expect(logs.some((l) => l.startsWith('self-test failed: the answerer could not be prepared (') && l.includes(`${tmp}/private/run-XXXXXX`))).toBe(true);
-  });
-
-  it('Drive is checked again for every status (a Drive connected after start shows at once, not 10 minutes later)', async () => {
-    let connected = false;
-    const { make } = fakeHosts();
-    const ac = new AbortController();
-    const done = runDaemon({
-      env: env(),
-      log: (l) => logs.push(l),
-      dist: DIST,
-      version: '1',
-      signal: ac.signal,
-      makeHost: make,
-      selfTest: async () => PASSED,
-      facts: { ...facts, driveConnected: async () => connected },
-      intervals: { ...intervals, factsMs: 3_600_000 },
-    });
-    await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the first status');
-    expect(relay.memberStatus.get('bob')).toMatchObject({ drive: { connected: false } });
-    connected = true;
-    await waitFor(() => (relay.memberStatus.get('bob') as { drive?: { connected?: boolean } }).drive?.connected === true, 5_000, 'Drive connected in the status');
-    ac.abort();
-    await done;
-  });
-
-  it('PICKERS-SPEC §3.3: while the team has boundaries the status says which of its items this Mac cannot find (keys only)', async () => {
-    relay.setBoundaries({
-      topic: 'T',
-      github_orgs: ['example-org'],
-      github_repos: [{ org: 'example-labs', repo: 'api', id: 7 }],
-      drive_folders: [{ domain: 'example.com', drive_id: '0AExampleDriveId0PVA', folder_id: '1ExampleFolderClients0000000000a', folder_name: 'Clients', drive_name: null }],
-      drives: [],
-      member_folders: false,
-    });
-    const seen: Array<{ keys: string[]; roots: string[] }> = [];
-    let mounts = 'one';
-    const { make } = fakeHosts();
-    const ac = new AbortController();
-    const done = runDaemon({
-      env: env(),
-      log: (l) => logs.push(l),
-      dist: DIST,
-      version: '1',
-      signal: ac.signal,
-      makeHost: make,
-      selfTest: async () => PASSED,
-      facts: {
-        ...facts,
-        missing: async (b, folders) => {
-          seen.push({ keys: [...b.github_repos.map((r) => r.repo), ...b.drive_folders.map((x) => x.folder_id)], roots: folders.repo_roots });
-          return ['repo:example-labs/api'];
-        },
-        mounts: async () => mounts,
-      },
-      intervals: { ...intervals, factsMs: 3_600_000 },
-    });
-    await waitFor(() => relay.memberStatus.get('bob'), 10_000, 'the first status');
-    const st = relay.memberStatus.get('bob')!;
-    expect(st.sources).toEqual({ boundaries_version: relay.boundaries.version, missing: ['repo:example-labs/api'] });
-    expect(seen[0]).toEqual({ keys: ['api', '1ExampleFolderClients0000000000a'], roots: [] });
-    // The mounts changing (a shared drive appears) works it out again at once, not 10 minutes later.
-    const before = seen.length;
-    mounts = 'two';
-    await waitFor(() => seen.length > before, 5_000, 'missing worked out again');
-    ac.abort();
-    await done;
-  });
-
-  it('PICKERS-SPEC §3.3: an M10 document is used too; the default search finds nothing on an empty Mac and names only the team\'s items', async () => {
-    relay.setBoundaries({ topic: 'T', github_orgs: ['Example-Org'], drives: [{ domain: 'example.com', shared_drive: 'Team Drive' }], member_folders: false });
-    const { make } = fakeHosts();
-    const ac = new AbortController();
-    const { missing: _m, mounts: _n, ...plain } = facts as typeof facts & { missing?: unknown; mounts?: unknown };
-    const done = runDaemon({ env: env(), log: (l) => logs.push(l), dist: DIST, version: '1', signal: ac.signal, makeHost: make, selfTest: async () => PASSED, facts: plain, intervals });
-    await waitFor(() => (relay.memberStatus.get('bob') as { sources?: unknown } | undefined)?.sources, 10_000, 'a status with sources');
-    expect(relay.memberStatus.get('bob')!.sources).toEqual({ boundaries_version: relay.boundaries.version, missing: ['org:example-org', 'drive:example.com/Team Drive'] });
-    expect(JSON.stringify(relay.memberStatus.get('bob'))).not.toContain(tmp);
-    ac.abort();
-    await done;
   });
 
   it('the self-test runs at start, then on its interval', async () => {

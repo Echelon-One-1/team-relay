@@ -1,18 +1,15 @@
 // The setup steps shared by the setup line (setup-cli.ts, in Terminal) and the setup page
 // (local-setup.ts, on the member's own Mac in the browser): the Mac's folder chooser, adding a
-// chosen folder to a list, saving the folder lists, the team's boundaries, connecting Google
-// Drive, and the background answerer's install and uninstall. One code path each, so both ways
+// chosen folder to the list, saving the folders, and the background answerer's install and
+// uninstall. One code path each, so both ways
 // of setting up do exactly the same thing.
 
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { configDir } from './answering-lock.js';
-import type { TeamBoundaries } from './boundaries-types.js';
-import { homeDir, validBoundaries } from './boundary-set.js';
+import { homeDir } from './boundary-set.js';
 import { AgentError, agentPlistPath, installAgent, uninstallAgent, type Exec } from './daemon-launch.js';
-import { runDriveCli, type DriveCliOutcome } from './drive-cli.js';
 import { answererNodeObtainable, ensureAnswererNode, findClaude, type FetchPinnedNode } from './locate.js';
-import type { Keychain } from './google-drive.js';
 import {
   MAX_FOLDERS,
   expandPath,
@@ -22,9 +19,7 @@ import {
   teamSettings,
   withTeam,
   writeMemberSettings,
-  type MemberFolders,
 } from './member-folders.js';
-import type { RelayClient } from './relay-client.js';
 
 // -- the Mac's folder chooser ----------------------------------------------------------------------
 
@@ -109,7 +104,7 @@ export function defaultChooser(platform: NodeJS.Platform): FolderChooser {
 
 // -- folder lists ----------------------------------------------------------------------------------
 
-/** What adding one folder to a list did. */
+/** What adding one folder to the list did. */
 export type AddOutcome = { kind: 'added' } | { kind: 'refused'; reason: string } | { kind: 'duplicate' } | { kind: 'full' };
 
 /**
@@ -128,41 +123,17 @@ export function addFolder(out: string[], raw: string, env: NodeJS.ProcessEnv): A
 }
 
 /**
- * Reads the member's folders for `team` afresh (the file may have changed meanwhile), lets
- * `change` work out the new lists, and stores them (atomically, mode 600), keeping what else the
- * file holds. Returns the lists as stored. Throws MemberFoldersError when the file must not be used.
+ * Reads the member's folders for `team` afresh (the file may have changed meanwhile; an earlier
+ * plugin's lists read into the one list, member-folders.ts), lets `change` work out the new
+ * list, and stores it as `folders` alone (atomically, mode 600), keeping the other teams. Returns
+ * the list as stored. Throws MemberFoldersError when the file must not be used.
  */
-export function saveTeamFolders(env: NodeJS.ProcessEnv, team: string, change: (current: MemberFolders) => MemberFolders): MemberFolders {
+export function saveTeamFolders(env: NodeJS.ProcessEnv, team: string, change: (current: string[]) => string[]): string[] {
   const file = memberFoldersPath(env);
   const fresh = readMemberSettings(file, env);
-  const mine = teamSettings(fresh, team);
-  const next = change({ repo_roots: mine.repo_roots, extra_folders: mine.extra_folders });
-  writeMemberSettings(file, withTeam(fresh, team, { repo_roots: next.repo_roots, extra_folders: next.extra_folders, accepted: mine.accepted }), env);
-  return { repo_roots: [...next.repo_roots], extra_folders: [...next.extra_folders] };
-}
-
-// -- the team's boundaries -------------------------------------------------------------------------
-
-/** The team's current boundaries from the relay, checked; null when they cannot be read now. */
-export async function teamBoundaries(client: RelayClient): Promise<TeamBoundaries | null> {
-  try {
-    const tb = await client.boundaries({ attempts: 2, timeoutMs: 15_000 });
-    return validBoundaries(tb) && tb.team === client.team ? tb : null;
-  } catch {
-    return null;
-  }
-}
-
-// -- Google Drive ------------------------------------------------------------------------------------
-
-/** Runs `/team-relay:drive connect` for the signed-in member: Google's sign-in in the browser. */
-export function driveConnect(client: RelayClient, platform: NodeJS.Platform, keychain: Keychain, log: (line: string) => void): Promise<DriveCliOutcome> {
-  return runDriveCli(['connect'], {
-    platform,
-    keychain,
-    relay: () => ({ driveClient: () => client.driveClient(), boundaries: () => client.boundaries() }),
-    log,
-  });
+  const next = change(teamSettings(fresh, team).folders);
+  writeMemberSettings(file, withTeam(fresh, team, { folders: next }), env);
+  return [...next];
 }
 
 // -- the background answerer -----------------------------------------------------------------------

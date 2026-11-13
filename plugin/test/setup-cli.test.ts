@@ -8,10 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { credentialsPath, writeCredential } from '../src/credentials.js';
 import { SELF_TEST_PENDING } from '../src/daemon-core.js';
-import type { GithubSources } from '../src/boundary-set.js';
-import type { MemberSources, TeamBoundaries } from '../src/boundaries-types.js';
 import type { Exec } from '../src/daemon-launch.js';
-import type { Keychain } from '../src/google-drive.js';
 import type { LoginOptions } from '../src/login.js';
 import { pinnedNodePath, pinnedNodeVersion } from '../src/locate.js';
 import { memberFoldersPath, readTeamSettings } from '../src/member-folders.js';
@@ -20,13 +17,12 @@ import { RelayClient } from '../src/relay-client.js';
 import {
   CHOOSE_FOLDER_SCRIPT,
   HELP,
+  FOLDERS_PROMPT,
   NOT_SIGNED_IN,
-  PRIVACY_DRIVE_NOTE,
   PRIVACY_FOLDERS_NOTE,
   SELF_TEST_RUNNING,
   checklist,
   chosenPaths,
-  missingLines,
   osascriptChooser,
   runSetup,
   type ChooseResult,
@@ -102,7 +98,11 @@ describe('commands and usage', () => {
       expect(await runSetup(argv, deps(t))).toBe(2);
       expect(t.text()).toBe(HELP);
     }
-    for (const cmd of ['login', 'folders', 'drive', 'daemon install --claude', 'daemon uninstall', 'status']) expect(HELP).toContain(cmd);
+    for (const cmd of ['login', 'folders', 'daemon install --claude', 'daemon uninstall', 'status']) expect(HELP).toContain(cmd);
+    expect(HELP).not.toMatch(/drive/i);
+    // The drive command is gone.
+    const gone = term();
+    expect(await runSetup(['drive'], deps(gone))).toBe(2);
   });
 
   it('a command that needs the relay says how to sign in when this computer is not signed in', async () => {
@@ -167,8 +167,7 @@ describe('login (M11-SPEC §5)', () => {
   });
 });
 
-describe('folders (M11-SPEC §5)', () => {
-  const ORGS = { topic: 'Example Org: engineering.', github_orgs: ['example-org'], drives: [], member_folders: true };
+describe('folders: one list of the folders your Claude answers from', () => {
   let code1: string;
   let code2: string;
   beforeEach(() => {
@@ -179,268 +178,110 @@ describe('folders (M11-SPEC §5)', () => {
     mkdirSync(code2, { recursive: true });
   });
   const settings = () => readTeamSettings(memberFoldersPath(env), env, 'demo');
+  const file = () => JSON.parse(readFileSync(memberFoldersPath(env), 'utf8')) as unknown;
 
-  it('with no boundaries there is nothing to choose; it says where an owner sets them', async () => {
+  it("opens the Mac's folder chooser once, says what it took, and saves the one list (whether or not the team has boundaries)", async () => {
+    const c = chooser({ kind: 'chosen', paths: [code1, home, code2, code1] });
     const t = term();
-    expect(await runSetup(['folders'], deps(t))).toBe(0);
-    expect(t.text()).toContain('Your team has not chosen what to share yet, so there are no folders to pick.');
-    expect(t.text()).toContain(relay.url);
-    expect(existsSync(memberFoldersPath(env))).toBe(false);
-  });
-
-  it("opens the Mac's folder chooser naming the team's orgs, says what it found in each folder, and saves the lists", async () => {
-    relay.setBoundaries(ORGS);
-    const c = chooser({ kind: 'chosen', paths: [code1, home, code1] }, { kind: 'chosen', paths: [code2] });
-    const counted: Array<[string, GithubSources]> = [];
-    const t = term();
-    const code = await runSetup(['folders'], deps(t, { chooseFolders: c.choose, clones: async (raw, g) => (counted.push([raw, g]), 7) }));
-    expect(code).toBe(0);
-    expect(c.prompts).toEqual([
-      'Pick the folders that hold your example-org projects. Hold Cmd to pick more than one.',
-      'Pick any folders of your own that answers may use. Hold Cmd to pick more than one, or click Cancel to skip.',
-    ]);
-    expect(t.out).toContain('Your team shares projects from GitHub: example-org.');
-    expect(t.out).toContain('  Found 7 project folders in org.');
+    expect(await runSetup(['folders'], deps(t, { chooseFolders: c.choose }))).toBe(0);
+    expect(c.prompts).toEqual([FOLDERS_PROMPT]);
+    expect(FOLDERS_PROMPT).toBe('Pick the folders your Claude may answer your team from. Hold Cmd to pick more than one.');
+    expect(t.out).toContain('Your Claude answers your team from folders you choose on this Mac. In a folder that is a git repository, only the files git tracks are used.');
+    expect(t.out).toContain(`  org (${code1})`);
     expect(t.out.some((l) => l.startsWith(`  Not used: ${home} (`))).toBe(true);
-    expect(t.out).toContain('  org is already in the list.');
     expect(t.out).toContain(`  notes (${code2})`);
-    expect(counted).toEqual([[code1, { github_orgs: ['example-org'], github_repos: [] }]]);
+    expect(t.out).toContain('  org is already in the list.');
     expect(t.asked).toEqual([]);
-    expect(settings()).toMatchObject({ repo_roots: [code1], extra_folders: [code2] });
-    expect(t.out.at(-1)).toBe('Saved: 1 folder for projects and 1 folder of your own.');
+    expect(settings()).toEqual({ folders: [code1, code2], dropped: [] });
+    expect(file()).toEqual({ teams: { demo: { folders: [code1, code2] } } });
+    expect(t.out.at(-1)).toBe('Saved: 2 folders.');
+    // No Drive, no orgs, no own-folder step.
+    expect(t.text()).not.toMatch(/Drive|GitHub|of your own|project/);
   });
 
   it('Cancel in the chooser keeps the current list (or none)', async () => {
-    relay.setBoundaries(ORGS);
     const first = term();
-    expect(await runSetup(['folders'], deps(first, { chooseFolders: chooser({ kind: 'cancelled' }, { kind: 'cancelled' }).choose }))).toBe(0);
+    expect(await runSetup(['folders'], deps(first, { chooseFolders: chooser({ kind: 'cancelled' }).choose }))).toBe(0);
     expect(first.out).toContain('Nothing picked.');
     expect(first.asked).toEqual([]);
-    expect(settings()).toMatchObject({ repo_roots: [], extra_folders: [] });
-    expect(first.out.at(-1)).toBe('Saved: no folders for projects and no folders of your own.');
-    await runSetup(['folders'], deps(term(), { chooseFolders: chooser({ kind: 'chosen', paths: [code1] }, { kind: 'cancelled' }).choose, clones: async () => 1 }));
-    // Asked to replace, then Cancel: the list stays.
+    expect(settings()).toEqual({ folders: [], dropped: [] });
+    expect(first.out.at(-1)).toBe('Saved: no folders.');
+    await runSetup(['folders'], deps(term(), { chooseFolders: chooser({ kind: 'chosen', paths: [code1] }).choose }));
+    // Asked to replace, then Cancel, then not stopping: the list stays.
     const again = term(['n', '']);
-    expect(await runSetup(['folders'], deps(again, { chooseFolders: chooser({ kind: 'cancelled' }).choose, clones: async () => 1 }))).toBe(0);
+    expect(await runSetup(['folders'], deps(again, { chooseFolders: chooser({ kind: 'cancelled' }).choose }))).toBe(0);
+    expect(again.asked).toEqual(['Keep these folders? [Y/n] ', 'Stop using any folders? [y/N] ']);
     expect(again.out).toContain('Nothing picked, so your folders stay as they were.');
-    expect(settings()).toMatchObject({ repo_roots: [code1] });
-  });
-
-  it('after a No, a Cancel asks whether to stop using the folders: y saves none, anything else keeps them', async () => {
-    relay.setBoundaries(ORGS);
-    await runSetup(['folders'], deps(term(['~/code/org', '', code2, '']), { clones: async () => 1 }));
-    const cancels = () => chooser({ kind: 'cancelled' }, { kind: 'cancelled' }).choose;
-    const keep = term(['n', '', 'n', 'no']);
-    expect(await runSetup(['folders'], deps(keep, { chooseFolders: cancels(), clones: async () => 1 }))).toBe(0);
-    expect(keep.asked).toEqual([
-      'Keep these folders? [Y/n] ',
-      'Stop using project folders? [y/N] ',
-      'Keep these folders of your own? [Y/n] ',
-      'Stop using folders of your own? [y/N] ',
-    ]);
-    expect(keep.out.filter((l) => l === 'Nothing picked, so your folders stay as they were.')).toHaveLength(2);
-    expect(settings()).toMatchObject({ repo_roots: ['~/code/org'], extra_folders: [code2] });
-    // Only the folders of your own stopped.
-    const own = term(['n', 'n', 'n', 'y']);
-    expect(await runSetup(['folders'], deps(own, { chooseFolders: cancels(), clones: async () => 1 }))).toBe(0);
-    expect(settings()).toMatchObject({ repo_roots: ['~/code/org'], extra_folders: [] });
-    expect(own.out.at(-1)).toBe('Saved: 1 folder for projects and no folders of your own.');
-    // Then the project folders.
-    const projects = term(['n', 'y']);
-    expect(await runSetup(['folders'], deps(projects, { chooseFolders: cancels(), clones: async () => 1 }))).toBe(0);
-    expect(projects.asked).toEqual(['Keep these folders? [Y/n] ', 'Stop using project folders? [y/N] ']);
-    expect(settings()).toMatchObject({ repo_roots: [], extra_folders: [] });
-    expect(projects.out.at(-1)).toBe('Saved: no folders for projects and no folders of your own.');
+    expect(settings().folders).toEqual([code1]);
+    // After a No, a Cancel and a yes: none.
+    const stop = term(['n', 'y']);
+    expect(await runSetup(['folders'], deps(stop, { chooseFolders: chooser({ kind: 'cancelled' }).choose }))).toBe(0);
+    expect(settings().folders).toEqual([]);
+    expect(stop.out.at(-1)).toBe('Saved: no folders.');
   });
 
   it('only folders that cannot be used: the list stays as it was', async () => {
-    relay.setBoundaries({ ...ORGS, member_folders: false });
-    await runSetup(['folders'], deps(term(), { chooseFolders: chooser({ kind: 'chosen', paths: [code1] }).choose, clones: async () => 1 }));
+    await runSetup(['folders'], deps(term(), { chooseFolders: chooser({ kind: 'chosen', paths: [code1] }).choose }));
     const t = term(['n']);
-    expect(await runSetup(['folders'], deps(t, { chooseFolders: chooser({ kind: 'chosen', paths: ['/'] }).choose, clones: async () => 1 }))).toBe(0);
+    expect(await runSetup(['folders'], deps(t, { chooseFolders: chooser({ kind: 'chosen', paths: ['/'] }).choose }))).toBe(0);
     expect(t.out).toContain('None of those can be used, so your folders stay as they were.');
-    expect(settings()).toMatchObject({ repo_roots: [code1] });
+    expect(settings().folders).toEqual([code1]);
   });
 
-  it('without a chooser (no screen, no osascript) the member types the folders: each checked, counted and saved', async () => {
-    relay.setBoundaries(ORGS);
-    const t = term(['code', '~/code/org', '~/code/org', '', join(tmp, 'notes-missing'), code2, '']);
-    const counted: Array<[string, GithubSources]> = [];
-    const code = await runSetup(['folders'], deps(t, { clones: async (raw, g) => (counted.push([raw, g]), raw === '~/code/org' ? 3 : 0) }));
-    expect(code).toBe(0);
+  it('without a chooser (no screen, no osascript) the member types the folders: each checked and saved', async () => {
+    const t = term(['code', '~/code/org', '~/code/org', join(tmp, 'notes-missing'), code2, '']);
+    expect(await runSetup(['folders'], deps(t))).toBe(0);
     expect(t.out).toContain(
-      'Type the full path of each folder that holds your example-org projects, one per line (~ means your home folder). Press Enter on an empty line to finish.',
+      'Type the full path of each folder your Claude may answer your team from, one per line (~ means your home folder). Press Enter on an empty line to finish.',
     );
     expect(t.out).toContain('  Not used: code (it is not an absolute path or one starting with ~/).');
-    expect(t.out).toContain('  Found 3 project folders in org.');
     expect(t.out).toContain('  org is already in the list.');
-    expect(t.text()).toContain('Your team also lets you share folders of your own.');
     expect(t.out.some((l) => l.startsWith(`  Not used: ${join(tmp, 'notes-missing')} (`))).toBe(true);
-    expect(counted).toEqual([['~/code/org', { github_orgs: ['example-org'], github_repos: [] }]]);
-    expect(settings()).toMatchObject({ repo_roots: ['~/code/org'], extra_folders: [code2] });
-    expect(t.out.at(-1)).toBe('Saved: 1 folder for projects and 1 folder of your own.');
+    expect(settings().folders).toEqual(['~/code/org', code2]);
+    expect(t.out.at(-1)).toBe('Saved: 2 folders.');
   });
 
-  it('a second run shows the current lists; keep leaves them, no opens the chooser again', async () => {
-    relay.setBoundaries(ORGS);
-    await runSetup(['folders'], deps(term(['~/code/org', '', code2, '']), { clones: async () => 1 }));
-    const keep = term(['', 'y']);
-    expect(await runSetup(['folders'], deps(keep, { clones: async () => 1 }))).toBe(0);
-    expect(keep.out).toContain('The folders you picked for these projects:');
-    expect(keep.out).toContain('  Found 1 project folder in org.');
-    expect(keep.asked).toEqual(['Keep these folders? [Y/n] ', 'Keep these folders of your own? [Y/n] ']);
-    expect(settings()).toMatchObject({ repo_roots: ['~/code/org'], extra_folders: [code2] });
-    const c = chooser({ kind: 'chosen', paths: [code2] }, { kind: 'chosen', paths: [] });
-    const replace = term(['n', 'n']);
-    expect(await runSetup(['folders'], deps(replace, { chooseFolders: c.choose, clones: async () => 0 }))).toBe(0);
-    expect(replace.out).toContain('  Found no project folders in notes.');
-    expect(settings()).toMatchObject({ repo_roots: [code2], extra_folders: [] });
+  it('a second run shows the current list; keep leaves it, no opens the chooser again', async () => {
+    await runSetup(['folders'], deps(term(['~/code/org', code2, ''])));
+    const keep = term(['']);
+    expect(await runSetup(['folders'], deps(keep))).toBe(0);
+    expect(keep.out).toContain('The folders your Claude answers your team from:');
+    expect(keep.out).toContain(`  org (${code1})`);
+    expect(keep.asked).toEqual(['Keep these folders? [Y/n] ']);
+    expect(settings().folders).toEqual(['~/code/org', code2]);
+    const replace = term(['n']);
+    expect(await runSetup(['folders'], deps(replace, { chooseFolders: chooser({ kind: 'chosen', paths: [code2] }).choose }))).toBe(0);
+    expect(settings().folders).toEqual([code2]);
+  });
+
+  it("an earlier plugin's lists are read as one, what was dropped past 20 is said, and saving makes it permanent", async () => {
+    const many = Array.from({ length: 22 }, (_, i) => {
+      const p = join(home, 'many', `f${String(i).padStart(2, '0')}`);
+      mkdirSync(p, { recursive: true });
+      return p;
+    });
+    mkdirSync(join(xdg, 'team-relay'), { recursive: true, mode: 0o700 });
+    writeFileSync(memberFoldersPath(env), JSON.stringify({ teams: { demo: { repo_roots: many.slice(0, 12), extra_folders: [...many.slice(12), many[0]], accepted: null } } }), { mode: 0o600 });
+    const t = term(['']);
+    expect(await runSetup(['folders'], deps(t))).toBe(0);
+    expect(t.out[0]).toBe(`Only 20 folders can be used: "${many[20]}", "${many[21]}" were dropped. Save your folders (/team-relay:folders or /team-relay:setup) to make this permanent.`);
+    expect(file()).toEqual({ teams: { demo: { folders: many.slice(0, 20) } } });
+    expect(settings()).toEqual({ folders: many.slice(0, 20), dropped: [] });
+    expect(t.out.at(-1)).toBe('Saved: 20 folders.');
   });
 
   it('a folder in Documents, Desktop, Downloads or iCloud Drive: it says macOS may ask to allow "node", once', async () => {
-    relay.setBoundaries(ORGS);
     for (const d of ['Documents/code', 'Library/Mobile Documents/notes']) mkdirSync(join(home, d), { recursive: true });
-    const t = term(['~/Documents/code', '', join(home, 'Library', 'Mobile Documents', 'notes'), '']);
-    expect(await runSetup(['folders'], deps(t, { clones: async () => 1 }))).toBe(0);
+    const t = term(['~/Documents/code', join(home, 'Library', 'Mobile Documents', 'notes'), '']);
+    expect(await runSetup(['folders'], deps(t))).toBe(0);
     const note = PRIVACY_FOLDERS_NOTE;
     expect(note).toContain('"node"');
     expect(note).toContain('click Allow');
     expect(t.out.filter((l) => l === note)).toHaveLength(1);
     // Elsewhere: not said.
-    const t2 = term(['n', '~/code/org', '', 'n', '']);
-    expect(await runSetup(['folders'], deps(t2, { clones: async () => 1 }))).toBe(0);
+    const t2 = term(['n', '~/code/org', '']);
+    expect(await runSetup(['folders'], deps(t2))).toBe(0);
     expect(t2.out).not.toContain(note);
-  });
-
-  it('own folders are asked for only when the team allows them', async () => {
-    relay.setBoundaries({ ...ORGS, member_folders: false });
-    const c = chooser({ kind: 'chosen', paths: [code1] });
-    const t = term();
-    expect(await runSetup(['folders'], deps(t, { chooseFolders: c.choose, clones: async () => 0 }))).toBe(0);
-    expect(c.prompts).toHaveLength(1);
-    expect(t.text()).not.toContain('folders of your own');
-    expect(t.out.at(-1)).toBe('Saved: 1 folder for projects.');
-  });
-});
-
-describe('folders and status with picked repositories and Drive folders (PICKERS-SPEC §6.1, §7.4; ACC-023)', () => {
-  const FOLDER_ID = '1ExampleFolderClients0000000000a';
-  const DRIVE_ID = '0AExampleDriveId0PVA';
-  const PICKED = {
-    topic: 'Example Org: engineering.',
-    github_orgs: ['example-org'],
-    github_repos: [{ org: 'OtherOrg', repo: 'api', id: 42 }],
-    drive_folders: [{ domain: 'example.com', drive_id: DRIVE_ID, folder_id: FOLDER_ID, folder_name: 'Clients', drive_name: 'Example Team Drive' }],
-    drives: [],
-    member_folders: false,
-  };
-
-  it('folders names the whole orgs and the single repositories, and counts clones of both', async () => {
-    relay.setBoundaries(PICKED);
-    const code1 = join(home, 'code', 'org');
-    mkdirSync(code1, { recursive: true });
-    const counted: Array<[string, GithubSources]> = [];
-    const c = chooser({ kind: 'chosen', paths: [code1] });
-    const t = term();
-    expect(await runSetup(['folders'], deps(t, { chooseFolders: c.choose, clones: async (raw, g) => (counted.push([raw, g]), 2) }))).toBe(0);
-    expect(c.prompts[0]).toBe('Pick the folders that hold your example-org and OtherOrg/api projects. Hold Cmd to pick more than one.');
-    expect(t.out).toContain('Your team shares projects from GitHub: example-org and OtherOrg/api.');
-    expect(counted).toEqual([[code1, { github_orgs: ['example-org'], github_repos: [{ org: 'OtherOrg', repo: 'api', id: 42 }] }]]);
-  });
-
-  it('a team with only picked repositories still asks for project folders; one with only Drive folders offers Drive', async () => {
-    relay.setBoundaries({ ...PICKED, github_orgs: [], drive_folders: [] });
-    const c = chooser({ kind: 'cancelled' });
-    const t = term();
-    expect(await runSetup(['folders'], deps(t, { chooseFolders: c.choose, clones: async () => 0 }))).toBe(0);
-    expect(c.prompts[0]).toBe('Pick the folders that hold your OtherOrg/api projects. Hold Cmd to pick more than one.');
-    relay.setBoundaries({ ...PICKED, github_orgs: [], github_repos: [] });
-    const t2 = term();
-    await runSetup(['drive'], deps(t2, { connect: async () => bob() }));
-    expect(t2.text()).not.toContain('Your team has no shared Google Drives');
-  });
-
-  const tbOf = (sinceVersion: number, version = 3): TeamBoundaries => ({
-    version,
-    boundaries: { ...PICKED, github_repos: [...PICKED.github_repos], drive_folders: [...PICKED.drive_folders], drives: [{ domain: 'example.com', shared_drive: 'Old Drive' }] },
-    since: { github_orgs: { 'example-org': 1 }, github_repos: { 'otherorg/api': sinceVersion }, drive_folders: { [FOLDER_ID]: 1 }, drives: [{ domain: 'example.com', shared_drive: 'Old Drive', since: 1 }], member_folders: 1 },
-  }) as unknown as TeamBoundaries;
-
-  it('missingLines: a git clone line for a repository, plain words for an org and for Drive, in item order', () => {
-    const src: MemberSources = { boundaries_version: 3, missing: ['repo:otherorg/api', 'org:example-org', `folder:${FOLDER_ID}`, 'drive:example.com/Old Drive', 'repo:nobody/else'] };
-    const drive = "Make sure Google Drive for desktop is signed in with your work account; if it still doesn't show, ask a team owner for access to the shared drive.";
-    expect(missingLines(tbOf(1), src)).toEqual([
-      "Your Mac can't find 4 of the things your team shares. It answers from the rest.",
-      '  - No example-org projects found. Clone the ones you work on into the folder you picked for projects: https://github.com/orgs/example-org/repositories',
-      '  - git clone https://github.com/OtherOrg/api.git',
-      '    Run it in Terminal inside the folder you picked for projects.',
-      `  - Clients (in Example Team Drive) isn't on this Mac. ${drive}`,
-      `  - Old Drive isn't on this Mac. ${drive}`,
-    ]);
-    // Nothing reported, or nothing missing: no lines.
-    expect(missingLines(tbOf(1), null)).toEqual([]);
-    expect(missingLines(tbOf(1), { boundaries_version: 3, missing: [] })).toEqual([]);
-    // The Mac looked at an older version: what was added since is still being checked.
-    expect(missingLines(tbOf(3), { boundaries_version: 2, missing: [] })).toEqual(['Your Mac is still checking 1 new thing your team shares.']);
-    // A picked folder that is a whole shared drive is named by itself.
-    const whole = tbOf(1);
-    whole.boundaries!.drive_folders = [{ domain: 'example.com', drive_id: DRIVE_ID, folder_id: DRIVE_ID, folder_name: 'Example Team Drive', drive_name: 'Example Team Drive' }];
-    whole.since = { ...whole.since!, drive_folders: { [DRIVE_ID]: 1 } } as TeamBoundaries['since'];
-    expect(missingLines(whole, { boundaries_version: 3, missing: [`folder:${DRIVE_ID}`] })[1]).toBe(`  - Example Team Drive isn't on this Mac. ${drive}`);
-    // Keys only, no path, and the lines name only the team's own items.
-    for (const l of missingLines(tbOf(1), src)) expect(l).not.toMatch(/nobody|\/Users\/|CloudStorage/);
-  });
-
-  /** A full status as a daemon sends it, seen now. */
-  const reported = (extra: Record<string, unknown> = {}) => ({
-    daemon: { version: '1', started_at: '2026-11-10T10:00:00.000Z' },
-    claude: { found: true, signed_in: true },
-    folders: { repo_roots: 1, clones: 2, extra_folders: 0 },
-    drive: { connected: true },
-    self_test: { ok: true, at: '2026-11-10T10:00:00.000Z', reason: null },
-    seen_at: new Date().toISOString(),
-    ...extra,
-  });
-
-  it("status prints the missing lines from the relay's view of this member, before Ask the team", async () => {
-    relay.setBoundaries(PICKED);
-    relay.acceptances.set('bob', 1);
-    // bob's daemon reported one key of the team's list and one that is not (the relay drops it).
-    relay.memberStatus.set('bob', reported({ sources: { boundaries_version: relay.boundaries.version, missing: ['repo:otherorg/api', 'repo:nobody/else'] } }));
-    const t = term();
-    expect(await runSetup(['status'], deps(t))).toBe(0);
-    const i = t.out.indexOf("Your Mac can't find 1 of the things your team shares. It answers from the rest.");
-    expect(i).toBeGreaterThan(0);
-    expect(t.out.slice(i + 1, i + 3)).toEqual(['  - git clone https://github.com/OtherOrg/api.git', '    Run it in Terminal inside the folder you picked for projects.']);
-    expect(t.out.at(-1)).toBe(`Ask the team: ${relay.url}/ask`);
-    expect(t.text()).not.toContain('nobody');
-    // Without a report there are no such lines.
-    relay.memberStatus.set('bob', reported());
-    const t2 = term();
-    await runSetup(['status'], deps(t2));
-    expect(t2.text()).not.toContain("can't find");
-  });
-
-  it("members/status gives each entry's sources by the owner rule, narrowed to the team's items (as the relay does)", async () => {
-    relay.setBoundaries(PICKED);
-    const sources = { boundaries_version: relay.boundaries.version, missing: ['repo:nobody/else', `folder:${FOLDER_ID}`] };
-    relay.memberStatus.set('bob', reported({ sources }));
-    relay.memberStatus.set('alice', reported());
-    const as = (m: 'alice' | 'bob') => new RelayClient({ url: relay.url, team: 'demo', token: () => TOKEN_OF[m]!, attempts: 1 }).membersStatus();
-    const entry = (ms: Awaited<ReturnType<typeof as>>, m: string) => ms.members.find((x) => x.member === m)!;
-    const kept = { boundaries_version: sources.boundaries_version, missing: [`folder:${FOLDER_ID}`] };
-    // An owner sees every member's; the status itself never carries them.
-    const owner = await as('alice');
-    expect(entry(owner, 'bob').sources).toEqual(kept);
-    expect(entry(owner, 'bob').status).not.toHaveProperty('sources');
-    expect(entry(owner, 'alice').sources).toBeNull();
-    // A member sees only their own.
-    expect(entry(await as('bob'), 'bob').sources).toEqual(kept);
-    relay.memberStatus.set('alice', reported({ sources }));
-    expect(entry(await as('bob'), 'alice').sources).toBeNull();
-    // Boundaries removed: no item is the team's, so nothing is kept.
-    relay.setBoundaries(null);
-    expect(entry(await as('bob'), 'bob').sources).toEqual({ boundaries_version: sources.boundaries_version, missing: [] });
   });
 });
 
@@ -491,32 +332,6 @@ describe("the Mac's folder chooser (osascript)", () => {
     expect(chosenPaths('/a/two\nlines/\0/\0\n')).toEqual(['/a/two\nlines', '/']);
     expect(chosenPaths('')).toEqual([]);
     expect(chosenPaths('\n')).toEqual([]);
-  });
-});
-
-describe('drive (M11-SPEC §5)', () => {
-  const keychain = (account: string | null): Keychain => ({ account: async () => account, read: async () => null, write: async () => {}, removeAll: async () => 0 });
-
-  it('nothing to do when the team has no drives', async () => {
-    relay.setBoundaries({ topic: 'T', github_orgs: ['example-org'], drives: [], member_folders: false });
-    const t = term();
-    expect(await runSetup(['drive'], deps(t, { platform: 'darwin', keychain: keychain(null) }))).toBe(0);
-    expect(t.text()).toBe('Your team has no shared Google Drives, so there is nothing to connect.');
-  });
-
-  it('already connected: nothing to do; not connected: the Drive sign-in runs', async () => {
-    relay.setBoundaries({ topic: 'T', github_orgs: [], drives: [{ domain: 'example.com', shared_drive: 'Team Drive' }], member_folders: false });
-    const t1 = term();
-    let ran: string[] | null = null;
-    const drive = async (argv: string[]) => ((ran = argv), { exitCode: 0, line: 'Google Drive connected as someone@example.com (read-only).' });
-    expect(await runSetup(['drive'], deps(t1, { platform: 'darwin', keychain: keychain('someone@example.com'), drive }))).toBe(0);
-    expect(t1.out).toEqual(['Google Drive is already connected as someone@example.com.', PRIVACY_DRIVE_NOTE]);
-    expect(ran).toBeNull();
-    const t2 = term();
-    expect(await runSetup(['drive'], deps(t2, { platform: 'darwin', keychain: keychain(null), drive }))).toBe(0);
-    expect(ran).toEqual(['connect']);
-    expect(t2.out.slice(-2)).toEqual(['Google Drive connected as someone@example.com (read-only).', PRIVACY_DRIVE_NOTE]);
-    expect(PRIVACY_DRIVE_NOTE).toMatch(/Google Drive.*"node".*click Allow\.$/);
   });
 });
 
@@ -607,13 +422,12 @@ describe('daemon install and uninstall (M11-SPEC §5)', () => {
 describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining")', () => {
   const full = {
     claude: { found: true, signed_in: true },
-    folders: { repo_roots: 1, clones: 2, extra_folders: 0 },
-    drive: { connected: true },
     self_test: { ok: true, at: '2026-11-10T10:00:00.000Z', reason: null },
   };
-  const base = { answering: true, acceptedVersion: 1, boundariesVersion: 1, orgs: 1, drives: 1, console: 'https://relay.example.com' };
+  const base = { answering: true, acceptedVersion: 1, boundariesVersion: 1, folderCount: 2, console: 'https://relay.example.com' };
   const open = (steps: ReturnType<typeof checklist>) => steps[0]!.checks.filter((c) => !c.done).map((c) => c.id);
-  const seen = (extra: Record<string, unknown> = {}) => ({ daemon: { version: '1', started_at: '2026-11-10T10:00:00.000Z' }, ...full, seen_at: new Date().toISOString(), ...extra });
+  /** A status as the Mac sends it (the fake relay keeps folder_count apart, as the relay does). */
+  const seen = (extra: Record<string, unknown> = {}) => ({ daemon: { version: '1', started_at: '2026-11-10T10:00:00.000Z' }, ...full, folder_count: 2, seen_at: new Date().toISOString(), ...extra });
 
   it("Set up your Mac and Accept what the team shares, from the relay's view of this member", () => {
     const steps = checklist({ ...base, status: full });
@@ -622,23 +436,22 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
       ['accept', 'Accept what the team shares', true],
     ]);
     // Nothing reported yet: one thing to do, run the setup line; nothing else is listed.
-    const none = checklist({ ...base, status: null, answering: false, acceptedVersion: 1, boundariesVersion: 2 });
+    const none = checklist({ ...base, status: null, answering: false, acceptedVersion: 0, boundariesVersion: 2 });
     expect(none.map((s) => s.done)).toEqual([false, false]);
     expect(none[0]!.checks).toEqual([{ id: 'setup', done: false, todo: 'Paste the setup line into Terminal on this Mac.' }]);
     expect(none[1]!.todo).toBe('Open https://relay.example.com and click Accept.');
+    // Any version from 1 to the current one is accepted (the topic alone: nothing to widen); one
+    // past it belongs to an earlier team under this id.
+    expect(checklist({ ...base, status: full, acceptedVersion: 1, boundariesVersion: 2 })[1]!.done).toBe(true);
+    expect(checklist({ ...base, status: full, acceptedVersion: 3, boundariesVersion: 2 })[1]!.done).toBe(false);
     // Every old check still counts for the Mac step.
     expect(open(checklist({ ...base, status: { ...full, claude: { found: true, signed_in: false } } }))).toEqual(['claude']);
     expect(open(checklist({ ...base, status: full, answering: false }))).toEqual(['answering']);
-    expect(open(checklist({ ...base, status: { ...full, folders: { repo_roots: 0 } } }))).toEqual(['folders']);
-    expect(open(checklist({ ...base, status: { ...full, drive: { connected: false } } }))).toEqual(['drive']);
+    expect(open(checklist({ ...base, status: full, folderCount: 0 }))).toEqual(['folders']);
     expect(open(checklist({ ...base, status: { ...full, self_test: { ok: false, reason: 'x' } } }))).toEqual(['self_test']);
-    // No orgs and no drives: those need nothing.
-    const bare = checklist({ ...base, status: { ...full, folders: { repo_roots: 0 }, drive: { connected: false } }, orgs: 0, drives: 0 });
-    expect(bare[0]!.done).toBe(true);
-    // Boundaries that could not be read: folders and Drive are not known, so never done.
-    const unknown = checklist({ ...base, status: full, orgs: null, drives: null });
-    expect(unknown[0]!.done).toBe(false);
-    expect(open(unknown)).toEqual(['folders', 'drive']);
+    // A folder count that was not reported (null) is never done.
+    expect(open(checklist({ ...base, status: full, folderCount: null }))).toEqual(['folders']);
+    expect(checklist({ ...base, status: full, folderCount: 20 })[0]!.done).toBe(true);
     // Boundaries never set: nothing to accept yet.
     expect(checklist({ ...base, status: full, boundariesVersion: 0, acceptedVersion: 0 })[1]).toMatchObject({ done: false, todo: 'Your team has not chosen what to share yet. A team owner does that on https://relay.example.com.' });
   });
@@ -655,20 +468,21 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
     expect(todo({ ...base, status: { ...full, self_test: { ok: false, reason: 'Claude Code is not signed in' } } })).toEqual([
       "Your Mac's last check did not pass. Run the setup line again. If it still does not pass, show this to a team owner: Claude Code is not signed in.",
     ]);
-    for (const t of todo({ ...base, status: { claude: { found: true, signed_in: false }, folders: { repo_roots: 0 }, drive: { connected: false }, self_test: { ok: false, reason: null } }, answering: false })) {
+    expect(todo({ ...base, status: full, folderCount: 0 })).toEqual(['You have not chosen the folders your Claude answers from yet. Run the setup line again and pick them.']);
+    for (const t of todo({ ...base, status: { claude: { found: true, signed_in: false }, self_test: { ok: false, reason: null } }, folderCount: 0, answering: false })) {
       expect(t).not.toMatch(/daemon|LaunchAgent|plugin|channel|\bCLI\b|\bnode\b|boundaries|repo root|self-test/i);
     }
   });
 
   it('prints the two steps, only the open checks of the Mac step, then where to ask the team (always)', async () => {
-    relay.setBoundaries({ topic: 'T', github_orgs: ['example-org'], drives: [], member_folders: false });
-    relay.memberStatus.set('bob', seen({ folders: { repo_roots: 0, clones: 0, extra_folders: 0 } }));
+    relay.setBoundaries({ topic: 'T' });
+    relay.memberStatus.set('bob', seen({ folder_count: 0 }));
     const t = term();
     expect(await runSetup(['status'], deps(t))).toBe(0);
     expect(t.out).toEqual([
       'Your setup (bob, team demo): 0 of 2 done.',
       '  [ ] Set up your Mac',
-      '      - Your project folders are not picked yet. Run the setup line again and pick them.',
+      '      - You have not chosen the folders your Claude answers from yet. Run the setup line again and pick them.',
       `  [ ] Accept what the team shares - Open ${relay.url} and click Accept.`,
       `Ask the team: ${relay.url}/ask`,
     ]);
@@ -687,7 +501,7 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
   });
 
   it('while the self-test has not run yet it waits for it (every 5 s, up to 90 s), then prints the steps', async () => {
-    relay.setBoundaries({ topic: 'T', github_orgs: [], drives: [], member_folders: false });
+    relay.setBoundaries({ topic: 'T' });
     relay.acceptances.set('bob', 1);
     const pendingStatus = () => seen({ self_test: { ok: false, at: '2026-11-10T10:00:00.000Z', reason: SELF_TEST_PENDING } });
     relay.memberStatus.set('bob', pendingStatus());
@@ -715,7 +529,7 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
   });
 
   it('--after-setup also waits for the Mac to check in (said once), then for its check, within the same 90 s', async () => {
-    relay.setBoundaries({ topic: 'T', github_orgs: [], drives: [], member_folders: false });
+    relay.setBoundaries({ topic: 'T' });
     relay.acceptances.set('bob', 1);
     const waits: number[] = [];
     // Checks in during the second wait, still checking; the check ends during the fourth.
@@ -758,30 +572,29 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
     };
     // Nothing to accept yet (the team has not chosen what to share).
     expect(await closing()).toBe('Done. Go back to the team page in your browser.');
-    relay.setBoundaries({ topic: 'T', github_orgs: [], drives: [], member_folders: false });
+    relay.setBoundaries({ topic: 'T' });
     expect(await closing()).toBe('Done. Go back to the team page in your browser and click Accept.');
     relay.acceptances.set('bob', 1);
     expect(await closing()).toBe('Done. Go back to the team page in your browser.');
-    // A newer version to accept.
-    relay.setBoundaries({ topic: 'T2', github_orgs: [], drives: [], member_folders: false });
-    expect(await closing()).toBe('Done. Go back to the team page in your browser and click Accept.');
+    // A newer version: still accepted (an accepted version covers every later one).
+    relay.setBoundaries({ topic: 'T2' });
+    expect(await closing()).toBe('Done. Go back to the team page in your browser.');
   });
 
-  it('when the boundaries cannot be read, folders and Drive are not known, never done', async () => {
-    relay.memberStatus.set('bob', seen({ folders: { repo_roots: 0, clones: 0, extra_folders: 0 }, drive: { connected: false } }));
+  it('the folders check comes from the member\'s own folder_count; the status carries no folder paths', async () => {
+    relay.setBoundaries({ topic: 'T' });
     relay.acceptances.set('bob', 1);
-    relay.setBoundaries({ topic: 'T', github_orgs: [], drives: [], member_folders: false });
-    const unreadable = (): ReturnType<typeof bob> => {
-      const b = bob();
-      b.client.boundaries = async () => {
-        throw new Error('relay down');
-      };
-      return b;
-    };
+    relay.memberStatus.set('bob', seen({ folder_count: 0 }));
     const t = term();
-    expect(await runSetup(['status'], deps(t, { connect: async () => unreadable() }))).toBe(0);
+    expect(await runSetup(['status'], deps(t))).toBe(0);
     expect(t.out[0]).toBe('Your setup (bob, team demo): 1 of 2 done.');
-    expect(t.out.filter((l) => l.startsWith('      - Could not check this just now'))).toHaveLength(2);
+    const list = await bob().client.membersStatus();
+    const me = list.members.find((m) => m.member === 'bob')!;
+    expect(me.folder_count).toBe(0);
+    expect(me.status).not.toHaveProperty('folder_count');
+    // Another member's count is not given to a member who is not an owner.
+    relay.memberStatus.set('carol', seen({ folder_count: 4 }));
+    expect((await bob().client.membersStatus()).members.find((m) => m.member === 'carol')!.folder_count).toBeNull();
   });
 
   it('status takes no other argument', async () => {

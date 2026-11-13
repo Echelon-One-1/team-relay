@@ -7,7 +7,7 @@
 //   reply(text, data?, needs_approval?, reason?)  the answer; the host sends it or holds it
 //   request_approval(reason)                      the answer must wait for the member
 //   (boundary mode, M10-SPEC §3, TEAM_RELAY_HOST_MODE=boundaries: reply(text, data?, off_topic?),
-//    list_files, search_files and read_google_file instead of request_approval)
+//    list_files and search_files instead of request_approval)
 //   permission(tool_name, input, tool_use_id)     Claude Code's --permission-prompt-tool:
 //                                                 returns {"behavior":"allow","updatedInput":...}
 //                                                 (the input, or the host's: a Read snapshot)
@@ -97,8 +97,8 @@ export const BOUNDARY_TOOLS = [
   {
     name: 'list_files',
     description:
-      'List the files you may read (absolute paths, for Read), with the areas they are in (GitHub repositories, shared drives, ' +
-      'the member\'s folders). Optionally only one area, and only paths matching a glob relative to the area (for example "**/*.md"; ' +
+      'List the files you may read (absolute paths, for Read), with the areas they are in (the folders the member ' +
+      'chose). Optionally only one area, and only paths matching a glob relative to the area (for example "**/*.md"; ' +
       'without a "/", it also matches file names). At most 500 paths per call.',
     inputSchema: {
       type: 'object',
@@ -113,8 +113,7 @@ export const BOUNDARY_TOOLS = [
     name: 'search_files',
     description:
       'Search the files you may read for lines matching an RE2 regular expression ((?i) at the start ignores case). Optionally one ' +
-      'area and a glob, as for list_files. Returns path, line number and the line (clipped). Google Docs/Sheets/Slides are not searched: ' +
-      'read them with read_google_file.',
+      'area and a glob, as for list_files. Returns path, line number and the line (clipped).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -124,18 +123,6 @@ export const BOUNDARY_TOOLS = [
         max_results: { type: 'integer', minimum: 1, maximum: 200 },
       },
       required: ['pattern'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'read_google_file',
-    description:
-      'Read a Google Doc, Sheet or Slides file from the team\'s shared drive: give the path of its .gdoc, .gsheet or .gslides file ' +
-      '(from list_files). Returns its text (Docs as Markdown, Sheets as CSV, Slides as text), at most 200 KB.',
-    inputSchema: {
-      type: 'object',
-      properties: { path: { type: 'string', minLength: 1, maxLength: 4096 } },
-      required: ['path'],
       additionalProperties: false,
     },
   },
@@ -198,7 +185,7 @@ async function main(): Promise<void> {
         const text = typeof r.message === 'string' ? r.message : 'done';
         return r.ok === false ? toolError(text) : { content: [{ type: 'text', text }] };
       }
-      if (name === 'list_files' || name === 'search_files' || name === 'read_google_file') {
+      if (name === 'list_files' || name === 'search_files') {
         // The host answers {ok, result} or {ok: false, message}; only it sees the files.
         const out = await host.call(name, args);
         const r = isPlainObject(out) ? out : {};

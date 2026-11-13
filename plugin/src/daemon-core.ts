@@ -12,9 +12,8 @@
 //   Claude desktop app moves its claude); without one nothing is answered and the status says
 //   claude.found=false.
 // - Status: every 60 s, PUT me/status with counts and booleans only (no path, folder name,
-//   question or answer) and, while the team has boundaries, which of its items this Mac cannot
-//   find (PICKERS-SPEC §3.3, §8: keys of the team's own items only, sources-report.ts); a 429 is
-//   only logged.
+//   question or answer): among them how many folders the member chose for the team
+//   (`folder_count`, 0..20, member-folders.ts); a 429 is only logged.
 // - Self-test at start and every 6 h: `claude auth status` succeeds, and the M10 boundary-mode
 //   child starts with the real flags against a local host that denies every tool, offline, with
 //   a relay address that leads nowhere (answer-dry-run.ts): no relay traffic, no question. The
@@ -22,9 +21,8 @@
 // - Updates: once a minute it reads where the plugin is installed; when that changed it lets the
 //   current answer finish, releases the lock and returns 'updated' (dist/daemon.js exits 0 and
 //   launchd starts the new version).
-// - macOS privacy protection: each time the facts are recounted it lists each repo root (and own
-//   folder, and the Drive mount when the team has drives); one that macOS refuses (EPERM) is
-//   logged with its kind, its folder name only and how often so far. The status says nothing
+// - macOS privacy protection: each time the facts are recounted it lists each chosen folder; one
+//   that macOS refuses (EPERM) is logged with its folder name only and how often so far. The status says nothing
 //   of it (the relay takes the status schema exactly).
 // - The log (DaemonLog) holds ids, counts and reasons, never a question, answer or file content.
 
@@ -35,18 +33,12 @@ import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { AnswerHost, type HostOptions } from './answer-host.js';
 import { NOWHERE_RELAY, disposeDryRun, executeDryRun, prepareDryRun } from './answer-dry-run.js';
-import { itemKeys } from './boundaries-rule.js';
-import { SELF_TEST_PENDING, type Boundaries, type MemberSources, type MemberStatusBody, type TeamBoundaries } from './boundaries-types.js';
-import { validBoundaries, type GithubSources } from './boundary-set.js';
-import { countClones } from './clones.js';
-import { DriveLocator, mountsSignature } from './drive-locate.js';
+import { FOLDER_COUNT_MAX, SELF_TEST_PENDING, type MemberStatusBody } from './boundaries-types.js';
 import { credentialFingerprint, credentialsPath } from './credentials.js';
-import { defaultKeychain } from './google-drive.js';
 import { resolveClaudeBin } from './locate.js';
 import { expandPath, memberFoldersPath, readTeamSettings } from './member-folders.js';
 import { backoffDelay, RelayError, type RelayClient } from './relay-client.js';
 import { connectOnce, hostConnection, type ConnectAttempt } from './relay-connect.js';
-import { missingSources } from './sources-report.js';
 import { describeError } from './tool-util.js';
 
 export { SELF_TEST_PENDING };
@@ -62,10 +54,7 @@ export type Intervals = {
   selfTestMs: number;
   /** Plugin path check (1 min). */
   pluginCheckMs: number;
-  /**
-   * Claude sign-in, clone count and missing sources (10 min, or at once when the folders, the
-   * boundaries or the Drive mounts change); the Drive connection is checked for every status.
-   */
+  /** Claude sign-in and the folders' readability (10 min, or at once when the folders change). */
   factsMs: number;
   /** How often the sign-in and the session are looked at. */
   tickMs: number;
@@ -231,12 +220,6 @@ export type HostLike = { start(): Promise<void>; stop(): Promise<void>; finishAn
 
 export type Facts = {
   claudeSignedIn: (bin: string) => Promise<boolean>;
-  driveConnected: () => Promise<boolean>;
-  clones: (roots: string[], sources: GithubSources) => Promise<number>;
-  /** PICKERS-SPEC §3.3: the keys of the items of `b` this Mac cannot find. */
-  missing: (b: Boundaries, folders: { repo_roots: string[] }) => Promise<string[]>;
-  /** What the Drive for desktop mounts look like now (compared only; never sent). */
-  mounts: () => Promise<string>;
   /** Lists a folder (resolves when it can be read); a refusal by macOS throws EPERM. */
   canRead: (path: string) => Promise<unknown>;
 };
@@ -266,19 +249,8 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
   const now = o.now ?? Date.now;
   const credFile = credentialsPath(env);
   const startedAt = new Date(now()).toISOString();
-  const home = env.HOME?.trim() || homedir();
-  // PICKERS-SPEC §6.2: the daemon's own cache of where the picked Drive folders are.
-  const locator = new DriveLocator({ home });
   const facts: Facts = {
     claudeSignedIn: (bin) => claudeSignedIn(bin, env),
-    driveConnected: async () => {
-      const kc = defaultKeychain();
-      return kc ? (await kc.account()) !== null : false;
-    },
-    clones: (roots, sources) => countClones(roots, sources, env),
-    // Every cached folder checked again: the result goes into a status.
-    missing: (b, folders) => missingSources(b, folders, env, { locator, force: true }),
-    mounts: () => mountsSignature(home),
     canRead: (path) => readdir(path),
     ...o.facts,
   };
@@ -340,14 +312,8 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
   };
   const selfTimer = setInterval(() => void doSelfTest(), iv.selfTestMs);
 
-  // -- the slower facts in the status: Claude's sign-in, Drive, the clone count, missing sources.
+  // -- the slower facts in the status: Claude's sign-in, and whether macOS lets the folders be read.
   let signedIn = false;
-  let driveConnected = false;
-  let clones = 0;
-  /** PICKERS-SPEC §3.3: absent while the team has no boundaries (or they were never read). */
-  let sources: MemberSources | null = null;
-  /** The team's boundaries as last read (kept when a read fails). */
-  let lastTb: TeamBoundaries | null = null;
   let factsAt = Number.NEGATIVE_INFINITY;
   let factsKey = '';
   // macOS privacy refusals so far, by what was refused (for the log only).
@@ -364,75 +330,41 @@ export async function runDaemon(o: DaemonOptions): Promise<'stopped' | 'updated'
       }
     }
   };
-  const refreshFacts = async (client: RelayClient | null, folders: { repo_roots: string[]; extra_folders: string[] }) => {
+  const refreshFacts = async (folders: string[]) => {
     const bin = claudeBinFrom(env);
-    if (client) {
-      try {
-        const tb = await client.boundaries({ attempts: 1, timeoutMs: 15_000, signal });
-        // Only this team's, by the one rule (an M10 document reads with the picked lists empty).
-        if (validBoundaries(tb) && tb.team === client.team) lastTb = tb;
-      } catch {
-        // the last document read stands until the next look
-      }
-    }
-    const b = lastTb?.boundaries ?? null;
-    const github: GithubSources = { github_orgs: b?.github_orgs ?? [], github_repos: b?.github_repos ?? [] };
-    const drives = b ? b.drives.length + b.drive_folders.length : 0;
-    const ownFolders = b?.member_folders ?? false;
-    const mounts = drives > 0 ? await facts.mounts().catch(() => '') : '';
-    const key = JSON.stringify([folders.repo_roots, folders.extra_folders, lastTb?.version ?? null, b ? itemKeys(b) : null, ownFolders, mounts]);
+    const key = JSON.stringify(folders);
     if (now() - factsAt < iv.factsMs && key === factsKey) return;
     factsAt = now();
     factsKey = key;
     signedIn = bin ? await facts.claudeSignedIn(bin).catch(() => false) : false;
-    clones = await facts.clones(folders.repo_roots, github).catch(() => 0);
-    if (lastTb && b) {
-      // When the search fails the last report stands (it names the version it was made for).
-      try {
-        sources = { boundaries_version: lastTb.version, missing: await facts.missing(b, folders) };
-      } catch {
-        // Never the error's text: it can name a path.
-        log("which of the team's sources are on this Mac could not be worked out; the last report stands");
-      }
-    } else {
-      sources = null;
-    }
     // Only the folder's own name is ever logged, never the path to it.
-    const named = (what: string, raw: string) => {
-      const path = expandPath(raw, env);
-      return path ? [{ what: `${what} ${JSON.stringify(basename(path).slice(0, 80))}`, path }] : [];
-    };
-    await checkReadable([
-      ...(github.github_orgs.length + github.github_repos.length > 0 ? folders.repo_roots.flatMap((r) => named('a repo root', r)) : []),
-      ...(ownFolders ? folders.extra_folders.flatMap((r) => named('a folder of your own', r)) : []),
-      ...(drives > 0 ? [{ what: 'the Google Drive folder', path: join(home, 'Library', 'CloudStorage') }] : []),
-    ]);
+    await checkReadable(
+      folders.flatMap((raw) => {
+        const path = expandPath(raw, env);
+        return path ? [{ what: `a chosen folder ${JSON.stringify(basename(path).slice(0, 80))}`, path }] : [];
+      }),
+    );
   };
 
-  const folders = (team: string) => {
+  /** The member's folders for the team (after reading an earlier plugin's lists); none when the file cannot be used. */
+  const folders = (team: string): string[] => {
     try {
-      const t = readTeamSettings(memberFoldersPath(env), env, team);
-      return { repo_roots: t.repo_roots, extra_folders: t.extra_folders };
+      return readTeamSettings(memberFoldersPath(env), env, team).folders;
     } catch {
-      return { repo_roots: [], extra_folders: [] };
+      return [];
     }
   };
 
   /** One status PUT; 'refused' on a 401. */
   const sendStatus = async (client: RelayClient, team: string): Promise<'ok' | 'refused'> => {
     const f = folders(team);
-    // Recounted every 10 minutes, or at once when the folders, the team's items or the mounts changed.
-    await refreshFacts(client, f);
-    // Cheap (one keychain look-up), so checked every time: a Drive connected after the daemon
-    // started shows in the next status.
-    driveConnected = await facts.driveConnected().catch(() => false);
+    // Recounted every 10 minutes, or at once when the folders changed.
+    await refreshFacts(f);
     const body: MemberStatusBody = {
       daemon: { version: o.version.slice(0, 32), started_at: startedAt },
       claude: { found: claudeBinFrom(env) !== null, signed_in: signedIn },
-      folders: { repo_roots: clamp(f.repo_roots.length, 64), clones: clamp(clones, 10_000), extra_folders: clamp(f.extra_folders.length, 64) },
-      drive: { connected: driveConnected },
+      folder_count: clamp(f.length, FOLDER_COUNT_MAX),
       self_test: { ok: test.ok, at: test.at, reason: test.reason },
-      ...(sources ? { sources } : {}),
     };
     try {
       await client.putStatus(body, { attempts: 1, timeoutMs: 15_000, signal });

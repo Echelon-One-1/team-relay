@@ -1,8 +1,9 @@
-// A synthetic member machine for M10 boundary mode (synthetic data only): a home directory with
-// clones under a repo root (real `git init` repositories with fake origin URLs; tracked,
-// untracked and ignored files; deny-listed and sensitive names; symlinks in and out), a fake
-// Drive for desktop tree with an account in the team's domain, one in another domain, and My
-// Drive, a plain folder of the member's own, and a folder outside everything.
+// A synthetic member machine for boundary mode (synthetic data only; 13 Nov 2026, local folders
+// only): a home directory with a plain folder of clones (real `git init` repositories with fake
+// origins; tracked, untracked and ignored files; deny-listed and sensitive names; symlinks in and
+// out; a submodule-style checkout; repositories under node_modules and a dot folder), a plain
+// folder of the member's own (every file, big and hidden ones and credentials excepted), and a
+// folder outside everything.
 
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -10,11 +11,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 export const ORG = 'example-org';
-export const DOMAIN = 'example.com';
-export const SHARED_DRIVE = 'Team Drive';
 export const TOPIC = 'Example Org: our clients, products and engineering.';
-/** The member's repo root, as they write it. */
+/** The member's folder of clones, as they write it (a plain folder holding repositories). */
 export const REPO_ROOT = '~/code/example-org';
+/** A plain folder of the member's own, as they write it. */
+export const MY_FOLDER = '~/notes/team';
+/** The folders the member chose (default for writeFolders). */
+export const FOLDERS = [REPO_ROOT, MY_FOLDER];
 /** The team the tests sign in to. */
 export const TEAM = 'demo';
 
@@ -23,13 +26,16 @@ export type Fixture = {
   home: string;
   xdg: string;
   env: NodeJS.ProcessEnv;
+  /** ~/code/example-org: a plain folder holding work trees. */
   repoRoot: string;
+  /** ~/code/example-org/alpha: a work tree (tracked, untracked and ignored files). */
+  alpha: string;
   outside: string;
-  /** Files that must be in the set (canonical paths). */
+  /** Files that must be in the set built from FOLDERS (canonical paths). */
   allowed: string[];
   /** Files that must never be in it (each exists on disk). */
   forbidden: Record<string, string>;
-  driveRoot: string;
+  /** ~/notes/team: a plain folder of the member's own. */
   myFolder: string;
 };
 
@@ -57,7 +63,7 @@ function repo(dir: string, home: string, origin: string | null, tracked: Record<
 }
 
 export function makeFixture(): Fixture {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tr-m10-')));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'tr-folders-')));
   const home = join(root, 'home');
   const xdg = join(root, 'xdg');
   mkdirSync(home, { recursive: true });
@@ -70,11 +76,11 @@ export function makeFixture(): Fixture {
   const forbidden: Record<string, string> = {};
   const allowed: string[] = [];
 
-  // The repo root is itself a clone (a workspace repository), ignoring the clones inside it.
-  repo(repoRoot, home, `https://github.com/${ORG}/workspace.git`, { 'README.md': 'workspace readme\n', '.gitignore': 'alpha/\nclients/\nother/\nlab/\nnode_modules/\n' });
-  allowed.push(join(repoRoot, 'README.md'), join(repoRoot, '.gitignore'));
+  // The folder of clones is a plain folder: its own files are read, each work tree in it by git.
+  allowed.push(put(join(repoRoot, 'README.md'), 'the folder of clones\n'));
+  forbidden.repoRootEnv = put(join(repoRoot, '.env'), 'X=1\n');
 
-  // alpha: https origin, the allowed org.
+  // alpha: a work tree with tracked, untracked and ignored files.
   const alpha = join(repoRoot, 'alpha');
   repo(
     alpha,
@@ -127,24 +133,17 @@ export function makeFixture(): Fixture {
   git(sub, home, 'config', 'core.worktree', sub);
   forbidden.submodule = join(sub, 'lib.md');
 
-  // beta: ssh origin, the org in another case, two levels down.
+  // beta (two levels down, an untracked file beside a tracked one) and a deep one with no origin.
   const beta = join(repoRoot, 'clients', 'beta');
-  repo(beta, home, `git@github.com:${ORG.toUpperCase()}/beta.git`, { 'plan.md': 'beta plan\n' });
+  repo(beta, home, `git@github.com:${ORG}/beta.git`, { 'plan.md': 'beta plan\n' }, { 'scratch.md': 'untracked in beta\n' });
   allowed.push(join(beta, 'plan.md'));
-  // gamma: ssh:// origin, three levels down.
-  const gamma = join(repoRoot, 'clients', 'x', 'gamma');
-  repo(gamma, home, `ssh://git@github.com/${ORG}/gamma`, { 'g.md': 'gamma\n' });
-  allowed.push(join(gamma, 'g.md'));
-  // Too deep (four levels), another org, another host, no origin, inside node_modules, a dot folder.
+  forbidden.betaUntracked = join(beta, 'scratch.md');
   const deep = join(repoRoot, 'clients', 'x', 'y', 'deep');
-  repo(deep, home, `https://github.com/${ORG}/deep.git`, { 'd.md': 'deep\n' });
-  forbidden.tooDeep = join(deep, 'd.md');
-  const other = join(repoRoot, 'other');
-  repo(other, home, 'https://github.com/OtherOrg/other.git', { 'o.md': 'other org\n' });
-  forbidden.otherOrg = join(other, 'o.md');
-  const lab = join(repoRoot, 'lab');
-  repo(lab, home, `https://gitlab.com/${ORG}/lab.git`, { 'l.md': 'gitlab\n' });
-  forbidden.otherHost = join(lab, 'l.md');
+  repo(deep, home, null, { 'd.md': 'deep\n' });
+  allowed.push(join(deep, 'd.md'));
+  // A plain file between the work trees is read.
+  allowed.push(put(join(repoRoot, 'clients', 'index.md'), 'clients index\n'));
+  // Never walked into: node_modules and dot folders, repositories or not.
   const nm = join(repoRoot, 'node_modules', 'pkg');
   repo(nm, home, `https://github.com/${ORG}/pkg.git`, { 'p.md': 'package\n' });
   forbidden.nodeModules = join(nm, 'p.md');
@@ -152,70 +151,36 @@ export function makeFixture(): Fixture {
   repo(dot, home, `https://github.com/${ORG}/h.git`, { 'h.md': 'hidden\n' });
   forbidden.dotFolder = join(dot, 'h.md');
 
-  // Drive for desktop: an account in the team's domain, one in another domain, My Drive.
-  const cloud = join(home, 'Library', 'CloudStorage');
-  const driveRoot = join(cloud, `GoogleDrive-alice@${DOMAIN}`, 'Shared drives', SHARED_DRIVE);
-  put(join(driveRoot, 'Clients', 'plan.md'), 'Drive plan: kick-off on Monday.\n');
-  put(join(driveRoot, 'Roadmap.gdoc'), JSON.stringify({ doc_id: 'abcdefghij1234567890' }));
-  put(join(driveRoot, 'big.bin'), Buffer.alloc(5 * 1024 * 1024 + 1, 65));
-  put(join(driveRoot, '.hidden.md'), 'hidden in drive\n');
-  put(join(driveRoot, 'Ops', 'service-account-prod.json'), '{}\n');
-  symlinkSync(join(outside, 'private.md'), join(driveRoot, 'shortcut.md'));
-  allowed.push(join(driveRoot, 'Clients', 'plan.md'), join(driveRoot, 'Roadmap.gdoc'));
-  forbidden.driveTooBig = join(driveRoot, 'big.bin');
-  forbidden.driveHidden = join(driveRoot, '.hidden.md');
-  forbidden.driveSensitive = join(driveRoot, 'Ops', 'service-account-prod.json');
-  forbidden.driveSymlinkOut = join(driveRoot, 'shortcut.md');
-  forbidden.myDrive = put(join(cloud, `GoogleDrive-alice@${DOMAIN}`, 'My Drive', 'private.md'), 'my drive\n');
-  forbidden.otherSharedDrive = put(join(cloud, `GoogleDrive-alice@${DOMAIN}`, 'Shared drives', 'Other Drive', 'x.md'), 'other shared drive\n');
-  forbidden.otherAccount = put(join(cloud, 'GoogleDrive-alice@example.net', 'Shared drives', SHARED_DRIVE, 'x.md'), 'other account\n');
-  forbidden.lookalikeDomain = put(join(cloud, `GoogleDrive-alice@${DOMAIN}.evil.example`, 'Shared drives', SHARED_DRIVE, 'x.md'), 'lookalike\n');
-
-  // A plain folder of the member's own (used only when the team allows member folders).
+  // A plain folder of the member's own: every file, except those over 5 MB, dot entries,
+  // credentials and sensitive names, and symlinks out.
   const myFolder = join(home, 'notes', 'team');
-  put(join(myFolder, 'ideas.md'), 'my ideas\n');
-  put(join(myFolder, '.env'), 'X=1\n');
-  forbidden.myFolderEnv = join(myFolder, '.env');
+  allowed.push(put(join(myFolder, 'ideas.md'), 'my ideas: kick-off on Monday.\n'));
+  allowed.push(put(join(myFolder, 'Clients', 'plan.md'), 'Client plan: kick-off on Monday.\n'));
+  allowed.push(put(join(myFolder, 'Roadmap.gdoc'), JSON.stringify({ doc_id: 'abcdefghij1234567890' })));
+  forbidden.myFolderEnv = put(join(myFolder, '.env'), 'X=1\n');
+  forbidden.tooBig = put(join(myFolder, 'big.bin'), Buffer.alloc(5 * 1024 * 1024 + 1, 65));
+  forbidden.hidden = put(join(myFolder, '.hidden.md'), 'hidden\n');
+  forbidden.sensitive = put(join(myFolder, 'Ops', 'service-account-prod.json'), '{}\n');
+  symlinkSync(join(outside, 'private.md'), join(myFolder, 'shortcut.md'));
+  forbidden.myFolderSymlinkOut = join(myFolder, 'shortcut.md');
   forbidden.outside = join(outside, 'private.md');
+  forbidden.notChosen = put(join(home, 'other', 'x.md'), 'a folder the member did not choose\n');
 
-  return { root, home, xdg, env, repoRoot, outside, allowed: allowed.map((p) => realpathSync(p)), forbidden, driveRoot, myFolder };
+  return { root, home, xdg, env, repoRoot, alpha, outside, allowed: allowed.map((p) => realpathSync(p)), forbidden, myFolder };
 }
 
-/** What a member who accepted BOUNDARIES (version 1) has on record (as an M10 plugin wrote it). */
-export const ACCEPTED = { version: 1, github_orgs: [ORG], drives: [{ domain: DOMAIN, shared_drive: SHARED_DRIVE }], member_folders: false };
-
 /**
- * Write the member's settings file (mode 600 in a mode-700 directory) for one team: the folders
- * and what was accepted (by default ACCEPTED; null: nothing accepted).
+ * Write the member's settings file (mode 600 in a mode-700 directory) for one team: the chosen
+ * folders, or (`raw`) the team's entry exactly as given (an earlier plugin's lists).
  */
-export function writeFolders(
-  f: Fixture,
-  value: { repo_roots: string[]; extra_folders: string[] },
-  opts: { team?: string; accepted?: Record<string, unknown> | null } = {},
-): void {
+export function writeFolders(f: Fixture, folders: string[], opts: { team?: string; raw?: Record<string, unknown> } = {}): void {
   const dir = join(f.xdg, 'team-relay');
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
-  const accepted = opts.accepted === undefined ? ACCEPTED : opts.accepted;
-  const team = { ...value, ...(accepted ? { accepted } : {}) };
-  writeFileSync(join(dir, 'boundaries.local.json'), JSON.stringify({ teams: { [opts.team ?? TEAM]: team } }), { mode: 0o600 });
+  const entry = opts.raw ?? { folders };
+  writeFileSync(join(dir, 'boundaries.local.json'), JSON.stringify({ teams: { [opts.team ?? TEAM]: entry } }), { mode: 0o600 });
   chmodSync(join(dir, 'boundaries.local.json'), 0o600);
 }
 
-/** The team's boundaries as the relay answers them (PICKERS-SPEC §2.1: no picked repositories or folders). */
-export const BOUNDARIES = {
-  topic: TOPIC,
-  github_orgs: [ORG],
-  github_repos: [] as Array<{ org: string; repo: string; id: number | null }>,
-  drive_folders: [] as Array<{ domain: string; drive_id: string | null; folder_id: string; folder_name: string; drive_name: string | null }>,
-  drives: [{ domain: DOMAIN, shared_drive: SHARED_DRIVE }],
-  member_folders: false,
-};
-
-/** The same boundaries as the M10 relay wrote them (PICKERS-SPEC §2.5: no picked lists). */
-export const M10_BOUNDARIES = {
-  topic: TOPIC,
-  github_orgs: [ORG],
-  drives: [{ domain: DOMAIN, shared_drive: SHARED_DRIVE }],
-  member_folders: false,
-};
+/** The team's boundaries as the relay answers them (schema v3: the topic alone). */
+export const BOUNDARIES = { topic: TOPIC };

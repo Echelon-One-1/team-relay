@@ -50,7 +50,7 @@ describe('commands (M5-SPEC §6, §9)', () => {
 
   it('the model can invoke none of them on its own', () => {
     const names = readdirSync(join(PLUGIN_ROOT, 'commands')).filter((f) => f.endsWith('.md')).sort();
-    expect(names).toEqual(['answering.md', 'approvals.md', 'console.md', 'drive.md', 'folders.md', 'login.md', 'logout.md', 'setup.md']);
+    expect(names).toEqual(['answering.md', 'approvals.md', 'console.md', 'folders.md', 'login.md', 'logout.md', 'setup.md']);
     for (const f of names) expect(frontmatter(command(f.slice(0, -3))), f).toMatch(/^disable-model-invocation: true$/m);
   });
 

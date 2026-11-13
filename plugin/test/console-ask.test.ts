@@ -183,13 +183,16 @@ describe('local console: acceptance, members status, asking (demo account)', () 
     for (const m of b.members) {
       expect(typeof m.answering).toBe('boolean');
       expect(Number.isInteger(m.accepted_version)).toBe(true);
+      expect(Object.keys(m).sort()).toEqual(['accepted_version', 'answering', 'folder_count', 'member', 'status']);
+      expect(m.folder_count === null || Number.isInteger(m.folder_count)).toBe(true);
       if (m.status !== null) {
-        expect(Object.keys(m.status).sort()).toEqual(['claude', 'daemon', 'drive', 'folders', 'seen_at', 'self_test']);
+        // The status never carries folder counts or paths.
+        expect(Object.keys(m.status).sort()).toEqual(['claude', 'daemon', 'seen_at', 'self_test']);
       }
     }
     // A quiet team: nobody has run the setup yet.
     const quiet = (await local('/api/members-status?team=research')).json();
-    expect(quiet.members.every((m: { status: unknown; answering: boolean }) => m.status === null && !m.answering)).toBe(true);
+    expect(quiet.members.every((m: { status: unknown; answering: boolean; folder_count: unknown }) => m.status === null && !m.answering && m.folder_count === null)).toBe(true);
     expect((await local('/api/members-status?x=1')).status).toBe(400);
     expect((await local('/api/members-status?team=ops')).status).toBe(403);
   });

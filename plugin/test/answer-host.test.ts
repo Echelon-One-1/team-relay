@@ -18,7 +18,7 @@ import { boundaryRubric, childArgs, rubric } from '../src/headless.js';
 import { resolveClaudeBin } from '../src/locate.js';
 import { RelayClient } from '../src/relay-client.js';
 import { scopeFolder } from '../src/scope.js';
-import { ACCEPTED, BOUNDARIES, ORG, REPO_ROOT, TOPIC, makeFixture, writeFolders, type Fixture } from './helpers/boundary-fixture.js';
+import { BOUNDARIES, FOLDERS, MY_FOLDER, REPO_ROOT, TOPIC, makeFixture, writeFolders, type Fixture } from './helpers/boundary-fixture.js';
 import { FakeRelay, TOKEN_OF } from './helpers/fake-relay.js';
 import { DIST, FIXTURES, baseEnv, sleep, textOf, until, waitFor } from './helpers/mcp.js';
 
@@ -531,14 +531,14 @@ describe('one host per machine (M8-SPEC §1)', () => {
   });
 });
 
-describe('boundary mode (M10-SPEC §2, §3)', () => {
+describe('boundary mode (13 Nov 2026: the topic, and the folders the member chose)', () => {
   let f: Fixture;
   beforeAll(() => {
     f = makeFixture();
-    writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] });
+    writeFolders(f, FOLDERS);
   });
-  const alpha = (...p: string[]) => join(f.repoRoot, 'alpha', ...p);
-  const plan = () => join(f.driveRoot, 'Clients', 'plan.md');
+  const alpha = (...p: string[]) => join(f.alpha, ...p);
+  const plan = () => join(f.myFolder, 'Clients', 'plan.md');
   async function bsession(opts: { decide?: Decide | null; env?: Record<string, string>; accepted?: number } = {}) {
     relay.setBoundaries(BOUNDARIES);
     relay.teamName = 'Example Org';
@@ -553,16 +553,22 @@ describe('boundary mode (M10-SPEC §2, §3)', () => {
     expect(relay.toolEvents.filter((e) => e.request_id === id && (e.body as { status: string }).status === 'waiting')).toEqual([]);
     expect((await s.call('whoami')).json).toMatchObject({ approvals_pending: 0 });
   };
+  /** No chosen folder's name or path in what bob published (nobody else sees a member's folders). */
+  const noFolderNames = () => {
+    const m = JSON.stringify(relay.manifests.get('bob'));
+    for (const x of ['example-org', 'alpha', 'notes', '"team"', f.repoRoot, f.myFolder, f.home]) expect(m, x).not.toContain(x);
+  };
 
-  it('ACC-2/3: a tracked file in an allowed clone and a file in the team drive are read without asking, and the answer ships', async () => {
+  it('a tracked file in a chosen repository and a file in a chosen plain folder are read without asking, and the answer ships', async () => {
     const s = await bsession();
     await waitFor(() => s.notes.find((n) => n.content.includes("within your team's boundaries")), 5000, 'the announcement');
-    expect(s.notes.find((n) => n.content.includes("within your team's boundaries"))!.content).toMatch(
-      /^team-relay: This session now answers teammates automatically within your team's boundaries \(version 1\): 4 GitHub repositories \(.*\), the shared drive Team Drive; \d+ files\. Reads of anything else are denied without asking/,
+    expect(s.notes.find((n) => n.content.includes("within your team's boundaries"))!.content).toBe(
+      `team-relay: This session now answers teammates automatically within your team's boundaries (version 1): 2 of your folders (example-org, team); ${f.allowed.length} files. ` +
+        'Reads of anything else are denied without asking, off-topic questions are declined, and nothing waits for your approval except a capability call. Change your folders with /team-relay:folders.',
     );
     const id = ask(
       `Where is the staging bucket? ${script([
-        { host: { tool: 'list_files', args: { area: 'alpha', glob: '*.md' } } },
+        { host: { tool: 'list_files', args: { area: 'example-org', glob: 'alpha/**/*.md' } } },
         { permission: { tool_name: 'Read', input: { file_path: alpha('README.md') } } },
         { permission: { tool_name: 'Read', input: { file_path: plan() } } },
         { reply: { text: 'In europe-west3 ({{decision}}).' } },
@@ -579,11 +585,11 @@ describe('boundary mode (M10-SPEC §2, §3)', () => {
     expect(r.rubric).toContain(`topic ${JSON.stringify(TOPIC)}`);
     // An empty private working directory, and no Read allow rule: every Read reaches the host.
     expect(r.cwd).toMatch(/\/trh-[^/]+\/run-[^/]+\/work$/);
-    expect(r.settings.permissions.allow).toEqual(['mcp__host__reply', 'mcp__host__list_files', 'mcp__host__search_files', 'mcp__host__read_google_file']);
+    expect(r.settings.permissions.allow).toEqual(['mcp__host__reply', 'mcp__host__list_files', 'mcp__host__search_files']);
     expect(r.settings.permissions.allow.some((x: string) => x.startsWith('Read('))).toBe(false);
     expect(r.settings.permissions.deny).toEqual(expect.arrayContaining(['Glob', 'Grep']));
     expect(r.mcp.mcpServers.host.env.TEAM_RELAY_HOST_MODE).toBe('boundaries');
-    expect([...r.hostTools].sort()).toEqual(['list_files', 'permission', 'read_google_file', 'reply', 'search_files']);
+    expect([...r.hostTools].sort()).toEqual(['list_files', 'permission', 'reply', 'search_files']);
     const listed = JSON.parse(callsOf(id, 'list_files')[0].text);
     expect(listed.files).toEqual([alpha('README.md'), alpha('docs', 'guide.md')]);
     expect(callsOf(id, 'permission').map((c: any) => JSON.parse(c.text).behavior)).toEqual(['allow', 'allow']);
@@ -599,24 +605,29 @@ describe('boundary mode (M10-SPEC §2, §3)', () => {
     // The run's folder is gone with the run.
     await waitFor(() => !existsSync(reads[0]!.updated.file_path), 5000, 'the snapshot folder to be removed');
     await nothingWaited(s, id);
-    // What the member answers from is published by name.
-    expect(relay.manifests.get('bob')).toMatchObject({ shares: [{ name: 'Team_Drive' }, { name: 'alpha' }, { name: 'beta' }, { name: 'gamma' }, { name: 'workspace' }] });
+    // Nobody else sees a member's folders: no share is published in boundary mode.
+    expect(relay.manifests.get('bob')).toMatchObject({ shares: [] });
+    noFolderNames();
     const who = (await s.call('whoami')).json;
-    expect(who).toMatchObject({ answering_mode: 'boundaries', boundaries_version: 1, answering_folder: null });
-    expect((who.answering_from as { github_repositories: string[] }).github_repositories).toEqual(['example-org/workspace', 'example-org/alpha', 'EXAMPLE-ORG/beta', 'example-org/gamma']);
+    expect(who).toMatchObject({ answering_mode: 'boundaries', boundaries_version: 1, answering_folder: null, boundaries_acceptance: 'accepted' });
+    expect(who.answering_from).toEqual({ your_folders: ['example-org', 'team'], files: f.allowed.length, summary: `2 of your folders (example-org, team); ${f.allowed.length} files` });
   });
 
-  it('ACC-2/3/6: untracked, ignored, other-org, other-account, My Drive and symlink-escape reads are denied at once; the answer still ships', async () => {
+  it('untracked, ignored, not chosen, credential and symlink-escape reads are denied at once; the answer still ships', async () => {
     const s = await bsession();
     const reads = [
       f.forbidden.untracked!,
       f.forbidden.ignored!,
-      f.forbidden.otherOrg!,
-      f.forbidden.otherAccount!,
-      f.forbidden.myDrive!,
+      f.forbidden.betaUntracked!,
+      f.forbidden.notChosen!,
+      f.forbidden.outside!,
+      f.forbidden.nodeModules!,
+      f.forbidden.submodule!,
       f.forbidden.symlinkOut!,
       f.forbidden.swappedDir!,
       f.forbidden.untrackedLinkDir!,
+      f.forbidden.myFolderSymlinkOut!,
+      f.forbidden.tooBig!,
       '/etc/hosts',
     ];
     const id = ask(
@@ -633,6 +644,7 @@ describe('boundary mode (M10-SPEC §2, §3)', () => {
     const denials = callsOf(id, 'permission').map((c: any) => JSON.parse(c.text));
     expect(denials.map((d: any) => d.behavior)).toEqual(Array(reads.length + 3).fill('deny'));
     for (const d of denials.slice(0, reads.length)) expect(d.message).toBe(OUTSIDE_SET);
+    expect(OUTSIDE_SET).toContain('only files in the folders the member chose (in a git repository, only the files git tracks)');
     expect(denials[reads.length].message).toMatch(/never readable/);
     expect(denials[reads.length + 1].message).toBe('Glob is not available when answering automatically.');
     expect(denials[reads.length + 2].message).toBe('Grep is not available when answering automatically.');
@@ -686,7 +698,7 @@ describe('boundary mode (M10-SPEC §2, §3)', () => {
     expect(replyTo(id)!.body).toMatchObject({ text: 'ran service_health' });
   });
 
-  it('ACC-9: a boundaries change is used by the next run', async () => {
+  it('a new topic and a change of folders are used by the next run; an accepted version covers later ones', async () => {
     try {
       const s = await bsession();
       const first = ask(script([{ host: { tool: 'list_files', args: {} } }, { reply: { text: 'one' } }]));
@@ -694,22 +706,23 @@ describe('boundary mode (M10-SPEC §2, §3)', () => {
       const before = JSON.parse(callsOf(first, 'list_files')[0].text);
       expect(before.files).toContain(alpha('README.md'));
       expect(before.files).toContain(plan());
-      // A narrowing (the drive taken away) applies at once, with no acceptance.
-      relay.setBoundaries({ ...BOUNDARIES, topic: 'Only the repositories.', drives: [] });
+      // The topic changes (version 2; bob accepted 1, which still counts) and bob drops a folder.
+      relay.setBoundaries({ topic: 'Only the repositories.' });
+      writeFolders(f, [REPO_ROOT]);
       const second = ask(script([{ host: { tool: 'list_files', args: {} } }, { permission: { tool_name: 'Read', input: { file_path: plan() } } }, { reply: { text: 'two' } }]));
       await waitFor(() => replyTo(second), 15_000, 'the second answer');
       const after = JSON.parse(callsOf(second, 'list_files')[0].text);
       expect(after.files).toContain(alpha('README.md'));
       expect(after.files).not.toContain(plan());
-      expect(after.areas.map((a: any) => a.area).filter((a: string) => a.startsWith('drive:'))).toEqual([]);
+      expect(after.areas.map((a: any) => a.area)).toEqual(['folder:example-org']);
       expect(JSON.parse(callsOf(second, 'permission')[0].text)).toEqual({ behavior: 'deny', message: OUTSIDE_SET });
       expect(record(second).rubric).toContain('topic "Only the repositories."');
       expect((await s.call('whoami')).json).toMatchObject({ boundaries_version: 2, boundaries_acceptance: 'accepted' });
-      await waitFor(() => !(relay.manifests.get('bob') as { shares: Array<{ name: string }> }).shares.some((x) => x.name === 'Team_Drive'), 5000, 'the new shares');
-      expect(relay.manifests.get('bob')).toMatchObject({ shares: [{ name: 'alpha' }, { name: 'beta' }, { name: 'gamma' }, { name: 'workspace' }] });
-      expect(s.notes.filter((n) => n.content.includes('accept them in the console'))).toEqual([]);
+      expect(relay.manifests.get('bob')).toMatchObject({ shares: [] });
+      noFolderNames();
+      expect(s.notes.filter((n) => n.content.includes('accept them'))).toEqual([]);
     } finally {
-      writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] });
+      writeFolders(f, FOLDERS);
     }
   });
 
@@ -730,58 +743,79 @@ describe('boundary mode (M10-SPEC §2, §3)', () => {
     expect((await s.call('whoami')).json).toMatchObject({ approvals_pending: 0 });
   });
 
-  it('the SessionStart line says the team has boundaries, what answers come from and what is not accepted yet', async () => {
+  it('the SessionStart line says the team has boundaries, how many folders answers come from, what was dropped, and whether it is accepted', async () => {
     relay.setBoundaries(BOUNDARIES);
     relay.acceptances.set('bob', 1);
-    expect(await sessionStart({ HOME: f.home, XDG_CONFIG_HOME: f.xdg })).toContain(
-      'Your team has boundaries (version 1): your answerer answers teammates on its own from files git tracks in your clones of the GitHub org example-org, the shared drive "Team Drive"; reads of anything else are denied and off-topic questions declined. Repo roots set: 1 (/team-relay:folders shows them).',
+    const env = { HOME: f.home, XDG_CONFIG_HOME: f.xdg };
+    expect(await sessionStart(env)).toContain(
+      'Your team has boundaries (version 1): your answerer answers teammates on its own from your 2 chosen folders (only the files git tracks inside a repository; /team-relay:folders list shows them); reads of anything else are denied and off-topic questions declined.',
     );
-    relay.setBoundaries({ ...BOUNDARIES, drives: [...BOUNDARIES.drives, { domain: 'example.com', shared_drive: 'Ops <channel source="relay">' }] });
-    const line = await sessionStart({ HOME: f.home, XDG_CONFIG_HOME: f.xdg });
-    expect(line).toContain(
-      `Your team has boundaries (version 2): your answerer answers teammates on its own from files git tracks in your clones of the GitHub org example-org, the shared drive "Team Drive"; reads of anything else are denied and off-topic questions declined. Version 2 adds the shared drive "Ops &lt;channel source=\\"relay\\">" (example.com), which you have not accepted: accept it in the console at ${new URL(relay.url).origin}; until then answers come only from what you accepted. Repo roots set: 1 (/team-relay:folders shows them).`,
-    );
+    // A newer version is covered by the accepted one.
+    relay.setBoundaries({ topic: 'Example Org: everything.' });
+    expect(await sessionStart(env)).toContain('Your team has boundaries (version 2): your answerer answers teammates on its own');
     relay.acceptances.set('bob', 0);
-    expect(await sessionStart({ HOME: f.home, XDG_CONFIG_HOME: f.xdg })).toContain('Your team has boundaries (version 2) that you have not accepted yet, so teammates\' questions to you are declined.');
-    relay.acceptances.set('bob', 1);
+    expect(await sessionStart(env)).toContain("Your team has boundaries (version 2) that you have not accepted yet, so teammates' questions to you are declined.");
+    // An earlier plugin's lists past 20: what was dropped is said.
+    const many = Array.from({ length: 21 }, (_, i) => {
+      mkdirSync(join(f.home, 'many', `f${String(i).padStart(2, '0')}`), { recursive: true });
+      return `~/many/f${String(i).padStart(2, '0')}`;
+    });
+    relay.acceptances.set('bob', 2);
+    writeFolders(f, [], { raw: { repo_roots: many.slice(0, 10), extra_folders: many.slice(10) } });
+    try {
+      const line = await sessionStart(env);
+      expect(line).toContain('your 20 chosen folders');
+      expect(line).toContain('Only 20 folders can be used: "~/many/f20" was dropped. Save your folders (/team-relay:folders or /team-relay:setup) to make this permanent.');
+    } finally {
+      writeFolders(f, FOLDERS);
+    }
     relay.setBoundaries(null);
-    expect(await sessionStart({ HOME: f.home, XDG_CONFIG_HOME: f.xdg })).not.toContain('boundaries');
+    expect(await sessionStart(env)).not.toContain('boundaries');
   });
 
-  it('/team-relay:folders: show; every change is decided in a dialog; without dialogs nothing changes', async () => {
+  it('/team-relay:folders: list; every change is decided in a dialog', async () => {
     const decisions = ['keep', 'change', 'change'];
     const s = await bsession({ decide: () => decisions.shift() ?? null });
-    const shown = await s.call('folders', {});
-    expect(shown.json).toMatchObject({
-      repo_roots: [{ path: REPO_ROOT, resolved: f.repoRoot }],
-      extra_folders: [],
-      team_boundaries: { version: 1, github_orgs: ['example-org'], shared_drives: ['"Team Drive" (example.com)'], member_folders_allowed: false },
-    });
-    expect(shown.json.answers_come_from).toMatch(/^4 GitHub repositories/);
-    // Kept in the dialog: nothing changes.
-    const kept = await s.call('folders', { action: 'add_folder', path: '~/notes/team' });
-    expect(kept.json.message).toBe('You kept it as it was; nothing changed.');
-    expect(s.elicited[0]).toContain(`Let your automatic answerer read ~/notes/team (${f.myFolder})?`);
-    // Allowed: added; then removed.
-    const added = await s.call('folders', { action: 'add_folder', path: '~/notes/team' });
-    expect(added.json).toMatchObject({ extra_folders: [{ path: '~/notes/team', resolved: f.myFolder }] });
-    const removed = await s.call('folders', { action: 'remove_folder', path: f.myFolder });
-    expect(removed.json).toMatchObject({ extra_folders: [] });
-    expect(s.elicited).toHaveLength(3);
-    // An unsafe folder is refused before any dialog.
-    const bad = await s.call('folders', { action: 'add_root', path: '~/Library/CloudStorage' });
-    expect(bad.isError).toBe(true);
-    expect(bad.text).toMatch(/cannot be added: it is inside ~\/Library/);
-    expect(s.elicited).toHaveLength(3);
-    writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] });
+    try {
+      const shown = await s.call('folders', {});
+      expect(shown.json).toMatchObject({
+        team: 'demo',
+        folders: [
+          { path: REPO_ROOT, resolved: f.repoRoot },
+          { path: MY_FOLDER, resolved: f.myFolder },
+        ],
+        team_boundaries: { version: 1, topic: JSON.stringify(TOPIC) },
+        accepted: { version: 1 },
+        answers_come_from: `2 of your folders (example-org, team); ${f.allowed.length} files`,
+      });
+      // Kept in the dialog: nothing changes.
+      const other = '~/code/example-org/alpha';
+      const kept = await s.call('folders', { action: 'add', path: other });
+      expect(kept.json.message).toBe('You kept it as it was; nothing changed.');
+      expect(s.elicited[0]).toContain(`Let your automatic answerer read ${other} (${f.alpha})?`);
+      // Allowed: removed; then added back.
+      const removed = await s.call('folders', { action: 'remove', path: f.myFolder });
+      expect(removed.json).toMatchObject({ folders: [{ path: REPO_ROOT, resolved: f.repoRoot }] });
+      const added = await s.call('folders', { action: 'add', path: MY_FOLDER });
+      expect((added.json.folders as unknown[]).length).toBe(2);
+      expect(s.elicited).toHaveLength(3);
+      // An unsafe folder is refused before any dialog.
+      mkdirSync(join(f.home, 'Library', 'CloudStorage'), { recursive: true });
+      const bad = await s.call('folders', { action: 'add', path: '~/Library/CloudStorage' });
+      expect(bad.isError).toBe(true);
+      expect(bad.text).toMatch(/cannot be added: it is inside ~\/Library/);
+      expect(s.elicited).toHaveLength(3);
+    } finally {
+      writeFolders(f, FOLDERS);
+    }
   });
 
   it('/team-relay:folders without dialogs changes nothing', async () => {
     const s = await bsession({ decide: null });
-    const r = await s.call('folders', { action: 'add_folder', path: '~/notes/team' });
+    const r = await s.call('folders', { action: 'remove', path: MY_FOLDER });
     expect(r.isError).toBe(true);
     expect(r.text).toMatch(/does not offer dialogs to plugins.*so your folders cannot be changed from here/);
-    expect((await s.call('folders', {})).json).toMatchObject({ extra_folders: [] });
+    expect(((await s.call('folders', {})).json.folders as unknown[]).length).toBe(2);
   });
 
   it('§7.6: while the boundaries were never read, questions get the fixed busy line; nothing runs and nothing waits', async () => {
@@ -799,37 +833,43 @@ describe('boundary mode (M10-SPEC §2, §3)', () => {
     expect((await s.call('whoami')).json).toMatchObject({ approvals_pending: 0 });
   });
 
-  it('§7.1, M11-SPEC §2: nothing accepted at the relay: the fixed decline, no run, one status line; accepting in the console lets the next question through', async () => {
-    // The local file still says version 1 was accepted (M10): ignored.
-    writeFolders(f, { repo_roots: [REPO_ROOT], extra_folders: [] });
-    const s = await bsession({ decide: () => 'change', accepted: 0 });
-    await until(() => s.notes.find((n) => n.content.includes('you have not accepted yet')));
-    expect(s.notes.find((n) => n.content.startsWith('team-relay: This session now answers'))!.content).toBe(
-      `team-relay: This session now answers teammates for you, but declines their questions until you accept your team's boundaries in the console: ${relay.url}`,
-    );
-    const a = ask(script([{ reply: { text: 'one' } }]));
-    const b = ask(script([{ reply: { text: 'two' } }]));
-    await until(() => replyTo(a) && replyTo(b));
-    expect([replyTo(a)!.body.text, replyTo(b)!.body.text]).toEqual([NOT_SET_UP_REPLY('bob'), NOT_SET_UP_REPLY('bob')]);
-    expect(NOT_SET_UP_REPLY('bob')).toBe("bob hasn't set up answering for this team yet.");
-    expect(existsSync(join(tmp, 'stub-claude', `${a}.json`))).toBe(false);
-    const lines = s.notes.filter((n) => n.content.includes('you have not accepted yet'));
-    expect(lines.map((n) => n.content)).toEqual([
-      `team-relay: demo has boundaries (version 1) you have not accepted yet, so teammates' questions to you are declined. Open the console to see and accept them: ${relay.url}`,
-    ]);
-    expect((await s.call('whoami')).json).toMatchObject({ boundaries_acceptance: 'not_accepted', answering_from: null, approvals_pending: 0 });
-    expect(relay.manifests.get('bob')).toMatchObject({ shares: [] });
-    // The folders tool accepts nothing: it says where, without a dialog.
-    const accept = await s.call('folders', { action: 'accept' });
-    expect(accept.json.message).toContain(`open ${relay.url} and press Accept`);
-    expect(s.elicited).toHaveLength(0);
-    // Accepted in the console (the relay records it): the next question is answered.
-    relay.acceptances.set('bob', 1);
-    const c = ask(script([{ host: { tool: 'list_files', args: { area: 'alpha', glob: '*.md' } } }, { reply: { text: 'three' } }]));
-    await until(() => replyTo(c));
-    expect(replyTo(c)!.body.text).toBe('three');
-    expect(JSON.parse(callsOf(c, 'list_files')[0].text).files).toEqual([alpha('README.md'), alpha('docs', 'guide.md')]);
-    expect((await s.call('whoami')).json).toMatchObject({ boundaries_acceptance: 'accepted' });
+  it('M11-SPEC §2: nothing accepted at the relay: the fixed decline, no run, one status line; accepting in the console lets the next question through', async () => {
+    // An earlier plugin's file that says version 1 was accepted: ignored.
+    writeFolders(f, [], { raw: { repo_roots: [REPO_ROOT], extra_folders: [MY_FOLDER], accepted: { version: 1 } } });
+    try {
+      const s = await bsession({ decide: () => 'change', accepted: 0 });
+      await until(() => s.notes.find((n) => n.content.includes('you have not accepted yet')));
+      expect(s.notes.find((n) => n.content.startsWith('team-relay: This session now answers'))!.content).toBe(
+        `team-relay: This session now answers teammates for you, but declines their questions until you accept your team's boundaries in the console: ${relay.url}`,
+      );
+      const a = ask(script([{ reply: { text: 'one' } }]));
+      const b = ask(script([{ reply: { text: 'two' } }]));
+      await until(() => replyTo(a) && replyTo(b));
+      expect([replyTo(a)!.body.text, replyTo(b)!.body.text]).toEqual([NOT_SET_UP_REPLY('bob'), NOT_SET_UP_REPLY('bob')]);
+      expect(NOT_SET_UP_REPLY('bob')).toBe("bob hasn't set up answering for this team yet.");
+      expect(existsSync(join(tmp, 'stub-claude', `${a}.json`))).toBe(false);
+      const lines = s.notes.filter((n) => n.content.includes('you have not accepted yet'));
+      expect(lines.map((n) => n.content)).toEqual([
+        `team-relay: demo has boundaries (version 1) you have not accepted yet, so teammates' questions to you are declined. Open the console to see and accept them: ${relay.url}`,
+      ]);
+      expect((await s.call('whoami')).json).toMatchObject({ boundaries_acceptance: 'not_accepted', answering_from: null, approvals_pending: 0 });
+      expect(relay.manifests.get('bob')).toMatchObject({ shares: [] });
+      // The folders tool accepts nothing: it says where to accept, and there is no accept action.
+      const listed = await s.call('folders', {});
+      expect(listed.json.accepted).toBe(`nothing yet: teammates' questions to you are declined until you accept your team's boundaries in the console (${relay.url})`);
+      expect((await s.call('folders', { action: 'accept' })).isError).toBe(true);
+      expect(s.elicited).toHaveLength(0);
+      // Accepted in the console (the relay records it): the next question is answered.
+      relay.acceptances.set('bob', 1);
+      const c = ask(script([{ host: { tool: 'list_files', args: { area: 'example-org', glob: 'alpha/**/*.md' } } }, { reply: { text: 'three' } }]));
+      await until(() => replyTo(c));
+      expect(replyTo(c)!.body.text).toBe('three');
+      expect(JSON.parse(callsOf(c, 'list_files')[0].text).files).toEqual([alpha('README.md'), alpha('docs', 'guide.md')]);
+      expect((await s.call('whoami')).json).toMatchObject({ boundaries_acceptance: 'accepted' });
+      noFolderNames();
+    } finally {
+      writeFolders(f, FOLDERS);
+    }
   });
 
   it('M11-SPEC §2: when the relay cannot say what was accepted, the question gets the busy line; nothing runs or waits', async () => {
@@ -843,63 +883,25 @@ describe('boundary mode (M10-SPEC §2, §3)', () => {
     expect((await s.call('whoami')).json).toMatchObject({ boundaries_acceptance: 'unknown', approvals_pending: 0 });
   });
 
-  it('§7.1: a widening is used only once accepted in the console, with one status line per version', async () => {
-    const s = await bsession({ decide: () => 'change' });
-    relay.setBoundaries({ ...BOUNDARIES, github_orgs: [ORG, 'OtherOrg'] });
-    const q = (text: string) => ask(script([{ host: { tool: 'list_files', args: {} } }, { permission: { tool_name: 'Read', input: { file_path: f.forbidden.otherOrg } } }, { reply: { text } }]));
-    const first = q('one');
-    await until(() => replyTo(first));
-    // Answered from the intersection: the new org is neither listed nor readable.
-    expect(JSON.parse(callsOf(first, 'list_files')[0].text).files).not.toContain(f.forbidden.otherOrg);
-    expect(JSON.parse(callsOf(first, 'permission')[0].text)).toEqual({ behavior: 'deny', message: OUTSIDE_SET });
-    const second = q('two');
-    await until(() => replyTo(second));
-    const changed = s.notes.filter((n) => n.content.includes('boundaries changed'));
-    expect(changed.map((n) => n.content)).toEqual([
-      `team-relay: demo's boundaries changed (version 2 adds the GitHub org OtherOrg); accept them in the console: ${relay.url}. Until then your automatic answers come only from what you accepted.`,
-    ]);
-    expect(changed[0]!.meta).toEqual({ type: 'status' });
-    expect((await s.call('whoami')).json).toMatchObject({ boundaries_acceptance: 'pending' });
-    // Accepted in the console.
-    relay.acceptances.set('bob', 2);
-    const third = q('three');
-    await until(() => replyTo(third));
-    expect(JSON.parse(callsOf(third, 'list_files')[0].text).files).toContain(f.forbidden.otherOrg);
-    expect(JSON.parse(callsOf(third, 'permission')[0].text).behavior).toBe('allow');
-    expect(s.notes.filter((n) => n.content.includes('boundaries changed'))).toHaveLength(1);
-    expect(s.elicited).toEqual([]);
+  it('an accepted version past the current one (an earlier team under this id) covers nothing', async () => {
+    const s = await bsession({ accepted: 7 });
+    const id = ask(script([{ reply: { text: 'x' } }]));
+    await until(() => replyTo(id));
+    expect(replyTo(id)!.body.text).toBe(NOT_SET_UP_REPLY('bob'));
+    expect(existsSync(join(tmp, 'stub-claude', `${id}.json`))).toBe(false);
+    expect((await s.call('whoami')).json).toMatchObject({ boundaries_acceptance: 'not_accepted' });
   });
 
-  it('§7.1: an item the team drops and adds back waits for a new acceptance; the local file is never written', async () => {
+  it('the local file is never written by answering', async () => {
     const s = await bsession();
     const before = readFileSync(join(f.xdg, 'team-relay', 'boundaries.local.json'), 'utf8');
-    const q = (text: string) => ask(script([{ host: { tool: 'list_files', args: {} } }, { permission: { tool_name: 'Read', input: { file_path: plan() } } }, { reply: { text } }]));
-    const first = q('one');
-    await until(() => replyTo(first));
-    expect(JSON.parse(callsOf(first, 'permission')[0].text).behavior).toBe('allow');
-    // The team drops the drive: not read from at once.
-    relay.setBoundaries({ ...BOUNDARIES, drives: [] });
-    const second = q('two');
-    await until(() => replyTo(second));
-    expect(JSON.parse(callsOf(second, 'permission')[0].text)).toEqual({ behavior: 'deny', message: OUTSIDE_SET });
-    // The team adds it back: since version 3, after the accepted version 1, so it waits.
-    relay.setBoundaries(BOUNDARIES);
-    const third = q('three');
-    await until(() => replyTo(third));
-    expect(JSON.parse(callsOf(third, 'list_files')[0].text).files).not.toContain(plan());
-    expect(JSON.parse(callsOf(third, 'permission')[0].text)).toEqual({ behavior: 'deny', message: OUTSIDE_SET });
-    expect((await s.call('whoami')).json).toMatchObject({ boundaries_version: 3, boundaries_acceptance: 'pending' });
-    await until(() => s.notes.some((n) => n.content.includes('boundaries changed')));
-    expect(s.notes.filter((n) => n.content.includes('boundaries changed')).map((n) => n.content)).toEqual([
-      `team-relay: demo's boundaries changed (version 3 adds the shared drive "${BOUNDARIES.drives[0]!.shared_drive}" (${BOUNDARIES.drives[0]!.domain})); accept them in the console: ${relay.url}. Until then your automatic answers come only from what you accepted.`,
-    ]);
-    expect(s.elicited).toEqual([]);
+    const id = ask(script([{ host: { tool: 'list_files', args: {} } }, { reply: { text: 'one' } }]));
+    await until(() => replyTo(id));
+    relay.setBoundaries({ topic: 'Another topic.' });
+    const id2 = ask(script([{ reply: { text: 'two' } }]));
+    await until(() => replyTo(id2));
     expect(readFileSync(join(f.xdg, 'team-relay', 'boundaries.local.json'), 'utf8')).toBe(before);
-    // Accepting version 3 in the console covers it again.
-    relay.acceptances.set('bob', 3);
-    const fourth = q('four');
-    await until(() => replyTo(fourth));
-    expect(JSON.parse(callsOf(fourth, 'permission')[0].text).behavior).toBe('allow');
+    expect(s.elicited).toEqual([]);
   });
 
   it("another team's boundaries document is refused: nothing is worked out from it, and questions get the busy line", async () => {

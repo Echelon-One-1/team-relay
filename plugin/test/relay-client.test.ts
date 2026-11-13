@@ -161,37 +161,6 @@ describe('relay client', () => {
   });
 });
 
-describe('relay client: the sources reads (PICKERS-SPEC §3.5, §3.6)', () => {
-  it('reads sources/config and sources/github for the team, on behalf of the viewer when asked', async () => {
-    const config = { github: { configured: false, install_url: null }, google_picker: null };
-    relay.fail((r) => r.path === '/v1/teams/demo/sources/config', 200, 1, config);
-    expect(await client().sourcesConfig({ onBehalfOf: 'alice@example.com' })).toEqual(config);
-    const sent = relay.requests.at(-1)!;
-    expect(sent.method).toBe('GET');
-    expect(sent.path).toBe('/v1/teams/demo/sources/config');
-    expect(sent.headers['x-relay-on-behalf-of']).toBe('alice@example.com');
-    expect(sent.body).toBeUndefined();
-
-    const listing = { installations: [], fetched_at: '2026-11-11T10:00:00.000Z' };
-    relay.fail((r) => r.path === '/v1/teams/research/sources/github', 200, 1, listing);
-    expect(await client().withTeam('research').sourcesGithub()).toEqual(listing);
-    expect(relay.requests.at(-1)!.path).toBe('/v1/teams/research/sources/github');
-  });
-
-  it("passes the relay's refusals on as RelayError, without a Retry-After when none was sent", async () => {
-    relay.fail((r) => r.path.endsWith('/sources/github'), 404, 1, { error: 'github_not_configured', detail: 'No GitHub App.' });
-    const err = await client().sourcesGithub().catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(RelayError);
-    expect(err).toMatchObject({ status: 404, code: 'github_not_configured', detail: 'No GitHub App.', retryAfter: undefined });
-    // Not configured is not retried (a 404); GitHub's rate limit (503) is, like any 5xx, when attempts allow.
-    expect(relay.requests.filter((r) => r.path.endsWith('/sources/github'))).toHaveLength(1);
-    relay.fail((r) => r.path.endsWith('/sources/github'), 503, 1, { error: 'github_rate_limited' });
-    relay.fail((r) => r.path.endsWith('/sources/github'), 200, 1, { installations: [], fetched_at: '2026-11-11T10:00:00.000Z' });
-    expect((await client().sourcesGithub()).installations).toEqual([]);
-    expect(sleeps).toEqual([1000]);
-  });
-});
-
 describe('relay settings', () => {
   it('accepts https anywhere and http only to loopback', () => {
     expect(parseRelayUrl('https://relay.example.com').href).toBe('https://relay.example.com/');

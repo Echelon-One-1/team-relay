@@ -71,8 +71,8 @@ const write = (method: string, body: unknown, extra: Record<string, string> = {}
   body: body === undefined ? undefined : JSON.stringify(body),
 });
 const choose = () => req(port, '/api/local/folders/choose', write('POST', {}));
-const stored = () => readTeamSettings(memberFoldersPath(env), env, 'demo').extra_folders;
-const store = (folders: string[]) => writeMemberSettings(memberFoldersPath(env), withTeam({ teams: {} }, 'demo', { repo_roots: [], extra_folders: folders, accepted: null }), env);
+const stored = () => readTeamSettings(memberFoldersPath(env), env, 'demo').folders;
+const store = (folders: string[]) => writeMemberSettings(memberFoldersPath(env), withTeam({ teams: {} }, 'demo', { folders }), env);
 const folder = (...parts: string[]) => {
   const p = join(home, ...parts);
   mkdirSync(p, { recursive: true });
@@ -227,10 +227,28 @@ describe('GET /api/local/setup', () => {
     expect(r.json()).toEqual({
       signed_in: { member: 'bob', team: 'demo', email: 'bob@example.com' },
       folders: ['~/code/example-org'],
+      dropped: [],
       chooser: true,
       background: { installed: false, available: false, reason: BACKGROUND_NO_CLAUDE },
       limits: { max_folders: 20 },
     });
+  });
+
+  it('folders an earlier plugin\'s lists held past 20 are `dropped`, with the note; saving makes it permanent', async () => {
+    const many = Array.from({ length: 22 }, (_, i) => folder('many', `f${String(i).padStart(2, '0')}`));
+    const file = memberFoldersPath(env);
+    mkdirSync(join(xdg, 'team-relay'), { recursive: true, mode: 0o700 });
+    writeFileSync(file, JSON.stringify({ teams: { demo: { repo_roots: many.slice(0, 12), extra_folders: many.slice(12), accepted: null } } }), { mode: 0o600 });
+    const body = (await req(port, '/api/local/setup', { key })).json();
+    expect(body.folders).toEqual(many.slice(0, 20).map((p) => `~/${p.slice(home.length + 1)}`));
+    expect(body.dropped).toEqual(['~/many/f20', '~/many/f21']);
+    expect(body.dropped_note).toBe('Only 20 folders can be used: "~/many/f20", "~/many/f21" were dropped. Save your folders (/team-relay:folders or /team-relay:setup) to make this permanent.');
+    // Removing one saves the list: `folders` alone, the dropped ones gone for good.
+    expect((await req(port, '/api/local/folders/remove', write('POST', { path: many[0] }))).status).toBe(200);
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ teams: { demo: { folders: many.slice(1, 20) } } });
+    const after = (await req(port, '/api/local/setup', { key })).json();
+    expect(after.dropped).toEqual([]);
+    expect(after).not.toHaveProperty('dropped_note');
   });
 
   it('background answering is available on a Mac where Claude Code is found (the desktop app\'s own counts); else why not', async () => {
@@ -294,7 +312,7 @@ describe('ACC-3: choosing folders', () => {
   });
 
   it('is allowed for every member, whatever the team shares', async () => {
-    relay.setBoundaries({ topic: 'T', github_orgs: [], drives: [], member_folders: false });
+    relay.setBoundaries({ topic: 'T' });
     chooserAnswers.push({ kind: 'chosen', paths: [folder('work', 'mine')] });
     const r = await choose();
     expect(r.status).toBe(200);

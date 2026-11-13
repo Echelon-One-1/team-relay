@@ -25,38 +25,31 @@
 // listing. She can create teams (at most 3), accept or decline, and delete, by the relay's
 // rules and with its refusals; a new team is quiet (no traffic). Nothing leaves the process.
 //
-// M11-SPEC §2-§4: alice accepted version 1 of `demo`'s boundaries (they are at 2 now, so the
-// console asks her to accept again); each member's background answerer reports its status
-// (bob is fully set up, alice has not connected Drive, carol's Claude Code is signed out), and
-// questions alice asks from the console are answered by bob and carol on a short script. The
-// quiet teams have no statuses and nobody answers there.
+// M11-SPEC §2-§4: alice accepted version 1 of `demo`'s boundaries (they are at 2 now); each
+// member's background answerer reports its status (bob is fully set up with 5 folders, alice
+// chose 2, carol's Claude Code is signed out and she chose none), and questions alice asks from
+// the console are answered by bob and carol on a short script. The quiet teams have no statuses
+// and nobody answers there.
 //
 // M10-SPEC §1: each team has boundaries. `demo` and `ops` have them set (alice owns `demo`, so
 // she can change them; she is a member of `ops`, so she reads them only); `research` and any
 // new team have none yet. A change needs the current version (else 409 version_conflict), as
 // on the relay. The directory's shares read as what each member can answer from.
 //
-// PICKERS-SPEC: the demo plays the relay's picked sources. `demo`'s boundaries hold a whole org,
-// one repository of another org, a whole shared drive, one folder of another shared drive and a
-// legacy drive matched by name (which can be kept or removed, never added: 400 legacy_drive).
-// Its owner reads the sources settings (the GitHub App configured, `google_picker` null: the
-// Picker never runs in the demo) and a fake GitHub listing (two installations and a suspended
-// one); anyone else is refused (403), as the relay refuses them. Members' statuses carry the
-// sources their Macs could not find, as item keys of the current boundaries: the owner sees
-// every member's, anyone else only their own.
+// Since 13 Nov 2026 (local folders only) a team's boundaries are its topic alone: a PUT holding
+// a field of the earlier schemas is refused naming it, as the relay refuses it. Members'
+// statuses carry how many folders each chose (`folder_count`): the owner sees every member's,
+// anyone else only their own (others null), never a name or a path.
 
 import { createHash } from 'node:crypto';
-import { boundariesValid, knownItemKeys, legacyDrivesOk, nextSince, normaliseBoundaries } from './boundaries-rule.js';
+import { boundariesValid, normaliseBoundaries, removedField, removedFieldDetail } from './boundaries-rule.js';
 import type {
   Acceptance,
   Boundaries,
-  GithubListing,
-  MemberSources,
   MemberStatusEntry,
   MembersStatus,
   MyRequest,
   SetBoundariesBody,
-  SourcesConfig,
   TeamBoundaries,
 } from './boundaries-types.js';
 import { defaultManifestPath } from './exposed.js';
@@ -505,65 +498,13 @@ export type DemoTeamOptions = {
   boundaries?: { boundaries: Boundaries; version: number; updated_by: string };
 };
 
-/** PICKERS-SPEC §2.1: the demo's shared drives and the picked folder (synthetic ids). */
-export const DEMO_DRIVE_ID = '0AExampleDriveId0PVA';
-export const DEMO_DELIVERY_DRIVE_ID = '0AExampleDeliveryPVA';
-export const DEMO_FOLDER_ID = '1ExampleFolderIdxxxxxxxxxxxxxxxxx';
-
-/** M10-SPEC §1 and PICKERS-SPEC §2.1: the scripted demo team's boundaries (synthetic). */
+/** M10-SPEC §1: the scripted demo team's boundaries (synthetic): its topic. */
 export const DEMO_BOUNDARIES: Boundaries = {
   topic: 'Example Co: the orders and payments services, their runbooks, deploys and incidents, and how the team works.',
-  github_orgs: ['example-org'],
-  github_repos: [{ org: 'example-labs', repo: 'api', id: 123456 }],
-  drive_folders: [
-    { domain: 'example.com', drive_id: DEMO_DRIVE_ID, folder_id: DEMO_DRIVE_ID, folder_name: 'Example Team Drive', drive_name: 'Example Team Drive' },
-    { domain: 'example.com', drive_id: DEMO_DELIVERY_DRIVE_ID, folder_id: DEMO_FOLDER_ID, folder_name: 'Clients', drive_name: 'Example Delivery Drive' },
-  ],
-  drives: [{ domain: 'example.com', shared_drive: 'Example Archive' }],
-  member_folders: true,
 };
 
-/** PICKERS-SPEC §3.5: the demo relay's sources settings (the Picker never runs in the demo). */
-export const DEMO_SOURCES_CONFIG: SourcesConfig = {
-  github: { configured: true, install_url: 'https://github.com/apps/example-relay-sources/installations/new' },
-  google_picker: null,
-};
-
-/** PICKERS-SPEC §3.6: the demo relay's GitHub listing (synthetic), sorted as the relay sorts it. */
-const DEMO_GITHUB: Omit<GithubListing, 'fetched_at'> = {
-  installations: [
-    {
-      account: 'example-labs',
-      state: 'ok',
-      repository_selection: 'selected',
-      repos: [
-        { name: 'api', id: 123456, private: true, archived: false },
-        { name: 'ml-notebooks', id: 123457, private: false, archived: false },
-      ],
-      truncated: false,
-    },
-    {
-      account: 'example-org',
-      state: 'ok',
-      repository_selection: 'all',
-      repos: [
-        { name: 'old-site', id: 100104, private: false, archived: true },
-        { name: 'orders-service', id: 100101, private: true, archived: false },
-        { name: 'payments', id: 100102, private: true, archived: false },
-        { name: 'runbooks', id: 100103, private: true, archived: false },
-      ],
-      truncated: false,
-    },
-    { account: 'example-sandbox', state: 'suspended', repository_selection: 'all', repos: [], truncated: false },
-  ],
-};
-
-/** PICKERS-SPEC §3.3: what each scripted member's Mac could not find (item keys). */
-const DEMO_MISSING: Record<string, string[]> = {
-  alice: [`folder:${DEMO_FOLDER_ID}`],
-  bob: [],
-  carol: ['org:example-org', 'repo:example-labs/api'],
-};
+/** How many folders each scripted member chose (counts only, never names or paths). */
+const DEMO_FOLDER_COUNTS: Record<string, number> = { alice: 2, bob: 5, carol: 0 };
 
 /** M6-SPEC §1: at most this many members per team. */
 export const ROSTER_MAX = 50;
@@ -647,17 +588,15 @@ export class DemoTeam {
           { member: 'dana', emails: ['dana@example.com'], role: 'member', added_by: 'alice', added_at: iso(this.epoch - DAY_MS), status: 'invited' },
         ];
     const set = options.roster === undefined ? { boundaries: DEMO_BOUNDARIES, version: 2, updated_by: DEMO_ME } : options.boundaries;
-    // M10-SPEC §7.1: every item of the scripted boundaries has been there since version 1.
     this.bounds = set
       ? {
           team: this.team,
           version: set.version,
           boundaries: structuredClone(set.boundaries),
-          since: nextSince(null, 1, set.boundaries),
           updated_at: iso(this.epoch - 2 * DAY_MS),
           updated_by: set.updated_by,
         }
-      : { team: this.team, version: 0, boundaries: null, since: null, updated_at: null, updated_by: null };
+      : { team: this.team, version: 0, boundaries: null, updated_at: null, updated_by: null };
     this.accepted = options.roster === undefined ? { version: 1, accepted_at: iso(this.epoch - 3 * DAY_MS) } : { version: 0, accepted_at: null };
   }
 
@@ -681,40 +620,31 @@ export class DemoTeam {
 
   /**
    * GET /v1/teams/{team}/members/status (M11-SPEC §3): each active member's last status (counts
-   * and booleans only), whether they answered within 180 s, and the version they accepted.
+   * and booleans only), whether they answered within 180 s, the version they accepted, and how
+   * many folders they chose: an owner sees every member's, anyone else only their own.
    */
   membersStatus(): MembersStatus {
     const now = this.now();
     const active = this.rosterEntries.filter((e) => e.status === 'active').map((e) => e.member);
-    const status = (o: { signedIn?: boolean; roots?: number; clones?: number; drive?: boolean; selfOk?: boolean; reason?: string; seenAgo: number }) => ({
+    const status = (o: { signedIn?: boolean; selfOk?: boolean; reason?: string; seenAgo: number }) => ({
       daemon: { version: '0.11.0', started_at: iso(now - 5 * 3_600_000) },
       claude: { found: true, signed_in: o.signedIn ?? true },
-      folders: { repo_roots: o.roots ?? 1, clones: o.clones ?? 7, extra_folders: 0 },
-      drive: { connected: o.drive ?? true },
       self_test: { ok: o.selfOk ?? true, at: iso(now - 2 * 3_600_000), reason: o.reason ?? null },
       seen_at: iso(now - o.seenAgo),
     });
-    // PICKERS-SPEC §3.4: an owner sees every member's missing sources, anyone else only their
-    // own; each list is filtered against the current boundaries, as the relay filters it.
     const owner = this.viewerRole() === 'owner';
-    const sources = (member: string, version: number): MemberSources | null => {
-      if (!owner && member !== this.viewer) return null;
-      const b = this.bounds.boundaries;
-      return { boundaries_version: version, missing: b ? knownItemKeys(b, DEMO_MISSING[member] ?? []) : [] };
-    };
+    const folderCount = (member: string): number | null => (owner || member === this.viewer ? (DEMO_FOLDER_COUNTS[member] ?? 0) : null);
     const entry = (member: string): MemberStatusEntry => {
       const accepted = member === this.viewer ? this.accepted.version : 0;
-      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted, sources: null };
+      if (this.quiet) return { member, status: null, answering: false, accepted_version: accepted, folder_count: null };
       const s =
         member === 'bob'
           ? status({ seenAgo: 25_000 })
           : member === 'carol'
-            ? status({ signedIn: false, roots: 0, clones: 0, selfOk: false, reason: 'Claude Code is not signed in.', seenAgo: 9 * 60_000 })
-            : status({ drive: false, seenAgo: 40_000 });
+            ? status({ signedIn: false, selfOk: false, reason: 'Claude Code is not signed in.', seenAgo: 9 * 60_000 })
+            : status({ seenAgo: 40_000 });
       const version = member === 'bob' ? this.bounds.version : accepted;
-      // carol's Mac last looked at the version before the current one (her daemon is behind).
-      const looked = member === 'carol' ? Math.max(0, this.bounds.version - 1) : this.bounds.version;
-      return { member, status: s, answering: now - Date.parse(s.seen_at) < 180_000, accepted_version: version, sources: sources(member, looked) };
+      return { member, status: s, answering: now - Date.parse(s.seen_at) < 180_000, accepted_version: version, folder_count: folderCount(member) };
     };
     return { members: active.map(entry), boundaries_version: this.bounds.version };
   }
@@ -785,16 +715,14 @@ export class DemoTeam {
   }
 
   /**
-   * PUT /v1/teams/{team}/boundaries (M10-SPEC §1, PICKERS-SPEC §3.2): owners, at the current
-   * version; a legacy drive the stored document does not hold is 400 legacy_drive. Stored as the
-   * relay stores it (normaliseBoundaries), with `since` by PICKERS-SPEC §2.3.
+   * PUT /v1/teams/{team}/boundaries (M10-SPEC §1): owners, at the current version; a field of the
+   * earlier schemas is refused naming it. Stored as the relay stores it (normaliseBoundaries).
    */
   setBoundaries(body: SetBoundariesBody): TeamBoundaries {
     if (this.viewerRole() !== 'owner') throw new RosterRefusal(403, 'forbidden', 'Only team owners can set the boundaries.');
+    const removed = removedField(body.boundaries);
+    if (removed) throw new RosterRefusal(400, 'invalid_body', removedFieldDetail(removed));
     if (!boundariesValid(body.boundaries)) throw new RosterRefusal(400, 'invalid_body', 'The boundaries do not pass the rule.');
-    if (!legacyDrivesOk(this.bounds.boundaries?.drives ?? null, body.boundaries.drives)) {
-      throw new RosterRefusal(400, 'legacy_drive', 'Pick shared-drive folders instead of typing drive names.');
-    }
     if (body.version !== this.bounds.version) {
       throw new RosterRefusal(409, 'version_conflict', 'The boundaries changed since you read them. Read them again.');
     }
@@ -804,23 +732,10 @@ export class DemoTeam {
       team: this.team,
       version,
       boundaries: stored,
-      since: nextSince(this.bounds, version, stored),
       updated_at: iso(this.now()),
       updated_by: this.viewer,
     };
     return this.boundaries();
-  }
-
-  /** GET /v1/teams/{team}/sources/config (PICKERS-SPEC §3.5): owners only. */
-  sourcesConfig(): SourcesConfig {
-    if (this.viewerRole() !== 'owner') throw new RosterRefusal(403, 'forbidden', 'Only team owners can choose the sources.');
-    return structuredClone(DEMO_SOURCES_CONFIG);
-  }
-
-  /** GET /v1/teams/{team}/sources/github (PICKERS-SPEC §3.6): owners only; a fake listing. */
-  sourcesGithub(): GithubListing {
-    if (this.viewerRole() !== 'owner') throw new RosterRefusal(403, 'forbidden', 'Only team owners can choose the sources.');
-    return { ...structuredClone(DEMO_GITHUB), fetched_at: iso(this.now()) };
   }
 
   /** The viewer's role here, by the roster's active entries. */
@@ -1189,11 +1104,6 @@ export class DemoAccount {
         boundaries: {
           boundaries: {
             topic: 'Operations at Example Co: on-call, incidents, infrastructure and the runbooks behind them.',
-            github_orgs: ['example-ops'],
-            github_repos: [],
-            drive_folders: [{ domain: 'example.com', drive_id: '0AExampleOpsDrive0PVA', folder_id: '0AExampleOpsDrive0PVA', folder_name: 'Operations', drive_name: 'Operations' }],
-            drives: [],
-            member_folders: false,
           },
           version: 1,
           updated_by: 'olga',
