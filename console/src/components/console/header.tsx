@@ -119,8 +119,8 @@ function InboxWaiting() {
         </span>
       </TooltipTrigger>
       <TooltipContent side="bottom" className="max-w-72">
-        Your answering session is not running. Start it in a second terminal with the command /team-relay:answering
-        shows in Claude Code; the questions reach it then.
+        Nothing on your Mac is answering right now. In Claude, type /team-relay:setup and leave Background answering
+        on; the questions reach your Mac then.
       </TooltipContent>
     </Tooltip>
   )

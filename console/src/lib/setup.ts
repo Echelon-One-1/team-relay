@@ -210,7 +210,15 @@ export function addPlugin(plugin: string): string {
 }
 export const START_SETUP = `Start a Code session and type ${SETUP_COMMAND}.`
 export const SETUP_PAGE = 'A page opens: sign in, pick your team, choose the folders your Claude may read, then click Done.'
-export const COME_BACK = 'Come back to this page and click Accept.'
+export const COME_BACK = 'Come back to this page. If it still asks, click Accept.'
+
+/**
+ * Step 2 of the invite without a plugin source (a local console, whose server names none): the
+ * sender is the owner, so it points to the team's Setup page online, which shows the source.
+ */
+export function sourceOnSetupPage(origin: string): string {
+  return `Open ${origin}/join: the Setup page there shows the plugin source. Paste it and click Sync.`
+}
 
 /** M11 §6, "Simpler joining": what an owner sends someone they invited. Plain text, no markdown. */
 export function inviteMessage(teamName: string, origin: string, source: string | null, plugin: string = DEFAULT_PLUGIN): string {
@@ -222,7 +230,7 @@ export function inviteMessage(teamName: string, origin: string, source: string |
     'Open the link and accept the invitation. Then, on your Mac:',
     '',
     `1. ${OPEN_PLUGINS}`,
-    ...(source ? [`2. ${PASTE_SOURCE}`, source] : [`2. ${NO_SOURCE}`]),
+    ...(source ? [`2. ${PASTE_SOURCE}`, source] : [`2. ${sourceOnSetupPage(origin)}`]),
     `3. ${addPlugin(plugin)}`,
     `4. ${START_SETUP} ${SETUP_PAGE}`,
     `5. ${COME_BACK.replace('this page', 'the page')}`,

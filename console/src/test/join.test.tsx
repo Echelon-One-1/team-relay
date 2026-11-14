@@ -62,7 +62,7 @@ describe('the join card', () => {
       `2Paste this and click Sync:${SOURCE}Copy`,
       '3Find "team-relay" in the list and click Add.',
       '4Start a Code session and type this:/team-relay:setupA page opens: sign in, pick your team, choose the folders your Claude may read, then click Done.',
-      '5Come back to this page and click Accept.Go to Accept',
+      '5Come back to this page. If it still asks, click Accept.Go to Accept',
     ])
     await user.click(within(c).getByRole('button', { name: 'Copy plugin source' }))
     expect(await navigator.clipboard.readText()).toBe(SOURCE)

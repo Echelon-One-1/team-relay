@@ -226,7 +226,8 @@ describe('in the console', () => {
     window.history.replaceState(null, '', '/')
   })
 
-  it('an older console server without a roster (404) shows no Members panel', async () => {
+  it('an older console server without a roster (404) shows no Members panel: no Team settings tab, and /settings becomes /team', async () => {
+    window.history.replaceState(null, '', '/settings')
     setTransport(async (path) => {
       const url = new URL(path, 'http://console.invalid/')
       if (url.pathname === '/api/me') return json(fixtureMe)
@@ -239,6 +240,10 @@ describe('in the console', () => {
     await waitFor(() => expect(document.querySelector('[data-agent="bob"]')).not.toBeNull())
     await act(async () => {})
     expect(document.getElementById('members-title')).toBeNull()
+    expect(document.querySelector('[data-view-tab="settings"]')).toBeNull()
+    await waitFor(() => expect(window.location.pathname).toBe('/team'))
+    expect(document.querySelector('[data-view-tab="team"]')).toHaveAttribute('aria-current', 'page')
+    window.history.replaceState(null, '', '/')
   })
 })
 

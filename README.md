@@ -98,7 +98,7 @@ shows these steps, with the plugin source to copy:
    a team owner) and click Sync.
 3. Find "team-relay" in the list and click Add.
 4. Start a Code session and type `/team-relay:setup`.
-5. Come back to the team's page and click Accept.
+5. Come back to the team's page. If it still asks, click Accept.
 
 After step 4 your browser opens on the relay's sign-in page: sign in with Google and choose
 your team. If you are signed in already, this step is skipped; if no browser tab opens, Claude

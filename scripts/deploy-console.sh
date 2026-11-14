@@ -63,15 +63,24 @@ else
   JOIN_SOURCE="${PLUGIN_MARKETPLACE:-}"
   JOIN_SOURCE_VAR="PLUGIN_MARKETPLACE"
 fi
+# join_source_ok VALUE ALLOW_URL: an owner/repo (or, with ALLOW_URL=1, a plain https URL), no . or
+# .. segment, at most 512 characters. LC_ALL=C: the ranges are ASCII only, so a non-ASCII letter
+# is refused here as the server refuses it.
+join_source_ok() {
+  local LC_ALL=C
+  local v="$1" allow_url="$2"
+  [[ "/${v}/" != */./* && "/${v}/" != */../* && ${#v} -le 512 ]] || return 1
+  [[ "$v" =~ $MARKETPLACE_RE ]] && return 0
+  [[ "$allow_url" == 1 && "$v" =~ $SOURCE_URL_RE ]]
+}
 if [[ -n "$JOIN_SOURCE" ]]; then
-  if [[ "/${JOIN_SOURCE}/" == */./* || "/${JOIN_SOURCE}/" == */../* || ${#JOIN_SOURCE} -gt 512 ]] \
-    || { [[ ! "$JOIN_SOURCE" =~ $MARKETPLACE_RE ]] \
-      && { [[ "$JOIN_SOURCE_VAR" != "JOIN_MARKETPLACE" ]] || [[ ! "$JOIN_SOURCE" =~ $SOURCE_URL_RE ]]; }; }; then
-    if [[ "$JOIN_SOURCE_VAR" == "JOIN_MARKETPLACE" ]]; then
+  if [[ "$JOIN_SOURCE_VAR" == "JOIN_MARKETPLACE" ]]; then
+    if ! join_source_ok "$JOIN_SOURCE" 1; then
       echo "error: JOIN_MARKETPLACE must be a GitHub owner/repo, such as example-org/team-relay, or a plain https URL" >&2
-    else
-      echo "error: PLUGIN_MARKETPLACE must be a GitHub owner/repo, such as example-org/team-relay" >&2
+      exit 1
     fi
+  elif ! join_source_ok "$JOIN_SOURCE" 0; then
+    echo "error: PLUGIN_MARKETPLACE must be a GitHub owner/repo, such as example-org/team-relay" >&2
     exit 1
   fi
 fi
@@ -131,8 +140,12 @@ CONSOLE_ENV="^;^CONSOLE_MODE=hosted;CONSOLE_PUBLIC_HOST=${URL#https://};IAP_AUDI
 if [[ -n "${JOIN_REPO_URL:-}" ]]; then
   CONSOLE_ENV="${CONSOLE_ENV};JOIN_REPO_URL=${JOIN_REPO_URL}"
 fi
+# Without a source, a value an earlier deploy set is removed, so the page never shows a stale one.
+REMOVE_FLAG=()
 if [[ -n "$JOIN_SOURCE" ]]; then
   CONSOLE_ENV="${CONSOLE_ENV};JOIN_MARKETPLACE=${JOIN_SOURCE}"
+else
+  REMOVE_FLAG=(--remove-env-vars=JOIN_MARKETPLACE)
 fi
 
 SALT_SECRET="team-relay-console-ip-salt"
@@ -154,6 +167,7 @@ gcloud beta run deploy "$SERVICE" \
   "$IAP_FLAG" \
   --min-instances=0 --max-instances=2 --cpu=1 --memory=256Mi --timeout=60 \
   --update-env-vars="$CONSOLE_ENV" \
+  ${REMOVE_FLAG[@]+"${REMOVE_FLAG[@]}"} \
   --set-secrets="CONSOLE_IP_HASH_SALT=${SALT_SECRET}:${SALT_VERSION}" \
   --quiet
 

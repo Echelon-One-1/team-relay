@@ -302,13 +302,20 @@ decisions; where they differ from §5 and §6, these win.
   3. Find "team-relay" (`/api/join`'s `plugin`, else team-relay) in the list and click Add.
   4. Start a Code session and type `/team-relay:setup` (copyable). A page opens: sign in, pick
      your team, choose the folders your Claude may read, then click Done.
-  5. Come back to this page and click Accept ("Go to Accept" as before).
+  5. Come back to this page. If it still asks, click Accept ("Go to Accept" as before; the
+     `/team-relay:setup` page has its own Accept step).
   The console reads `marketplace_source` and `plugin` from `/api/join` now (and `relay_url` for
   the local console's invite link). The "Set up your Mac" step says "Choose your folders: in
   Claude, type /team-relay:setup. A page opens with your Mac's folder window."; its checks say
   "type /team-relay:setup in Claude" where they said "run the setup line again", and a missing
   Claude says "Install the Claude app from claude.ai/download and sign in." The invite message
-  carries the same five steps (the plugin source on its own line, or "ask a team owner").
+  carries the same five steps (the plugin source on its own line; without one, as on a local
+  console whose server names none, step 2 says to open `<team address>/join`, whose Setup page
+  shows the source: the sender is the owner, so it never says "ask a team owner"). The sign-in
+  page's second step reads "Add the team-relay plugin in the Claude app, then type
+  /team-relay:setup." Without a source, `deploy-console.sh` removes `JOIN_MARKETPLACE` from the
+  service, and it checks the value with `LC_ALL=C`, so non-ASCII letters are refused as the server
+  refuses them.
   `scripts/deploy-console.sh` passes `JOIN_MARKETPLACE` to the hosted console, from
   `JOIN_MARKETPLACE` or else `PLUGIN_MARKETPLACE` (the owner/repo `deploy.sh` gives the relay),
   checked before anything is built. The relay's `/setup` script and `setup-cli` stay, for

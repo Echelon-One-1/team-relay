@@ -229,7 +229,7 @@ describe('the plugin source and the invite message', () => {
         'example-org/team-relay',
         '3. Find "team-relay" in the list and click Add.',
         '4. Start a Code session and type /team-relay:setup. A page opens: sign in, pick your team, choose the folders your Claude may read, then click Done.',
-        '5. Come back to the page and click Accept.',
+        '5. Come back to the page. If it still asks, click Accept.',
       ].join('\n'),
     )
     // Plain text: no markdown, and no Terminal.
@@ -237,9 +237,10 @@ describe('the plugin source and the invite message', () => {
     expect(message).not.toMatch(/curl|Terminal|setup line/i)
   })
 
-  it('without a plugin source, the message says to ask a team owner for it', () => {
+  it('without a plugin source (a local console), the message points to the team\'s Setup page online, never back to the owner', () => {
     const message = inviteMessage('Demo', 'https://team.example.com', null)
-    expect(message.split('\n')).toContain('2. Ask a team owner for the plugin source, paste it and click Sync.')
+    expect(message.split('\n')).toContain('2. Open https://team.example.com/join: the Setup page there shows the plugin source. Paste it and click Sync.')
+    expect(message).not.toMatch(/Ask a team owner/)
     expect(message).toContain('3. Find "team-relay" in the list and click Add.')
     expect(message).not.toMatch(/curl|Terminal|setup line/i)
   })

@@ -422,6 +422,44 @@ describe('the Members panel and the invite message (M11 §6)', () => {
     expect(within(panel.querySelector('[data-member="dana"]') as HTMLElement).getByRole('button', { name: 'Copy invite message' })).toBeInTheDocument()
   })
 
+  it('a local console (its server names no plugin source): the invite points to the team\'s Setup page online', async () => {
+    // The tests run on localhost, like the local console: the team's address is the relay's.
+    expect(window.location.hostname).toBe('localhost')
+    server({ override: (c) => (c.path === '/api/join' ? json({ relay_url: 'https://relay.example.com', team: 'demo', marketplace_source: null, plugin: 'team-relay' }) : null) })
+    const user = userEvent.setup()
+    renderWithClient(<App />)
+    const panel = await screen.findByRole('region', { name: 'Members' })
+    const form = await within(panel).findByRole('form', { name: 'Invite a member' })
+    await user.type(within(form).getByLabelText('Google email'), 'erin@example.com')
+    await user.click(within(form).getByRole('button', { name: 'Invite' }))
+    await within(form).findByText(/Invited erin\. Send them the invite message/)
+    await user.click(within(form).getByRole('button', { name: 'Copy invite message' }))
+    const text = await navigator.clipboard.readText()
+    expect(text).toBe(inviteMessage('Demo', 'https://relay.example.com', null, 'team-relay'))
+    expect(text.split('\n')).toContain('2. Open https://relay.example.com/join: the Setup page there shows the plugin source. Paste it and click Sync.')
+    expect(text).not.toMatch(/Ask a team owner/)
+  })
+
+  it('a member (not an owner) at /settings sees the roster, and nothing that changes it or the team', async () => {
+    const s = server()
+    s.relay.role = 'member'
+    renderWithClient(<App />)
+    const panel = await screen.findByRole('region', { name: 'Members' })
+    await waitFor(() => expect(panel.querySelector('[data-member="bob"]')).not.toBeNull())
+    expect(panel.querySelector('[data-member="alice"]')).not.toBeNull()
+    expect(tab('settings')).toHaveAttribute('aria-current', 'page')
+    // The team's settings read, without Delete team.
+    expect(await screen.findByRole('region', { name: 'Team settings' })).toBeInTheDocument()
+    expect(screen.queryByRole('form', { name: 'Delete this team' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Delete team/ })).toBeNull()
+    // No invite form, remove, withdraw or role controls; no invite messages.
+    expect(within(panel).queryByRole('form', { name: 'Invite a member' })).toBeNull()
+    expect(within(panel).queryByLabelText('Google email')).toBeNull()
+    for (const name of [/^Remove/, /^Withdraw/, /^Make owner/, /^Remove owner/, /Copy invite message/]) {
+      expect(within(panel).queryByRole('button', { name })).toBeNull()
+    }
+  })
+
   it('a member (not an owner) has the Setup page too, and no invite messages', async () => {
     const s = server()
     s.relay.role = 'member'
