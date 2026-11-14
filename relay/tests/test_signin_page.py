@@ -262,7 +262,7 @@ async def test_the_copy_and_the_layout():
     steps = re.findall(r'<li><span class="n">(\d\d)</span><span>([^<]+)</span></li>', page)
     assert steps == [
         ("01", "Sign in with your Google account."),
-        ("02", "Run the setup line once on your Mac."),
+        ("02", "Add the team-relay plugin in the Claude app, then type /team-relay:setup."),
         ("03", "Ask from the browser or from Claude. Answers come back on their own."),
     ]
     assert '<p class="brand-foot">team relay</p>' in page

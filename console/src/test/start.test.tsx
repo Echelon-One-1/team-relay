@@ -1,7 +1,8 @@
 // docs/SIGNIN-PAGE.md: on the hosted address, / is the relay's public sign-in page, so the team
 // view has its own path, /team, and the page's "Sign in with Google" leads to /start. /start
 // shows the loading state, then, once the viewer's own setup is known, replaces its address
-// (never a new history entry) with /join while the setup is not done, else /ask. A viewer on no
+// (never a new history entry) with /join while the setup is not done, else /team (where Ask is
+// since 14 Nov 2026; an old /ask link becomes /team). A viewer on no
 // team sees what / shows them; a setup that cannot be read goes to /join, which says why. The
 // local console still opens on the team view at /. The console server is the dev mock
 // (src/mock/relay.ts), with every call recorded.
@@ -87,15 +88,15 @@ describe('/start: where the sign-in page leads', () => {
     expect(push).not.toHaveBeenCalled()
   })
 
-  it('replaces /start with /ask once the setup is done', async () => {
+  it('replaces /start with /team (where Ask is) once the setup is done', async () => {
     const s = server()
     await setUpAlice(s.relay)
     at('/start')
     renderWithClient(<App />)
     expect(await screen.findByRole('region', { name: 'Ask the team' })).toBeInTheDocument()
-    expect(window.location.pathname).toBe('/ask')
-    expect(tab('ask')).toHaveAttribute('aria-current', 'page')
-    expect(replacedTo()).toEqual(['/ask'])
+    expect(window.location.pathname).toBe('/team')
+    expect(tab('team')).toHaveAttribute('aria-current', 'page')
+    expect(replacedTo()).toEqual(['/team'])
     expect(push).not.toHaveBeenCalled()
   })
 
@@ -145,7 +146,7 @@ describe('/team: the team view has its own path', () => {
     server()
     at('/team')
     renderWithClient(<App />)
-    expect(await screen.findByRole('region', { name: 'Members' })).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: 'Ask the team' })).toBeInTheDocument()
     expect(tab('team')).toHaveAttribute('aria-current', 'page')
     expect(window.location.pathname).toBe('/team')
     expect(push).not.toHaveBeenCalled()
@@ -158,24 +159,48 @@ describe('/team: the team view has its own path', () => {
     renderWithClient(<App />)
     await screen.findByRole('region', { name: 'Your setup' })
     await user.click(tab('team'))
-    expect(await screen.findByRole('region', { name: 'Members' })).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: 'Ask the team' })).toBeInTheDocument()
     expect(window.location.pathname).toBe('/team')
     expect(push.mock.calls.map((c) => c[2])).toEqual(['/team'])
     window.history.back()
     expect(await screen.findByRole('region', { name: 'Your setup' })).toBeInTheDocument()
     expect(window.location.pathname).toBe('/join')
     expect(tab('join')).toHaveAttribute('aria-current', 'page')
-    await user.click(tab('ask'))
-    expect(window.location.pathname).toBe('/ask')
+    expect(document.querySelector('[data-view-tab="ask"]')).toBeNull()
     await user.click(tab('team'))
     expect(window.location.pathname).toBe('/team')
+  })
+
+  it('the team view: Ask the team first, then the map and Agents, then Live activity; no Members panel', async () => {
+    server()
+    at('/team')
+    renderWithClient(<App />)
+    const ask = await screen.findByRole('region', { name: 'Ask the team' })
+    const agents = await screen.findByRole('region', { name: 'Agents' })
+    const activity = await screen.findByRole('region', { name: 'Live activity' })
+    expect(ask.compareDocumentPosition(agents) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(agents.compareDocumentPosition(activity) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'Members' })).toBeNull()
+    expect([...document.querySelectorAll('[data-view-tab]')].map((b) => b.textContent)).toEqual(['Team', 'Setup0/2', 'Team settings'])
+  })
+
+  it('an old /ask link shows the team view and becomes /team in place', async () => {
+    server()
+    at('/ask')
+    renderWithClient(<App />)
+    expect(await screen.findByRole('region', { name: 'Ask the team' })).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: 'Agents' })).toBeInTheDocument()
+    expect(window.location.pathname).toBe('/team')
+    expect(tab('team')).toHaveAttribute('aria-current', 'page')
+    expect(replacedTo()).toEqual(['/team'])
+    expect(push).not.toHaveBeenCalled()
   })
 
   it('the local console still opens on the team view at /', async () => {
     server()
     at('/')
     renderWithClient(<App />)
-    expect(await screen.findByRole('region', { name: 'Members' })).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: 'Ask the team' })).toBeInTheDocument()
     expect(tab('team')).toHaveAttribute('aria-current', 'page')
     expect(window.location.pathname).toBe('/')
     expect(push).not.toHaveBeenCalled()

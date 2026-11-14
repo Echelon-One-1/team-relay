@@ -39444,8 +39444,9 @@ async function askQuestion(client, args) {
     request_id: res.request_id,
     recipients: res.recipients,
     // M11-SPEC §4: answers can also be followed in the browser.
-    // The origin is the public sign-in page (docs/SIGNIN-PAGE.md): link the Ask page itself.
-    follow_in_console: `Answers can also be followed in the team console: ${consoleUrl(client.url)}/ask (the Ask page).`
+    // The origin is the public sign-in page (docs/SIGNIN-PAGE.md): link the Team page, where Ask
+    // is since 14 Nov 2026 (/ask still leads there).
+    follow_in_console: `Answers can also be followed in the team console: ${consoleUrl(client.url)}/team (the Team page).`
   });
 }
 async function invokeCapability(client, args) {

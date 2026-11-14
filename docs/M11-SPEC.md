@@ -292,6 +292,34 @@ decisions; where they differ from §5 and §6, these win.
   banner whenever the viewer has not accepted the current topic, joined or not. Team settings
   (boundaries, team details, Delete team) moved from the Team page to their own tab, at
   `/settings`.
+- *Correction (14 Nov 2026, joining through the Claude app):* the console no longer shows a
+  Terminal step or the setup line anywhere. Members join in the Claude desktop app. The card
+  **Join in 2 minutes** now has five steps:
+  1. Open the Claude app. Click Customize, then Plugins, then "+ Add", then "Add marketplace".
+  2. Paste this and click Sync: the plugin source (`GET /api/join`'s `marketplace_source`, a
+     GitHub owner/repo or a plain https URL, checked again in the browser), with a big Copy
+     button. Without one: "Ask a team owner for the plugin source, paste it and click Sync."
+  3. Find "team-relay" (`/api/join`'s `plugin`, else team-relay) in the list and click Add.
+  4. Start a Code session and type `/team-relay:setup` (copyable). A page opens: sign in, pick
+     your team, choose the folders your Claude may read, then click Done.
+  5. Come back to this page. If it still asks, click Accept ("Go to Accept" as before; the
+     `/team-relay:setup` page has its own Accept step).
+  The console reads `marketplace_source` and `plugin` from `/api/join` now (and `relay_url` for
+  the local console's invite link). The "Set up your Mac" step says "Choose your folders: in
+  Claude, type /team-relay:setup. A page opens with your Mac's folder window."; its checks say
+  "type /team-relay:setup in Claude" where they said "run the setup line again", and a missing
+  Claude says "Install the Claude app from claude.ai/download and sign in." The invite message
+  carries the same five steps (the plugin source on its own line; without one, as on a local
+  console whose server names none, step 2 says to open `<team address>/join`, whose Setup page
+  shows the source: the sender is the owner, so it never says "ask a team owner"). The sign-in
+  page's second step reads "Add the team-relay plugin in the Claude app, then type
+  /team-relay:setup." Without a source, `deploy-console.sh` removes `JOIN_MARKETPLACE` from the
+  service, and it checks the value with `LC_ALL=C`, so non-ASCII letters are refused as the server
+  refuses them.
+  `scripts/deploy-console.sh` passes `JOIN_MARKETPLACE` to the hosted console, from
+  `JOIN_MARKETPLACE` or else `PLUGIN_MARKETPLACE` (the owner/repo `deploy.sh` gives the relay),
+  checked before anything is built. The relay's `/setup` script and `setup-cli` stay, for
+  Terminal users; the console only stops pointing to them. The message shown below is superseded.
 - The owner's **Copy invite message** is plain text, no markdown:
 
   ```
@@ -405,3 +433,22 @@ URL>/ask".
 - The other lines of `setup-cli` are plain and short too (sign-in, Drive until 13 Nov 2026, the background
   answerer: "Your Mac now answers your team in the background whenever it is on. Claude Code
   does not need to be open.").
+
+## Tabs: Team, Setup, Team settings (maintainer, 14 Nov 2026)
+
+- The **Ask** and **Team** tabs are one tab, **Team** (`/team`). Top to bottom: the accept
+  banner when it applies, Ask the team (the form and "Your questions", as on `/ask` before), the
+  team map and Agents, then Live activity.
+- `/ask` keeps working: it shows the Team page and its address becomes `/team` in place (no new
+  history entry). `/start` sends a member whose setup is done to `/team`, and the Setup page's
+  "Ask the team" buttons open `/team`. The plugin's links (`ask_question`'s `follow_in_console`,
+  `setup-cli status`) name `/team`. The load balancer is unchanged: `/ask` and `/team` both go to
+  the console's default route.
+- The **Members** panel (roster, invite, remove, owner roles, setup progress and, for owners,
+  folder counts) moves from Team to **Team settings** (`/settings`), below the team's settings.
+  Team settings was already open to every member (owners change, members read); members see the
+  roster there read-only as before, and every owner control stays owner-only, with the relay's
+  checks unchanged. A console server that serves one team (no `/api/teams`, so no team settings
+  of its own) still has the tab when its relay keeps a roster, holding Members only; with no
+  roster either, there is no Team settings tab and `/settings` becomes `/team` as before.
+- The tabs are, in order: Team, Setup, Team settings. §4's separate Ask page is superseded.

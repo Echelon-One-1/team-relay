@@ -68,6 +68,10 @@ So the public paths are `/`, `/login`, the stylesheet and the four fonts, and, a
   viewer on no team sees the page for no team, at `/team`.
 - `/join`, `/ask` and `/admin` are as before. The invite message and the plugin's messages still
   give `https://<public host>/`: that is the sign-in page now, which is where a new member starts.
+- *Correction (14 Nov 2026):* Ask is on the Team page now (M11-SPEC "Tabs"). `/start` replaces
+  its address with `/team` once the setup is done, and `/ask` (old links) shows the Team page and
+  becomes `/team` in place. The load balancer is unchanged: every such path already goes to the
+  console.
 
 ## Rollout
 

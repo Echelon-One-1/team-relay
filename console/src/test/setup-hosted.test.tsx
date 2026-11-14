@@ -1,8 +1,8 @@
 // @vitest-environment-options {"url": "https://console.example.com/join"}
 //
-// /team-relay:setup on the hosted console: its Setup view is the Terminal page as before, with one
-// more line ("Or, in Claude Code, type /team-relay:setup"), and it never asks for /api/local/*
-// (those routes live only on the member's own Mac).
+// The hosted console's Setup view: the join card's steps through the Claude app (14 Nov 2026),
+// ending in /team-relay:setup typed in a Code session, and it never asks for /api/local/* (those
+// routes live only on the member's own Mac).
 
 import { screen, waitFor } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
@@ -14,7 +14,7 @@ import { MockRelay } from '@/mock/relay'
 import { renderWithClient } from './render'
 
 describe('the hosted Setup view', () => {
-  it('adds the /team-relay:setup line to the Mac step and never calls /api/local', async () => {
+  it('shows the join card with /team-relay:setup and never calls /api/local', async () => {
     expect(isHosted()).toBe(true)
     const relay = new MockRelay()
     relay.latency = [0, 0]
@@ -24,13 +24,12 @@ describe('the hosted Setup view', () => {
       return relay.handle(path, init)
     })
     renderWithClient(<App />)
+    const card = await screen.findByRole('region', { name: 'Join in 2 minutes' })
+    await waitFor(() => expect(card.querySelector('[data-command="plugin source"]')).toHaveTextContent('example-org/team-relay'))
+    expect(card.querySelector('[data-command="setup command"]')).toHaveTextContent('/team-relay:setup')
     const panel = await screen.findByRole('region', { name: 'Your setup' })
-    const mac = await waitFor(() => {
-      const el = panel.querySelector('[data-setup-step="mac"]') as HTMLElement
-      expect(el.querySelector('[data-setup-command]')).not.toBeNull()
-      return el
-    })
-    expect(mac.querySelector('[data-setup-command]')).toHaveTextContent('Or, in Claude Code, type /team-relay:setup')
+    expect(panel.querySelector('[data-setup-step="mac"] [data-setup-see-card]')).not.toBeNull()
+    expect(document.body.textContent).not.toMatch(/Terminal|curl|setup line/i)
     expect(paths.length).toBeGreaterThan(0)
     expect(paths.some((p) => p.startsWith('/api/local'))).toBe(false)
   })

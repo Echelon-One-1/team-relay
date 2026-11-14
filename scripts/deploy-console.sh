@@ -49,6 +49,42 @@ BUILD_BUCKET="${BUILD_BUCKET:-${PROJECT}-team-relay-build}"
 
 TEAM_CONFIG="${TEAM_CONFIG:-config/team.local.yaml}"
 
+# The plugin source the Setup page's join card and the invite message show (what the Claude
+# app's Customize > Plugins > "Add marketplace" takes): JOIN_MARKETPLACE (a GitHub owner/repo or
+# a plain https URL), else PLUGIN_MARKETPLACE (the owner/repo scripts/deploy.sh gives the relay).
+# Checked here as the console server checks it at start (plugin/src/console-app.ts
+# checkJoinMarketplace), so a bad value stops the deploy before anything is built.
+MARKETPLACE_RE='^[A-Za-z0-9]([A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$'
+SOURCE_URL_RE='^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:[0-9]{1,5})?(/[A-Za-z0-9._~%+-]+)*/?$'
+if [[ -n "${JOIN_MARKETPLACE:-}" ]]; then
+  JOIN_SOURCE="$JOIN_MARKETPLACE"
+  JOIN_SOURCE_VAR="JOIN_MARKETPLACE"
+else
+  JOIN_SOURCE="${PLUGIN_MARKETPLACE:-}"
+  JOIN_SOURCE_VAR="PLUGIN_MARKETPLACE"
+fi
+# join_source_ok VALUE ALLOW_URL: an owner/repo (or, with ALLOW_URL=1, a plain https URL), no . or
+# .. segment, at most 512 characters. LC_ALL=C: the ranges are ASCII only, so a non-ASCII letter
+# is refused here as the server refuses it.
+join_source_ok() {
+  local LC_ALL=C
+  local v="$1" allow_url="$2"
+  [[ "/${v}/" != */./* && "/${v}/" != */../* && ${#v} -le 512 ]] || return 1
+  [[ "$v" =~ $MARKETPLACE_RE ]] && return 0
+  [[ "$allow_url" == 1 && "$v" =~ $SOURCE_URL_RE ]]
+}
+if [[ -n "$JOIN_SOURCE" ]]; then
+  if [[ "$JOIN_SOURCE_VAR" == "JOIN_MARKETPLACE" ]]; then
+    if ! join_source_ok "$JOIN_SOURCE" 1; then
+      echo "error: JOIN_MARKETPLACE must be a GitHub owner/repo, such as example-org/team-relay, or a plain https URL" >&2
+      exit 1
+    fi
+  elif ! join_source_ok "$JOIN_SOURCE" 0; then
+    echo "error: PLUGIN_MARKETPLACE must be a GitHub owner/repo, such as example-org/team-relay" >&2
+    exit 1
+  fi
+fi
+
 if [[ -n "$(git status --porcelain -- plugin/dist plugin/Dockerfile.console plugin/cloudbuild.console.yaml)" ]]; then
   echo "error: the console bundle or its build files have uncommitted changes" >&2
   exit 1
@@ -104,6 +140,14 @@ CONSOLE_ENV="^;^CONSOLE_MODE=hosted;CONSOLE_PUBLIC_HOST=${URL#https://};IAP_AUDI
 if [[ -n "${JOIN_REPO_URL:-}" ]]; then
   CONSOLE_ENV="${CONSOLE_ENV};JOIN_REPO_URL=${JOIN_REPO_URL}"
 fi
+# Without a source, a JOIN_MARKETPLACE an earlier deploy set is removed (a JOIN_REPO_URL set earlier stays,
+# and the page derives the source from it).
+REMOVE_FLAG=()
+if [[ -n "$JOIN_SOURCE" ]]; then
+  CONSOLE_ENV="${CONSOLE_ENV};JOIN_MARKETPLACE=${JOIN_SOURCE}"
+else
+  REMOVE_FLAG=(--remove-env-vars=JOIN_MARKETPLACE)
+fi
 
 SALT_SECRET="team-relay-console-ip-salt"
 SALT_VERSION="$(gcloud secrets versions list "$SALT_SECRET" --project="$PROJECT" \
@@ -124,6 +168,7 @@ gcloud beta run deploy "$SERVICE" \
   "$IAP_FLAG" \
   --min-instances=0 --max-instances=2 --cpu=1 --memory=256Mi --timeout=60 \
   --update-env-vars="$CONSOLE_ENV" \
+  ${REMOVE_FLAG[@]+"${REMOVE_FLAG[@]}"} \
   --set-secrets="CONSOLE_IP_HASH_SALT=${SALT_SECRET}:${SALT_VERSION}" \
   --quiet
 

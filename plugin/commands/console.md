@@ -11,5 +11,6 @@ terminal. Do not run it yourself, and do not change it:
 ```
 
 Then tell me, briefly: it uses the same sign-in as `/team-relay:login`; it listens on 127.0.0.1 only and
-opens a link with a one-time key in my browser; it shows the team map, the activity and, for team
-owners, the Members panel; Ctrl-C stops it.
+opens a link with a one-time key in my browser; it shows Ask the team, the team map and the
+activity, and, under Team settings, the Members panel (every member sees it; only owners change
+it); Ctrl-C stops it.

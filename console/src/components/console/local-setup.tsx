@@ -76,7 +76,7 @@ export function SetupFinished() {
 /**
  * The Setup view: on the member's Mac with the setup routes, the local steps; else the usual page,
  * with the join card above it until the viewer has joined. The local steps have no join card: the
- * member is setting up this Mac right then, so its "open Terminal and paste the line" is done.
+ * member is setting up this Mac right then, so its "type /team-relay:setup" is done.
  */
 export function SetupView() {
   if (isHosted()) return <SetupPage join={<JoinCard />} />

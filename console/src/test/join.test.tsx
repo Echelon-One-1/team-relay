@@ -1,7 +1,8 @@
 // M11-SPEC "Simpler joining": the Setup page shows one small card, "Join in 2 minutes", above the
 // steps, to a viewer who has not joined yet (their Mac has never reported in, or they have never
-// accepted the team's topic): open Terminal, paste the setup line (with a big Copy button), come
-// back and click Accept, which brings the Accept step on the same page into view. It goes once
+// accepted the team's topic): in the Claude app (14 Nov 2026), add the plugin source (with a big
+// Copy button), add the plugin, type /team-relay:setup in a Code session, then come back and
+// click Accept, which brings the Accept step on the same page into view. No Terminal, no curl. It goes once
 // they have joined. The team page does not show it. The old developer join panel (plugin,
 // marketplace, channel and read-folder commands) is gone. The console server is the dev mock.
 
@@ -16,7 +17,7 @@ import { MockRelay, mockStatus } from '@/mock/relay'
 import { renderWithClient } from './render'
 
 const KEY = 'j01nj01nj01nj01nj01nj01nj01nj01n'
-const LINE = 'curl -fsSL https://relay.example.com/setup | bash'
+const SOURCE = 'example-org/team-relay'
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -49,38 +50,42 @@ beforeEach(() => {
 })
 
 describe('the join card', () => {
-  it('a viewer who is not set up sees the three plain steps and the line with a big Copy button, above their setup', async () => {
+  it('a viewer who is not set up sees the five plain steps through the Claude app, the plugin source with a big Copy button, above their setup', async () => {
     server()
     const user = userEvent.setup()
     renderWithClient(<App />)
     const c = await card()
-    await within(c).findByText(LINE)
+    await within(c).findByText(SOURCE)
     const steps = within(c).getByRole('list', { name: 'Steps to join' })
     expect([...steps.querySelectorAll('[data-join-step]')].map((li) => li.textContent)).toEqual([
-      '1Open Terminal: press Cmd+Space, type Terminal, press Enter.',
-      `2Paste this line and press Enter, then answer its questions:${LINE}Copy`,
-      '3Come back to this page and click Accept.Go to Accept',
+      '1Open the Claude app. Click Customize, then Plugins, then "+ Add", then "Add marketplace".',
+      `2Paste this and click Sync:${SOURCE}Copy`,
+      '3Find "team-relay" in the list and click Add.',
+      '4Start a Code session and type this:/team-relay:setupA page opens: sign in, pick your team, choose the folders your Claude may read, then click Done.',
+      '5Come back to this page. If it still asks, click Accept.Go to Accept',
     ])
-    await user.click(within(c).getByRole('button', { name: 'Copy setup line' }))
-    expect(await navigator.clipboard.readText()).toBe(LINE)
-    expect(within(c).getByRole('button', { name: 'Copy setup line' })).toHaveTextContent('Copied')
-    // Nothing technical, and the old developer panel is gone.
-    expect(c.textContent).not.toMatch(/plugin|marketplace|channel|\bCLI\b|\bNode|daemon|LaunchAgent|ANSWERER_READ_DIRS|boundaries/i)
+    await user.click(within(c).getByRole('button', { name: 'Copy plugin source' }))
+    expect(await navigator.clipboard.readText()).toBe(SOURCE)
+    expect(within(c).getByRole('button', { name: 'Copy plugin source' })).toHaveTextContent('Copied')
+    await user.click(within(c).getByRole('button', { name: 'Copy setup command' }))
+    expect(await navigator.clipboard.readText()).toBe('/team-relay:setup')
+    // No Terminal, nothing technical beyond the Claude app's own labels, and the old developer panel is gone.
+    expect(c.textContent).not.toMatch(/Terminal|curl|setup line|channel|\bCLI\b|\bNode|daemon|LaunchAgent|ANSWERER_READ_DIRS|boundaries/i)
     expect(document.querySelector('[data-join]')).toBeNull()
     expect(screen.queryByRole('button', { name: /Join the team/ })).toBeNull()
     // The card sits above the viewer's own progress, on the same page.
     const setup = await screen.findByRole('region', { name: 'Your setup' })
     expect(c.compareDocumentPosition(setup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    // One setup line and one big Copy button on the page: the Mac step points up to the card.
+    // The steps are said once: the Mac step points up to the card.
     const mac = setup.querySelector('[data-setup-step="mac"]') as HTMLElement
     expect(within(mac).getByText('Follow "Join in 2 minutes" above.')).toBeInTheDocument()
-    expect(within(mac).queryByText(LINE)).toBeNull()
-    expect(within(mac).queryByText(/Open Terminal/)).toBeNull()
-    expect(screen.getAllByRole('button', { name: 'Copy setup line' })).toHaveLength(1)
-    expect(screen.getAllByText(LINE)).toHaveLength(1)
+    expect(within(mac).queryByText(SOURCE)).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'Copy plugin source' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Copy setup command' })).toHaveLength(1)
+    expect(document.body.textContent).not.toMatch(/Terminal|curl|setup line/i)
   })
 
-  it('without the card (joined), the Mac step shows the line again', async () => {
+  it('without the card (joined), the Mac step says how to change the folders in Claude', async () => {
     const relay = server()
     relay.setMemberStatus('alice', mockStatus(Date.now(), {}), true, undefined, 0)
     await relay.handle('api/acceptance', { method: 'PUT', headers: { 'X-Relay-Team': 'demo' }, body: JSON.stringify({ version: 2 }) })
@@ -89,8 +94,12 @@ describe('the join card', () => {
     // Her acceptance has loaded, and she has joined.
     await waitFor(() => expect(setup.querySelector('[data-setup-step="accept"]')).toHaveAttribute('data-done', 'true'))
     expect(screen.queryByRole('region', { name: 'Join in 2 minutes' })).toBeNull()
-    expect(await within(setup).findByText(LINE)).toBeInTheDocument()
-    expect(screen.getAllByRole('button', { name: 'Copy setup line' })).toHaveLength(1)
+    const mac = setup.querySelector('[data-setup-step="mac"]') as HTMLElement
+    expect(mac.querySelector('[data-setup-command]')).toHaveTextContent(
+      "Choose your folders: in Claude, type /team-relay:setup. A page opens with your Mac's folder window.",
+    )
+    expect(within(mac).getByRole('button', { name: 'Copy setup command' })).toBeInTheDocument()
+    expect(document.body.textContent).not.toMatch(/Terminal|curl|setup line/i)
   })
 
   it('"Go to Accept" brings the Accept step on the same page into view and focuses Accept', async () => {
@@ -128,7 +137,7 @@ describe('the join card', () => {
     const step = document.querySelector('[data-setup-step="accept"]') as HTMLElement
     expect(document.activeElement).toBe(step)
     expect(step).toHaveAttribute('data-focus-ring', 'true')
-    await user.click(within(c).getByRole('button', { name: 'Copy setup line' }))
+    await user.click(within(c).getByRole('button', { name: 'Copy plugin source' }))
     expect(step).not.toHaveAttribute('data-focus-ring')
   })
 
@@ -136,7 +145,7 @@ describe('the join card', () => {
     window.history.replaceState(null, '', '/team')
     server()
     renderWithClient(<App />)
-    await screen.findByRole('region', { name: 'Members' })
+    await screen.findByRole('region', { name: 'Ask the team' })
     // Progress has loaded (the Setup tab counts 0 of 2) and she has not joined: still no card here.
     await waitFor(() => expect(document.querySelector('[data-setup-tab-count]')).toHaveTextContent('0/2'))
     expect(screen.queryByRole('region', { name: 'Join in 2 minutes' })).toBeNull()
@@ -178,14 +187,32 @@ describe('the join card', () => {
     expect(screen.queryByRole('region', { name: 'Join in 2 minutes' })).toBeNull()
   })
 
-  it('without an address for the line (a local console whose server names no relay), it says where the line comes from', async () => {
-    // The tests run on localhost, like the local console: only /api/join names the relay's address.
-    expect(window.location.hostname).toBe('localhost')
+  it('without a plugin source (a server that names none, or an older one), step 2 says to ask a team owner for it', async () => {
+    server((p) => (p === '/api/join' ? json({ relay_url: 'https://relay.example.com', team: 'demo', marketplace_source: null }) : null))
+    renderWithClient(<App />)
+    const c = await card()
+    await waitFor(() => expect(c.querySelector('[data-no-source]')).not.toBeNull())
+    expect(c.querySelector('[data-no-source]')).toHaveTextContent('Ask a team owner for the plugin source, paste it and click Sync.')
+    expect(within(c).queryByRole('button', { name: 'Copy plugin source' })).toBeNull()
+    // The plugin's name falls back to team-relay; the setup command is still there.
+    expect(c.querySelector('[data-join-step="3"]')).toHaveTextContent('Find "team-relay" in the list and click Add.')
+    expect(within(c).getByRole('button', { name: 'Copy setup command' })).toBeInTheDocument()
+  })
+
+  it('a source that is not a GitHub owner/repo or a plain https URL is never shown', async () => {
+    server((p) => (p === '/api/join' ? json({ relay_url: 'https://relay.example.com', team: 'demo', marketplace_source: 'a/b; rm -rf ~', plugin: '<b>x</b>' }) : null))
+    renderWithClient(<App />)
+    const c = await card()
+    await waitFor(() => expect(c.querySelector('[data-no-source]')).not.toBeNull())
+    expect(c.textContent).not.toMatch(/rm -rf|<b>/)
+    expect(c.querySelector('[data-join-step="3"]')).toHaveTextContent('Find "team-relay" in the list and click Add.')
+  })
+
+  it('without /api/join at all (404), step 2 says to ask a team owner', async () => {
     server((p) => (p === '/api/join' ? json({ error: 'not_found' }, 404) : null))
     renderWithClient(<App />)
     const c = await card()
-    await waitFor(() => expect(c.querySelector('[data-no-command]')).not.toBeNull())
-    expect(c.querySelector('[data-no-command]')).toHaveTextContent('Paste the setup line a team owner sent you, press Enter, then answer its questions.')
-    expect(c.querySelector('[data-command]')).toBeNull()
+    await waitFor(() => expect(c.querySelector('[data-no-source]')).not.toBeNull())
+    expect(c.querySelector('[data-command="plugin source"]')).toBeNull()
   })
 })

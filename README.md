@@ -89,23 +89,32 @@ flowchart LR
 
 ## Joining a team
 
-On a Mac, the simple way needs no Terminal: in the Claude app (Claude Code), add the team
-tools, then type `/team-relay:setup`. First your browser opens on the relay's sign-in page:
-sign in with Google and choose your team (accept the invitation there). If you are signed in
-already, this step is skipped; if no browser tab opens, Claude shows you the sign-in link to
-open yourself, and you type `/team-relay:setup` again once you have signed in. Then the setup
-page opens, on your own Mac: accept what the team shares, add the folders your Claude answers
-from with the Mac's own folder chooser (up to 20 folders you use for the team, for example the
-folder your clones of its projects are in, or a folder of shared documents), leave "Background
-answering" on (it answers teammates' questions from your folders even when Claude is closed;
-where it cannot run, the page says why and leaves it off), and click Done. The page says "All
-set. Go back to Claude." The plugin gets the Node.js it needs by itself.
+On a Mac, joining needs no Terminal. Open your team's page (the link in your invitation),
+click "Sign in with Google" and accept the invitation; the Setup page's card "Join in 2 minutes"
+shows these steps, with the plugin source to copy:
 
-If you prefer Terminal: open your team's page (the link in your invitation), click "Sign in
-with Google", accept the invitation, and follow the card "Join in 2 minutes" on the Setup page: open Terminal, paste the one setup line
-it shows, answer its questions (it gets what it needs, Node.js included, and opens the Mac's
-own folder chooser), then click Accept on the page. The Setup page shows what is left in plain
-words. The steps below are the manual way, for developers and other systems.
+1. Open the Claude app. Click Customize, then Plugins, then "+ Add", then "Add marketplace".
+2. Paste the plugin source (the GitHub owner/repo of this repository; the card shows it, or ask
+   a team owner) and click Sync.
+3. Find "team-relay" in the list and click Add.
+4. Start a Code session and type `/team-relay:setup`.
+5. Come back to the team's page. If it still asks, click Accept.
+
+After step 4 your browser opens on the relay's sign-in page: sign in with Google and choose
+your team. If you are signed in already, this step is skipped; if no browser tab opens, Claude
+shows you the sign-in link to open yourself, and you type `/team-relay:setup` again once you
+have signed in. Then the setup page opens, on your own Mac: accept what the team shares, add the
+folders your Claude answers from with the Mac's own folder chooser (up to 20 folders you use for
+the team, for example the folder your clones of its projects are in, or a folder of shared
+documents), leave "Background answering" on (it answers teammates' questions from your folders
+even when Claude is closed; where it cannot run, the page says why and leaves it off), and click
+Done. The page says "All set. Go back to Claude." The plugin gets the Node.js it needs by itself.
+To change your folders later, type `/team-relay:setup` in Claude again.
+
+For Terminal users the relay still serves a setup script: `curl -fsSL https://<your team's
+address>/setup | bash` does the same from Terminal (it gets Node.js, opens the Mac's folder
+chooser and asks its questions there). The Setup page no longer shows it.
+The steps below are the manual way, for developers and other systems.
 
 You need [Claude Code](https://code.claude.com) 2.1.280 or newer and Node.js 22.12 or newer, and
 the team owner must have invited your work Google account (or you create a team yourself,
@@ -238,8 +247,8 @@ in `plugin/relay.default.json`; teams on another relay start Claude Code with
 One address, say `https://team.example.com`, serves both: `/` and `/login` (a public sign-in
 page), `/v1/*`, `/healthz` and `/setup` go to the relay (which signs people in itself),
 everything else to the console behind IAP. The sign-in page's button leads to `/start`, which
-takes a member to their Setup page until it is done and to Ask after that; the team view lives
-at `/team` ([sign-in page](docs/SIGNIN-PAGE.md)). A global external Application Load Balancer
+takes a member to their Setup page until it is done and to the Team page (where Ask is) after
+that; the team view lives at `/team` ([sign-in page](docs/SIGNIN-PAGE.md)). A global external Application Load Balancer
 with a reserved static IP and a Google-managed certificate sits in front; both Cloud Run
 services take traffic only from it.
 

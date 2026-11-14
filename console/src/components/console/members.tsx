@@ -8,7 +8,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useJoin, useMe, useRosterChange } from '@/hooks/queries'
 import { useNav } from '@/hooks/team'
 import { addProblem, entries, isInvited, ownerCount, sortedMembers, suggestMemberId, visibleEmails } from '@/lib/roster'
-import { currentVersion, folderCountText, FOLDERS_UNREADABLE, inviteMessage, publicOrigin, SETUP_STEPS, setupCount } from '@/lib/setup'
+import { currentVersion, folderCountText, FOLDERS_UNREADABLE, inviteMessage, joinPlugin, joinSource, publicOrigin, SETUP_STEPS, setupCount } from '@/lib/setup'
 import { readStored, writeStored } from '@/lib/stored'
 import { cn } from '@/lib/utils'
 import { CopyTextButton } from './copy'
@@ -69,7 +69,7 @@ function who(m: RosterMember): string {
   return emails.length > 0 ? `${m.member} (${emails.join(', ')})` : m.member
 }
 
-/** M11 §6: what an owner sends someone they invited: the team, the console, the setup command. */
+/** M11 §6: what an owner sends someone they invited: the team's page, then the steps in the Claude app. */
 function InviteCopy() {
   const nav = useNav()
   const me = useMe()
@@ -80,12 +80,12 @@ function InviteCopy() {
     if (join.isPending) return null
     return (
       <p className="text-[12px] text-subtle" data-no-invite>
-        Send them the team&apos;s page address; its Setup page has the setup line.
+        Send them the team&apos;s page address; its Setup page shows how to join.
       </p>
     )
   }
   return (
-    <CopyTextButton text={inviteMessage(name, origin)} label="invite message">
+    <CopyTextButton text={inviteMessage(name, origin, joinSource(join.data), joinPlugin(join.data))} label="invite message">
       Copy invite message
     </CopyTextButton>
   )

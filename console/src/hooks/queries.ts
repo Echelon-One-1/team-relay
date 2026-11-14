@@ -109,7 +109,7 @@ export function useMe() {
   })
 }
 
-/** GET /api/join (the console server's own configuration): the relay's address for the local console's setup line. Read once. */
+/** GET /api/join (the console server's own configuration): the relay's address (the local console's invite link), the plugin source and name. Read once. */
 export function useJoin() {
   const team = useTeam()
   return useQuery<Join, ApiError>({

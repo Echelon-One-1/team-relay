@@ -1,5 +1,5 @@
 // M11 §6 and "Simpler joining": the two steps' rules (with the Mac's own checks inside the
-// first), the folder count an owner reads, the setup line, the invite message, and reading
+// first), the folder count an owner reads, the plugin source, the invite message, and reading
 // members-status and the acceptance without trusting their shape.
 
 import { describe, expect, it } from 'vitest'
@@ -14,6 +14,8 @@ import {
   FOLDERS_UNREADABLE_TODO,
   inviteMessage,
   hasJoined,
+  joinPlugin,
+  joinSource,
   isAccepted,
   macChecks,
   publicOrigin,
@@ -21,7 +23,6 @@ import {
   readMembersStatus,
   SELF_TEST_PENDING,
   SETUP_STEPS,
-  setupCommand,
   setupCount,
   setupSteps,
 } from './setup'
@@ -88,11 +89,11 @@ describe('setupSteps: two plain steps', () => {
     expect(hasJoined(entry(null), NONE, 0)).toBe(false)
   })
 
-  it('without any status: the only check is running the setup line', () => {
+  it('without any status: the only check is typing /team-relay:setup in Claude', () => {
     const steps = setupSteps(entry(null, false, 0), BOUNDS, 0, 3)
     expect(done(steps)).toEqual({ mac: false, accept: false })
     expect(steps[0]!.checks).toEqual([
-      { id: 'setup', done: false, todo: 'Paste the setup line into Terminal on your Mac, press Enter and answer its questions.' },
+      { id: 'setup', done: false, todo: 'In Claude, type /team-relay:setup. A page opens where you sign in and choose your folders.' },
     ])
     expect(setupSteps(null, BOUNDS, 0, 3)[0]!.checks.map((c) => c.id)).toEqual(['setup'])
   })
@@ -100,10 +101,10 @@ describe('setupSteps: two plain steps', () => {
   it('the Mac step needs every check: each reads its own field, and says in one plain sentence what to do', () => {
     expect(checks(entry(status()))).toEqual({ setup: true, claude: true, answering: true, folders: true, self_test: true })
     expect(checks(entry(status({ found: false }))).claude).toBe(false)
-    expect(todo(entry(status({ found: false })), 'claude')).toBe("Claude Code isn't on your Mac yet. Run the setup line again and say yes when it offers to install it.")
-    expect(todo(entry(status({ signedIn: false })), 'claude')).toBe("Claude Code isn't signed in on your Mac. Run the setup line again and sign in when it asks.")
+    expect(todo(entry(status({ found: false })), 'claude')).toBe("Claude isn't on your Mac yet. Install the Claude app from claude.ai/download and sign in.")
+    expect(todo(entry(status({ signedIn: false })), 'claude')).toBe("Claude isn't signed in on your Mac. Open the Claude app and sign in.")
     expect(checks(entry(status(), false)).answering).toBe(false)
-    expect(todo(entry(status(), false), 'answering')).toBe("Your Mac isn't answering right now. Make sure it's switched on; if this stays, run the setup line again.")
+    expect(todo(entry(status(), false), 'answering')).toBe("Your Mac isn't answering right now. Make sure it's switched on; if this stays, type /team-relay:setup in Claude.")
     for (const e of [entry(status({ found: false })), entry(status(), true, 3, 0)]) {
       expect(done(setupSteps(e, BOUNDS, 3, 3)).mac).toBe(false)
     }
@@ -116,7 +117,7 @@ describe('setupSteps: two plain steps', () => {
     expect(checks(entry(status(), true, 3, 0)).folders).toBe(false)
     expect(todo(entry(status(), true, 3, 0), 'folders')).toBe(FOLDERS_TODO)
     expect(FOLDERS_TODO).toBe(
-      "Your Mac has no folders chosen yet, so your Claude can't read anything for teammates. Run the setup line again and choose your folders.",
+      "Your Mac has no folders chosen yet, so your Claude can't read anything for teammates. In Claude, type /team-relay:setup and choose your folders.",
     )
     expect(checks(entry(status(), true, 3, 1)).folders).toBe(true)
     expect(checks(entry(status(), true, 3, 20)).folders).toBe(true)
@@ -142,9 +143,9 @@ describe('setupSteps: two plain steps', () => {
     const failed = entry(status({ ok: false, reason: 'Claude Code is not signed in.' }))
     expect(checks(failed).self_test).toBe(false)
     expect(todo(failed, 'self_test')).toBe(
-      "Your Mac's last check didn't pass. Run the setup line again. If it still doesn't pass, show this to a team owner: Claude Code is not signed in.",
+      "Your Mac's last check didn't pass. In Claude, type /team-relay:setup. If it still doesn't pass, show this to a team owner: Claude Code is not signed in.",
     )
-    expect(todo(entry(status({ ok: false, reason: null })), 'self_test')).toBe("Your Mac's last check didn't pass. Run the setup line again.")
+    expect(todo(entry(status({ ok: false, reason: null })), 'self_test')).toBe("Your Mac's last check didn't pass. In Claude, type /team-relay:setup.")
     const pending = entry(status({ ok: false, reason: SELF_TEST_PENDING }))
     expect(SELF_TEST_PENDING).toBe('the self-test has not run yet')
     expect(checks(pending).self_test).toBe(false)
@@ -185,7 +186,7 @@ describe("a member's folder count, as an owner reads it", () => {
   })
 })
 
-describe('the setup command and the invite message', () => {
+describe('the plugin source and the invite message', () => {
   const join: Join = { relay_url: 'https://relay.example.com/', team: 'demo' }
   it('hosted: the page origin; local: the relay https origin', () => {
     expect(publicOrigin({ hostname: 'team.example.com', origin: 'https://team.example.com' }, undefined)).toBe('https://team.example.com')
@@ -196,9 +197,25 @@ describe('the setup command and the invite message', () => {
     expect(publicOrigin({ hostname: 'localhost', origin: 'http://localhost:4545' }, { ...join, relay_url: 'https://u:p@relay.example.com' })).toBeNull()
     expect(publicOrigin({ hostname: 'localhost', origin: 'http://localhost:4545' }, { ...join, relay_url: 'not a url' })).toBeNull()
   })
-  it('builds the one line and the plain-text message: the link first, then the same three steps as the join card', () => {
-    expect(setupCommand('https://team.example.com')).toBe('curl -fsSL https://team.example.com/setup | bash')
-    const message = inviteMessage('Demo\nteam', 'https://team.example.com')
+  it('reads the plugin source and the plugin name defensively', () => {
+    expect(joinSource({ ...join, marketplace_source: 'example-org/team-relay' })).toBe('example-org/team-relay')
+    expect(joinSource({ ...join, marketplace_source: 'https://git.example.com/tools/team-relay.git' })).toBe('https://git.example.com/tools/team-relay.git')
+    expect(joinSource({ ...join, marketplace_source: '  example-org/team-relay ' })).toBe('example-org/team-relay')
+    for (const bad of [null, undefined, '', 42, 'not a source', 'example-org/..', 'example-org/.', 'http://git.example.com/x', 'https://u:p@git.example.com/x', 'https://git.example.com/x?y=1', 'a/b; rm -rf ~', 'x'.repeat(600)]) {
+      expect(joinSource({ ...join, marketplace_source: bad } as unknown as Join)).toBeNull()
+    }
+    expect(joinSource(undefined)).toBeNull()
+    expect(joinSource(null)).toBeNull()
+    expect(joinPlugin({ ...join, plugin: 'team-relay' })).toBe('team-relay')
+    expect(joinPlugin({ ...join, plugin: 'other-plugin' })).toBe('other-plugin')
+    for (const bad of [undefined, '', 'Team Relay', '"><b>', 'x'.repeat(70), 7]) {
+      expect(joinPlugin({ ...join, plugin: bad } as unknown as Join)).toBe('team-relay')
+    }
+    expect(joinPlugin(undefined)).toBe('team-relay')
+  })
+
+  it('the plain-text message: the link first, then the same five steps as the join card, through the Claude app', () => {
+    const message = inviteMessage('Demo\nteam', 'https://team.example.com', 'example-org/team-relay', 'team-relay')
     expect(message).toBe(
       [
         "You're invited to the team Demo team on Team relay.",
@@ -207,14 +224,25 @@ describe('the setup command and the invite message', () => {
         '',
         'Open the link and accept the invitation. Then, on your Mac:',
         '',
-        '1. Open Terminal: press Cmd+Space, type Terminal, press Enter.',
-        '2. Paste this line and press Enter, then answer its questions:',
-        'curl -fsSL https://team.example.com/setup | bash',
-        '3. Come back to the page and click Accept.',
+        '1. Open the Claude app. Click Customize, then Plugins, then "+ Add", then "Add marketplace".',
+        '2. Paste this and click Sync:',
+        'example-org/team-relay',
+        '3. Find "team-relay" in the list and click Add.',
+        '4. Start a Code session and type /team-relay:setup. A page opens: sign in, pick your team, choose the folders your Claude may read, then click Done.',
+        '5. Come back to the page. If it still asks, click Accept.',
       ].join('\n'),
     )
-    // Plain text: no markdown.
+    // Plain text: no markdown, and no Terminal.
     expect(message).not.toMatch(/[`*>#]|\]\(/)
+    expect(message).not.toMatch(/curl|Terminal|setup line/i)
+  })
+
+  it('without a plugin source (a local console), the message points to the team\'s Setup page online, never back to the owner', () => {
+    const message = inviteMessage('Demo', 'https://team.example.com', null)
+    expect(message.split('\n')).toContain('2. Open https://team.example.com/join: the Setup page there shows the plugin source. Paste it and click Sync.')
+    expect(message).not.toMatch(/Ask a team owner/)
+    expect(message).toContain('3. Find "team-relay" in the list and click Add.')
+    expect(message).not.toMatch(/curl|Terminal|setup line/i)
   })
 })
 

@@ -73,7 +73,9 @@ describe('the team switcher (M9 §5)', () => {
     await waitFor(() => expect(switcher()).toHaveTextContent('Research'))
     await waitFor(() => expect(s.calls.some((c) => c.path.startsWith('/api/directory') && c.team === 'research')).toBe(true))
     expect(window.localStorage.getItem(TEAM_STORAGE_KEY)).toBe('research')
-    // The quiet team has no traffic, and the invitation for frank shows as Invited to its owner.
+    // The quiet team has no traffic, and the invitation for frank shows as Invited to its owner
+    // (in the Members panel, on Team settings).
+    await user.click(screen.getByRole('button', { name: 'Team settings' }))
     const frank = await waitFor(() => {
       const row = document.querySelector('[data-member="frank"]')
       expect(row).not.toBeNull()
@@ -250,7 +252,8 @@ describe('Create team (M9 §2)', () => {
 })
 
 describe('an owner\'s team (M9 §7.2, §7.7)', () => {
-  it('withdraws an invitation from the Members panel', async () => {
+  it('withdraws an invitation from the Members panel (on Team settings)', async () => {
+    window.history.replaceState(null, '', '/settings')
     const s = server()
     const user = userEvent.setup()
     renderWithClient(<App />)
@@ -282,7 +285,7 @@ describe('an owner\'s team (M9 §7.2, §7.7)', () => {
     expect(s.changes()).toEqual([{ method: 'DELETE', path: '/api/teams/research', team: null, body: { confirm: 'research' } }])
     // Back on the team page of the team shown next, not on its settings.
     expect(window.location.pathname).toBe('/team')
-    expect(await screen.findByRole('region', { name: 'Members' })).toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: 'Ask the team' })).toBeInTheDocument()
   })
 
   it('explains a team from the relay\'s team file cannot be deleted here', async () => {
