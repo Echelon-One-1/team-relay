@@ -8,12 +8,12 @@ version = "0.1.0"
 description = "Team relay: per-member mailboxes for questions and capability calls between Claude Code sessions"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi==0.141.1",
-    "uvicorn[standard]==0.52.4",
-    "pydantic==2.13.5",
+    "fastapi==0.162.0",
+    "uvicorn[standard]==0.54.0",
+    "pydantic==2.14.3",
     "pyyaml==6.0.3",
-    "google-cloud-firestore==2.31.0",
-    "google-auth==2.58.0",
+    "google-cloud-firestore==2.34.1",
+    "google-auth==2.62.1",
     # Direct, not inherited: relay/auth.py builds google.auth.transport.requests.Request to
     # fetch Google's signing certificates, and that module imports requests by name.
     "requests==2.34.2",
@@ -23,15 +23,15 @@ dependencies = [
     "google-re2==1.1.20251105",
     # Direct, not inherited: relay/oauth.py verifies the login's Google ID token (RS256 over
     # Google's JWKS) with it.
-    "cryptography==50.0.1",
+    "cryptography==50.0.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest==9.1.1",
+    "pytest==9.2.0",
     # The async tests use anyio's pytest plugin (asyncio backend only).
-    "anyio==4.15.1",
-    "ruff==0.16.5",
+    "anyio==4.16.0",
+    "ruff==0.17.4",
     # The tests drive the app through its ASGI transport.
     "httpx==0.28.1",
 ]
