@@ -2,9 +2,10 @@
 // team's topic), worked out from what the viewer's Mac last reported (GET
 // /api/members-status), the version they accepted (GET /api/acceptance) and the team's
 // boundaries (GET /api/boundaries). "Ask the team" is not a step: the Setup page always offers
-// it below them. Also the setup line and
-// the owner's invite message. Everything here is read by people who have never used Terminal:
-// plain sentences, never the names of tools.
+// it below them. Also the plugin source and the owner's invite message. Joining is done in the
+// Claude app (14 Nov 2026): add the plugin source under Customize, Plugins, then type
+// /team-relay:setup in a Code session. Everything here is read by people who have never used
+// Terminal: plain sentences, no tool names beyond the Claude app's own labels.
 
 import type { Acceptance, Join, MemberStatusEntry, MembersStatus, TeamBoundaries } from '@/api/types'
 
@@ -61,33 +62,35 @@ export function boundariesSet(bounds: TeamBoundaries | null | undefined): bounds
   return !!bounds && bounds.version > 0 && bounds.boundaries !== null
 }
 
-export const SETUP_LINE_TODO = 'Paste the setup line into Terminal on your Mac, press Enter and answer its questions.'
+/** What a member types in the Claude app to set up their Mac and choose their folders. */
+export const SETUP_COMMAND = '/team-relay:setup'
+export const SETUP_TODO = `In Claude, type ${SETUP_COMMAND}. A page opens where you sign in and choose your folders.`
 export const FOLDERS_UNREADABLE_TODO = "Your Mac can't read your folders settings. Run /team-relay:folders in Claude to see why and fix them."
-export const FOLDERS_TODO = "Your Mac has no folders chosen yet, so your Claude can't read anything for teammates. Run the setup line again and choose your folders."
+export const FOLDERS_TODO = `Your Mac has no folders chosen yet, so your Claude can't read anything for teammates. In Claude, type ${SETUP_COMMAND} and choose your folders.`
 export const CHECKING = 'Your Mac is checking that everything works. This takes about a minute.'
 
 /**
  * What "Set up your Mac" is made of: the Mac has reported in, Claude Code is there and signed
  * in, the Mac answers now, it reported at least one folder chosen (a count of 0 is the only
  * miss) and the self-test. Before the Mac has reported anything, the only
- * check is running the setup line.
+ * check is typing /team-relay:setup in Claude.
  */
 export function macChecks(entry: MemberStatusEntry | null): MacCheck[] {
   const s = entry?.status ?? null
-  if (!s) return [{ id: 'setup', done: false, todo: SETUP_LINE_TODO }]
+  if (!s) return [{ id: 'setup', done: false, todo: SETUP_TODO }]
   return [
-    { id: 'setup', done: true, todo: SETUP_LINE_TODO },
+    { id: 'setup', done: true, todo: SETUP_TODO },
     {
       id: 'claude',
       done: s.claude.found && s.claude.signed_in,
       todo: s.claude.found
-        ? "Claude Code isn't signed in on your Mac. Run the setup line again and sign in when it asks."
-        : "Claude Code isn't on your Mac yet. Run the setup line again and say yes when it offers to install it.",
+        ? "Claude isn't signed in on your Mac. Open the Claude app and sign in."
+        : "Claude isn't on your Mac yet. Install the Claude app from claude.ai/download and sign in.",
     },
     {
       id: 'answering',
       done: entry?.answering === true,
-      todo: "Your Mac isn't answering right now. Make sure it's switched on; if this stays, run the setup line again.",
+      todo: `Your Mac isn't answering right now. Make sure it's switched on; if this stays, type ${SETUP_COMMAND} in Claude.`,
     },
     {
       id: 'folders',
@@ -122,7 +125,7 @@ export function hasJoined(entry: MemberStatusEntry | null, bounds: TeamBoundarie
 function selfTestTodo(reason: string | null): string {
   if (reason === SELF_TEST_PENDING) return CHECKING
   const r = plainLine(reason)
-  const base = "Your Mac's last check didn't pass. Run the setup line again."
+  const base = `Your Mac's last check didn't pass. In Claude, type ${SETUP_COMMAND}.`
   return r ? `${base} If it still doesn't pass, show this to a team owner: ${r}.` : base
 }
 
@@ -147,7 +150,7 @@ export function setupCount(entry: MemberStatusEntry, bounds: TeamBoundaries | nu
 }
 
 // ---------------------------------------------------------------------------------------
-// The setup command and the invite message.
+// The plugin source and the invite message.
 
 const HTTPS_ORIGIN_RE = /^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:[0-9]{1,5})?$/
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
@@ -169,9 +172,28 @@ export function publicOrigin(loc: Pick<Location, 'hostname' | 'origin'>, join: J
   }
 }
 
-/** M11 §5: the one command that sets a Mac up. */
-export function setupCommand(origin: string): string {
-  return `curl -fsSL ${origin}/setup | bash`
+const GITHUB_REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]{1,100}$/
+const SOURCE_URL_RE = /^https:\/\/[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?(\/[A-Za-z0-9._~%+-]+)*\/?$/i
+const PLUGIN_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
+/** The plugin's name when /api/join does not say. */
+export const DEFAULT_PLUGIN = 'team-relay'
+
+/**
+ * What the Claude app's "Add marketplace" takes (GET /api/join's marketplace_source): a GitHub
+ * owner/repo or a plain https URL, as the console server checks it. Anything else is null (the
+ * page then says to ask a team owner).
+ */
+export function joinSource(join: Join | null | undefined): string | null {
+  const v = typeof join?.marketplace_source === 'string' ? join.marketplace_source.trim() : ''
+  if (!v || v.length > 512) return null
+  if ((`/${v}/`).includes('/./') || (`/${v}/`).includes('/../')) return null
+  return GITHUB_REPO_RE.test(v) || SOURCE_URL_RE.test(v) ? v : null
+}
+
+/** The plugin's name in the Claude app's list (GET /api/join's plugin), else team-relay. */
+export function joinPlugin(join: Join | null | undefined): string {
+  const v = join?.plugin
+  return typeof v === 'string' && PLUGIN_RE.test(v) ? v : DEFAULT_PLUGIN
 }
 
 /** A team's display name on one line (it is someone's text; the message is plain text). */
@@ -179,13 +201,19 @@ function oneLine(name: string): string {
   return name.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim()
 }
 
-/** The three things a new member does after opening the team page (the join card says the same). */
-export const OPEN_TERMINAL = 'Open Terminal: press Cmd+Space, type Terminal, press Enter.'
-export const PASTE_LINE = 'Paste this line and press Enter, then answer its questions:'
+/** The five things a new member does after opening the team page (the join card says the same). */
+export const OPEN_PLUGINS = 'Open the Claude app. Click Customize, then Plugins, then "+ Add", then "Add marketplace".'
+export const PASTE_SOURCE = 'Paste this and click Sync:'
+export const NO_SOURCE = 'Ask a team owner for the plugin source, paste it and click Sync.'
+export function addPlugin(plugin: string): string {
+  return `Find "${plugin}" in the list and click Add.`
+}
+export const START_SETUP = `Start a Code session and type ${SETUP_COMMAND}.`
+export const SETUP_PAGE = 'A page opens: sign in, pick your team, choose the folders your Claude may read, then click Done.'
 export const COME_BACK = 'Come back to this page and click Accept.'
 
 /** M11 §6, "Simpler joining": what an owner sends someone they invited. Plain text, no markdown. */
-export function inviteMessage(teamName: string, origin: string): string {
+export function inviteMessage(teamName: string, origin: string, source: string | null, plugin: string = DEFAULT_PLUGIN): string {
   return [
     `You're invited to the team ${oneLine(teamName)} on Team relay.`,
     '',
@@ -193,10 +221,11 @@ export function inviteMessage(teamName: string, origin: string): string {
     '',
     'Open the link and accept the invitation. Then, on your Mac:',
     '',
-    `1. ${OPEN_TERMINAL}`,
-    `2. ${PASTE_LINE}`,
-    setupCommand(origin),
-    `3. ${COME_BACK.replace('this page', 'the page')}`,
+    `1. ${OPEN_PLUGINS}`,
+    ...(source ? [`2. ${PASTE_SOURCE}`, source] : [`2. ${NO_SOURCE}`]),
+    `3. ${addPlugin(plugin)}`,
+    `4. ${START_SETUP} ${SETUP_PAGE}`,
+    `5. ${COME_BACK.replace('this page', 'the page')}`,
   ].join('\n')
 }
 

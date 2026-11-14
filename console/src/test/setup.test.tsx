@@ -21,7 +21,7 @@ import { MockRelay, mockStatus } from '@/mock/relay'
 import { renderWithClient, setHidden } from './render'
 
 const KEY = 's3tup-s3tup-s3tup-s3tup-s3tup-s3'
-const LINE = 'curl -fsSL https://relay.example.com/setup | bash'
+const SOURCE = 'example-org/team-relay'
 
 type Call = { method: string; path: string; team: string | null; body: unknown }
 
@@ -90,9 +90,9 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
       'Set up your Mac',
       "Accept the team's topic",
     ])
-    // Not joined yet: the join card above has the Terminal steps and the line; the step points to it.
+    // Not joined yet: the join card above has the steps through the Claude app; the step points to it.
     expect(within(step('mac')).getByText('Follow "Join in 2 minutes" above.')).toBeInTheDocument()
-    expect(within(screen.getByRole('region', { name: 'Join in 2 minutes' })).getByRole('button', { name: 'Copy setup line' })).toBeInTheDocument()
+    expect(within(screen.getByRole('region', { name: 'Join in 2 minutes' })).getByRole('button', { name: 'Copy plugin source' })).toBeInTheDocument()
     // Nothing reported yet: no list of technical checks.
     expect(openChecks()).toEqual([])
     expect(within(step('accept')).getByText(/Operations at Example Co/)).toBeInTheDocument()
@@ -100,16 +100,16 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect(within(askCta()).getByRole('button', { name: 'Ask the team' })).toBeInTheDocument()
   })
 
-  it('shows the setup line with a big Copy button (in the join card above), only what is not done on the Mac, and the progress', async () => {
+  it('shows the plugin source with a big Copy button (in the join card above), only what is not done on the Mac, and the progress', async () => {
     window.history.replaceState(null, '', '/join')
     server()
     const user = userEvent.setup()
     renderWithClient(<App />)
     const panel = await setupPanel()
-    const line = await screen.findByText(LINE)
-    expect(line.closest('[data-command]')).not.toBeNull()
-    await user.click(screen.getByRole('button', { name: 'Copy setup line' }))
-    expect(await navigator.clipboard.readText()).toBe(LINE)
+    const source = await screen.findByText(SOURCE)
+    expect(source.closest('[data-command]')).not.toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Copy plugin source' }))
+    expect(await navigator.clipboard.readText()).toBe(SOURCE)
     // alice's Mac: everything but a folder (it reported none chosen); she has not accepted yet.
     await waitFor(() => expect(within(panel).getByText('0 of 2 done')).toBeInTheDocument())
     expect(doneOf()).toEqual({ mac: false, accept: false })
@@ -142,10 +142,10 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValue(new DOMException('no', 'NotAllowedError'))
     renderWithClient(<App />)
     await setupPanel()
-    await screen.findByText(LINE)
-    await user.click(screen.getByRole('button', { name: 'Copy setup line' }))
-    const box = await screen.findByRole('textbox', { name: 'setup line' })
-    expect(box).toHaveValue(LINE)
+    await screen.findByText(SOURCE)
+    await user.click(screen.getByRole('button', { name: 'Copy plugin source' }))
+    const box = await screen.findByRole('textbox', { name: 'plugin source' })
+    expect(box).toHaveValue(SOURCE)
     expect(box).toHaveAttribute('readonly')
     expect(document.activeElement).toBe(box)
   })
@@ -177,7 +177,7 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     await user.click(tab('team'))
     // The team view's own path (docs/SIGNIN-PAGE.md: / is the sign-in page on the hosted address).
     expect(window.location.pathname).toBe('/team')
-    await screen.findByRole('region', { name: 'Members' })
+    await screen.findByRole('region', { name: 'Ask the team' })
     expect(screen.queryByRole('region', { name: "Accept the team's topic" })).toBeNull()
   })
 
@@ -218,7 +218,9 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     expect(openChecks()).toEqual([])
     await user.click(within(done.closest('[data-setup-complete]') as HTMLElement).getByRole('button', { name: 'Ask the team' }))
     expect(await screen.findByRole('region', { name: 'Ask the team' })).toBeInTheDocument()
-    expect(window.location.pathname).toBe('/ask')
+    // Ask is on the team's page (14 Nov 2026).
+    expect(window.location.pathname).toBe('/team')
+    expect(tab('team')).toHaveAttribute('aria-current', 'page')
     expect(tab('join')).toHaveTextContent(/^Setup$/)
   })
 
@@ -238,34 +240,48 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     // Whether the viewer has asked is not read for it.
     expect(s.count('/api/my-requests')).toBe(0)
     await user.click(within(cta).getByRole('button', { name: 'Ask the team' }))
-    expect(window.location.pathname).toBe('/ask')
+    expect(window.location.pathname).toBe('/team')
     expect(panel).not.toBeInTheDocument()
+    expect(await screen.findByRole('region', { name: 'Ask the team' })).toBeInTheDocument()
   })
 
-  it('the pages: Ask first, then Team, Setup and Team settings; the landing page is still the team', async () => {
+  it('the pages: Team (with Ask on it), Setup and Team settings; the landing page is still the team', async () => {
     server()
     renderWithClient(<App />)
-    await screen.findByRole('region', { name: 'Members' })
+    await screen.findByRole('region', { name: 'Ask the team' })
     const nav = screen.getByRole('navigation', { name: 'Pages' })
-    expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.getAttribute('data-view-tab'))).toEqual(['ask', 'team', 'join', 'settings'])
+    expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.getAttribute('data-view-tab'))).toEqual(['team', 'join', 'settings'])
+    expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.firstChild?.textContent)).toEqual(['Team', 'Setup', 'Team settings'])
     expect(tab('team')).toHaveAttribute('aria-current', 'page')
     expect(window.location.pathname).toBe('/')
   })
 
-  it('a console server that serves one team (no /api/teams): no Team settings tab, and /settings becomes /team', async () => {
+  it('a console server that serves one team (no /api/teams): its Team settings tab holds the Members panel only', async () => {
     window.history.replaceState(null, '', '/settings?x=1')
-    const replace = vi.spyOn(window.history, 'replaceState')
     server({ override: (c) => (c.path === '/api/teams' ? json({ error: 'not_found' }, 404) : null) })
     renderWithClient(<App />)
     await screen.findByRole('region', { name: 'Members' })
     const nav = screen.getByRole('navigation', { name: 'Pages' })
-    expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.getAttribute('data-view-tab'))).toEqual(['ask', 'team', 'join'])
+    expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.getAttribute('data-view-tab'))).toEqual(['team', 'join', 'settings'])
+    expect(window.location.pathname).toBe('/settings')
+    expect(tab('settings')).toHaveAttribute('aria-current', 'page')
+    expect(screen.queryByRole('region', { name: 'Team settings' })).toBeNull()
+  })
+
+  it('a console server that serves one team and keeps no roster: no Team settings tab, and /settings becomes /team', async () => {
+    window.history.replaceState(null, '', '/settings?x=1')
+    const replace = vi.spyOn(window.history, 'replaceState')
+    server({ override: (c) => (c.path === '/api/teams' || c.path.startsWith('/api/roster') ? json({ error: 'not_found' }, 404) : null) })
+    renderWithClient(<App />)
+    await screen.findByRole('region', { name: 'Ask the team' })
     await waitFor(() => expect(window.location.pathname).toBe('/team'))
+    const nav = screen.getByRole('navigation', { name: 'Pages' })
+    expect([...nav.querySelectorAll('[data-view-tab]')].map((b) => b.getAttribute('data-view-tab'))).toEqual(['team', 'join'])
     expect(window.location.search).toBe('?x=1')
     // In place: Back does not lead to an address that shows something else.
     expect(replace.mock.calls.map((c) => c[2])).toContain('/team?x=1')
     expect(tab('team')).toHaveAttribute('aria-current', 'page')
-    expect(screen.queryByRole('region', { name: 'Team settings' })).toBeNull()
+    expect(screen.queryByRole('region', { name: 'Members' })).toBeNull()
   })
 
   it('a relay without guided setup (404): says so, ticks nothing, shows no banner', async () => {
@@ -278,7 +294,7 @@ describe('the Setup page: two plain steps, then Ask the team', () => {
     // Asking needs no setup progress: still there.
     expect(within(askCta()).getByRole('button', { name: 'Ask the team' })).toBeInTheDocument()
     fireEvent.click(tab('team'))
-    await screen.findByRole('region', { name: 'Members' })
+    await screen.findByRole('region', { name: 'Ask the team' })
     expect(screen.queryByRole('region', { name: "Accept the team's topic" })).toBeNull()
   })
 })
@@ -319,6 +335,11 @@ describe('live ticks (M11 §6: every 5 s while the page is visible)', () => {
 })
 
 describe('the Members panel and the invite message (M11 §6)', () => {
+  // The Members panel is on Team settings (14 Nov 2026).
+  beforeEach(() => {
+    window.history.replaceState(null, '', '/settings')
+  })
+
   it('an owner sees how many folders each member chose ("1 folder", "0 folders"), never which', async () => {
     const s = server()
     s.relay.setMemberStatus('bob', mockStatus(Date.now(), {}), true, 2, 1)
@@ -377,7 +398,7 @@ describe('the Members panel and the invite message (M11 §6)', () => {
     expect(row('dana').querySelector('[data-setup-progress]')).toBeNull()
   })
 
-  it('after inviting someone, an owner copies the invite message: the link, then the same three plain steps', async () => {
+  it('after inviting someone, an owner copies the invite message: the link, then the same five plain steps through the Claude app', async () => {
     server()
     const user = userEvent.setup()
     renderWithClient(<App />)
@@ -386,9 +407,10 @@ describe('the Members panel and the invite message (M11 §6)', () => {
     await user.type(within(form).getByLabelText('Google email'), 'erin@example.com')
     await user.click(within(form).getByRole('button', { name: 'Invite' }))
     await within(form).findByText(/Invited erin\. Send them the invite message/)
-    const expected = inviteMessage('Demo', 'https://relay.example.com')
+    const expected = inviteMessage('Demo', 'https://relay.example.com', SOURCE, 'team-relay')
     expect(expected.split('\n').slice(2, 5)).toEqual(['https://relay.example.com/', '', 'Open the link and accept the invitation. Then, on your Mac:'])
-    expect(expected).toContain(LINE)
+    expect(expected).toContain(`2. Paste this and click Sync:\n${SOURCE}`)
+    expect(expected).not.toMatch(/curl|Terminal|setup line/i)
     await user.click(within(form).getByRole('button', { name: 'Copy invite message' }))
     expect(await navigator.clipboard.readText()).toBe(expected)
 
@@ -477,7 +499,7 @@ describe('the local Setup page of /team-relay:setup', () => {
       'Folders your Claude answers from': 'done',
       'Answer in the background': 'todo',
     }))
-    // Not the Terminal page.
+    // Not the usual Setup page.
     expect(screen.queryByRole('region', { name: 'Your setup' })).toBeNull()
     expect(within(panel).getByText(FOLDERS_HINT)).toBeInTheDocument()
     expect(within(panel).getByText(BACKGROUND_TEXT)).toBeInTheDocument()
@@ -664,7 +686,9 @@ describe('the local Setup page of /team-relay:setup', () => {
     server()
     renderWithClient(<App />)
     const panel = await setupPanel()
-    expect(within(step('mac')).getByText('/team-relay:setup')).toBeInTheDocument()
+    // Not joined yet: the join card above it says to type it; the Mac step points there.
+    expect(within(await screen.findByRole('region', { name: 'Join in 2 minutes' })).getByText('/team-relay:setup')).toBeInTheDocument()
+    expect(within(step('mac')).getByText('Follow "Join in 2 minutes" above.')).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Set up this Mac' })).toBeNull()
     expect(panel).toBeInTheDocument()
   })

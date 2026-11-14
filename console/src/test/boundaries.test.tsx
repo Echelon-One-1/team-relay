@@ -305,12 +305,13 @@ describe('creating a team goes straight to its boundaries (M10 §1)', () => {
 })
 
 describe('Team settings: a page of its own (/settings)', () => {
-  it('is a tab after Setup with its own address; the team page no longer holds it', async () => {
+  it('is a tab after Setup with its own address, with the Members panel; the team page holds neither', async () => {
     window.history.replaceState(null, '', '/team')
     server()
     const user = userEvent.setup()
     renderWithClient(<App />)
-    await screen.findByRole('region', { name: 'Members' })
+    await screen.findByRole('region', { name: 'Ask the team' })
+    expect(screen.queryByRole('region', { name: 'Members' })).toBeNull()
     expect(screen.queryByRole('region', { name: 'Team settings' })).toBeNull()
     expect(screen.queryByRole('region', { name: 'Boundaries' })).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Team settings' }))
@@ -318,13 +319,16 @@ describe('Team settings: a page of its own (/settings)', () => {
     const settings = await screen.findByRole('region', { name: 'Team settings' })
     expect(within(settings).getByText('Team id')).toBeInTheDocument()
     expect(within(settings).getByRole('form', { name: 'Delete this team' })).toBeInTheDocument()
-    expect(screen.queryByRole('region', { name: 'Members' })).toBeNull()
+    // Members (14 Nov 2026): below the team's settings, on the same page.
+    const members = await screen.findByRole('region', { name: 'Members' })
+    expect(settings.compareDocumentPosition(members) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     // Back and forward through the history move between the pages.
     await act(async () => {
       window.history.back()
       await new Promise((r) => setTimeout(r, 50))
     })
-    await screen.findByRole('region', { name: 'Members' })
+    await screen.findByRole('region', { name: 'Ask the team' })
+    expect(screen.queryByRole('region', { name: 'Members' })).toBeNull()
     expect(window.location.pathname).toBe('/team')
   })
 })

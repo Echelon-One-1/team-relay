@@ -9,7 +9,6 @@ import {
   SETUP_INTERVAL_MS,
   useAcceptance,
   useBoundaries,
-  useJoin,
   useMe,
   useMembersStatus,
   useRefreshBoundaries,
@@ -24,19 +23,19 @@ import {
   currentVersion,
   hasJoined,
   isAccepted,
-  publicOrigin,
   SETUP_STEPS,
-  setupCommand,
+  SETUP_COMMAND,
   setupSteps,
   type MacCheck,
   type SetupStep,
 } from '@/lib/setup'
 import { cn } from '@/lib/utils'
-import { BigCopyCommand, CopyCommand } from './copy'
+import { CopyCommand } from './copy'
 import { Panel } from './primitives'
 
 // M11 §6 and "Simpler joining": the Setup page. Two plain steps that tick on their own (read
-// every 5 s while the page is visible): set up your Mac with one line in Terminal, and accept
+// every 5 s while the page is visible): set up your Mac (type /team-relay:setup in the Claude
+// app, which opens a page where the folders are chosen; 14 Nov 2026), and accept
 // the team's topic (the member, for themselves). Inside the first step, only what is not
 // done yet shows, each as one sentence of what to do. Below them, always: Ask the team (never a
 // step: asking is what the setup is for, and works whatever the steps say).
@@ -175,7 +174,6 @@ function StepItem({ n, step, children }: { n: number; step: SetupStep; children?
 
 /** `join`: shown above the steps (the join card, for a viewer who has not joined yet). */
 export function SetupPage({ join: joinCard }: { join?: ReactNode } = {}) {
-  const join = useJoin()
   const nav = useNav()
   const v = useViewerSetup(SETUP_INTERVAL_MS)
   const refresh = useRefreshBoundaries()
@@ -188,49 +186,28 @@ export function SetupPage({ join: joinCard }: { join?: ReactNode } = {}) {
     if (statusVersion !== null && shownVersion !== null && statusVersion > shownVersion) refresh()
   }, [statusVersion, shownVersion, refresh])
 
-  const origin = publicOrigin(window.location, join.data)
-  const command = origin ? setupCommand(origin) : null
   const allDone = !loading && done === SETUP_STEPS
-  // The join card above already has the Terminal steps and the setup line: say them once.
+  // The join card above already has the steps through the Claude app: say them once.
   const cardShown = joinCard !== undefined && joinCardShows(v)
+  const command = <span className="font-mono text-[12px] text-foreground">{SETUP_COMMAND}</span>
 
   const macBody = (step: SetupStep) => (
     <>
       {step.done ? (
-        <p className="text-[12.5px] leading-relaxed text-subtle">
-          Your Mac answers teammates in the background. To change your folders, run the setup line again.
+        <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-command>
+          Your Mac answers teammates in the background. To change your folders, type {command} in Claude.
         </p>
       ) : cardShown ? (
-        <>
-          <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-see-card>
-            Follow &quot;Join in 2 minutes&quot; above.
-          </p>
-          <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-command>
-            Or, in Claude Code, type <span className="font-mono text-[12px] text-foreground">/team-relay:setup</span>
-          </p>
-        </>
-      ) : (
-        <>
-          <p className="text-[12.5px] leading-relaxed text-subtle">
-            Open Terminal (press Cmd+Space, type Terminal, press Enter). Paste this line, press Enter and answer its questions.
-          </p>
-          <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-command>
-            Or, in Claude Code, type <span className="font-mono text-[12px] text-foreground">/team-relay:setup</span>
-          </p>
-        </>
-      )}
-      {cardShown ? null : command ? (
-        step.done ? (
-          <CopyCommand text={command} label="setup line" />
-        ) : (
-          <BigCopyCommand text={command} label="setup line" />
-        )
-      ) : join.isPending ? (
-        <Skeleton className="h-9 w-full" />
-      ) : (
-        <p className="text-[12.5px] text-subtle" data-no-command>
-          The setup line is on your team&apos;s page online. Ask a team owner for it.
+        <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-see-card>
+          Follow &quot;Join in 2 minutes&quot; above.
         </p>
+      ) : (
+        <>
+          <p className="text-[12.5px] leading-relaxed text-subtle" data-setup-command>
+            Choose your folders: in Claude, type {command}. A page opens with your Mac&apos;s folder window.
+          </p>
+          <CopyCommand text={SETUP_COMMAND} label="setup command" />
+        </>
       )}
       {missing ? (
         <p className="text-[12.5px] text-subtle" data-setup-missing>
@@ -292,7 +269,7 @@ export function SetupPage({ join: joinCard }: { join?: ReactNode } = {}) {
           <div className="m-4 flex flex-col items-start gap-3 rounded-md border border-ok/30 bg-ok-soft px-4 py-3.5 sm:flex-row sm:items-center" data-ask-cta data-setup-complete>
             <CircleCheck aria-hidden className="size-5 shrink-0 text-ok" />
             <p className="min-w-0 flex-1 text-[14px] font-semibold">You&apos;re all set</p>
-            <Button size="lg" onClick={() => nav.setView('ask')}>
+            <Button size="lg" onClick={() => nav.setView('team')}>
               <MessageSquare aria-hidden />
               Ask the team
             </Button>
@@ -301,7 +278,7 @@ export function SetupPage({ join: joinCard }: { join?: ReactNode } = {}) {
           <div className="m-4 flex flex-wrap items-center gap-3 rounded-md border bg-canvas px-4 py-3" data-ask-cta>
             <MessageSquare aria-hidden className="size-4 shrink-0 text-subtle" />
             <p className="min-w-0 flex-1 text-[12.5px] leading-relaxed text-subtle">Ask your teammates a question at any time.</p>
-            <Button size="sm" variant="outline" onClick={() => nav.setView('ask')}>
+            <Button size="sm" variant="outline" onClick={() => nav.setView('team')}>
               Ask the team
             </Button>
           </div>
@@ -341,16 +318,15 @@ export function AcceptBanner() {
 }
 
 const VIEWS: Array<{ view: ConsoleView; label: string }> = [
-  { view: 'ask', label: 'Ask' },
   { view: 'team', label: 'Team' },
   { view: 'join', label: 'Setup' },
   { view: 'settings', label: 'Team settings' },
 ]
 
 /**
- * The team's pages (M11): Ask first, then the team view, Setup and Team settings (the landing page
- * stays the team's), as pills in a segmented track. `settings`: whether the team has a settings
- * page (a console server that serves one team names none).
+ * The team's pages (M11; 14 Nov 2026): Team (Ask, the map and agents, live activity), Setup and
+ * Team settings (with Members), as pills in a segmented track. `settings`: whether the team has a
+ * settings page (a console server that serves one team and keeps no roster has none).
  */
 export function ViewTabs({ setup, settings = true }: { setup: { done: number } | null; settings?: boolean }) {
   const nav = useNav()

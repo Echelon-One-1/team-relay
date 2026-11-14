@@ -214,15 +214,16 @@ describe('Members panel: member (M6 §4)', () => {
 describe('in the console', () => {
   it('an owner gets the Members panel with the add form', async () => {
     window.localStorage.clear()
+    window.history.replaceState(null, '', '/settings')
     server([{ member: 'alice', emails: ['alice@example.com'], role: 'owner' }, ...OWNER_VIEW.filter((m) => m.member !== 'alice')])
     renderWithClient(<App />)
     await screen.findByLabelText('Google email')
-    // Below the team map and the agents, above the live activity.
-    const map = document.getElementById('team-map-title')!.closest('section')!
-    const members = document.getElementById('members-title')!.closest('section')!
-    expect(map.compareDocumentPosition(members) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    const activity = document.getElementById('activity-title')?.closest('section')
-    if (activity) expect(members.compareDocumentPosition(activity) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // On Team settings (14 Nov 2026), not on the team page with the map and the live activity.
+    expect(window.location.pathname).toBe('/settings')
+    expect(screen.getByRole('button', { name: 'Team settings' })).toHaveAttribute('aria-current', 'page')
+    expect(document.getElementById('team-map-title')).toBeNull()
+    expect(document.getElementById('activity-title')).toBeNull()
+    window.history.replaceState(null, '', '/')
   })
 
   it('an older console server without a roster (404) shows no Members panel', async () => {

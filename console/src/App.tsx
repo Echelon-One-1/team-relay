@@ -54,6 +54,9 @@ export function Console() {
   // M9 §7.7, M10 §1: the settings of a team the viewer holds: its boundaries for everyone (owners
   // edit them), and Delete team for owners (the relay refuses a file team).
   const entry = nav.teams?.teams.find((t) => t.team === nav.team) ?? null
+  // Team settings (14 Nov 2026) also hold the Members panel, for everyone: a console server that
+  // serves one team (no settings of its own) still has the page when its relay keeps a roster.
+  const hasSettings = entry !== null || !rosterMissing
   // M11 §6: the viewer's own progress for the Setup tab, and everyone's for the Members panel.
   const viewerSetup = useViewerSetup()
   const progress = useMemo(() => progressByMember(statuses.data, bounds.data), [statuses.data, bounds.data])
@@ -65,9 +68,10 @@ export function Console() {
   useEffect(() => {
     if (stranger && nav.teams) void qc.invalidateQueries({ queryKey: teamsKey })
   }, [stranger, nav.teams, qc])
-  // A console server that serves one team names no team, so it has no settings page: /settings
-  // shows the team, and the address says so (in place, so Back does not return to it).
-  const noSettings = nav.view === 'settings' && entry === null
+  // A console server that serves one team names no team, so it has no team settings; with no
+  // roster either there is no settings page at all: /settings shows the team, and the address
+  // says so (in place, so Back does not return to it).
+  const noSettings = nav.view === 'settings' && !hasSettings
   const { replaceView } = nav
   useEffect(() => {
     if (noSettings) replaceView('team')
@@ -81,18 +85,21 @@ export function Console() {
       <Header />
       <main className="mx-auto flex max-w-[1440px] flex-col gap-4 px-3 py-4 sm:px-6 sm:py-5">
         {conn.state === 'unreachable' ? <UnreachableBanner conn={conn} /> : null}
-        <ViewTabs setup={setupDone !== null ? { done: setupDone } : null} settings={entry !== null} />
-        {nav.view === 'ask' ? <AskPage /> : nav.view === 'join' ? <SetupView /> : nav.view === 'settings' && entry ? settingsView(entry) : teamView()}
+        <ViewTabs setup={setupDone !== null ? { done: setupDone } : null} settings={hasSettings} />
+        {nav.view === 'join' ? <SetupView /> : nav.view === 'settings' && hasSettings ? settingsView() : teamView()}
       </main>
       <RequestSheet req={selected} me={member} now={now} onClose={() => setOpenId(null)} />
     </div>
   )
 
-  // The team's page: a plain function of this render (not a component, so nothing remounts).
+  // The team's page (14 Nov 2026: Ask and Team are one tab): Ask the team, then the team map and
+  // the agents, then live activity. A plain function of this render (not a component, so nothing
+  // remounts).
   function teamView() {
     return (
       <>
         <AcceptBanner />
+        <AskPage />
         <ResizableRow className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
           {(sized) => (
             <>
@@ -111,38 +118,58 @@ export function Console() {
             </>
           )}
         </ResizableRow>
-        {rosterMissing ? null : (
-          <Members roster={roster.data} loading={roster.isPending} failed={roster.isError} me={member} owner={owner} progress={progress} />
-        )}
         <Activity requests={requests} me={member} now={now} loading={activity.isPending} onOpen={setOpenId} />
       </>
     )
   }
 
-  // Team settings (its own page, /settings): everyone reads them, owners change them.
-  function settingsView(team: NonNullable<typeof entry>) {
+  // Team settings (its own page, /settings): everyone reads them, owners change them. The Members
+  // panel is here too (14 Nov 2026): everyone sees the roster; inviting, removing and roles stay
+  // an owner's, as on the team page before (the relay checks every change).
+  function settingsView() {
     return (
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4" data-settings-team={team.team}>
-        <TeamSettings
-          entry={team}
-          owner={team.role === 'owner' && owner}
-          roleKnown={roster.data !== undefined || me.data !== undefined || roster.isError}
-        />
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4" data-settings-team={entry?.team ?? nav.team ?? ''}>
+        {entry ? (
+          <TeamSettings
+            entry={entry}
+            owner={entry.role === 'owner' && owner}
+            roleKnown={roster.data !== undefined || me.data !== undefined || roster.isError}
+          />
+        ) : null}
+        {rosterMissing ? null : (
+          <Members roster={roster.data} loading={roster.isPending} failed={roster.isError} me={member} owner={owner} progress={progress} />
+        )}
       </div>
     )
   }
 }
 
 /**
- * The view from the address: /admin is the admin page (M9 §4), /join the Join checklist and /ask
- * the Ask page (M11), /settings the team's settings, /team and anything else the team (the local
- * console opens at /). On the
+ * The view from the address: /admin is the admin page (M9 §4), /join the Join checklist (M11),
+ * /settings the team's settings, /team and anything else the team (the local console opens at
+ * /). /ask, the Ask page until 14 Nov 2026, is the team's page now (Ask is on it); its address
+ * becomes /team (askAddress). On the
  * hosted address / and /login are the relay's sign-in page and /setup its setup script
  * (docs/SIGNIN-PAGE.md); the page's button leads to /start (see startRequested).
  */
 function viewFromLocation(): ConsoleView {
-  const m = /\/(admin|join|ask|team|settings)\/?$/.exec(window.location.pathname)
+  const m = /\/(admin|join|team|settings)\/?$/.exec(window.location.pathname)
   return m ? (m[1] as ConsoleView) : 'team'
+}
+
+/** Whether the address is /ask (old links): the team's page, whose address is /team. */
+function askAddress(): boolean {
+  return /\/ask\/?$/.test(window.location.pathname)
+}
+
+/** /ask becomes /team in place, so old links keep working and Back does not return to /ask. */
+function redirectAsk(): void {
+  if (!askAddress()) return
+  try {
+    window.history.replaceState(window.history.state, '', viewAddress('team'))
+  } catch {
+    // A sandboxed document may refuse; the team's page shows all the same.
+  }
 }
 
 /** Whether the address is /start: where the sign-in page leads, until the setup state is known. */
@@ -162,7 +189,11 @@ function viewAddress(v: ConsoleView): string {
 function useView(): [ConsoleView, (v: ConsoleView) => void, (v: ConsoleView) => void] {
   const [view, setViewState] = useState<ConsoleView>(viewFromLocation)
   useEffect(() => {
-    const onPop = () => setViewState(viewFromLocation())
+    redirectAsk()
+    const onPop = () => {
+      redirectAsk()
+      setViewState(viewFromLocation())
+    }
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
@@ -189,13 +220,13 @@ function useView(): [ConsoleView, (v: ConsoleView) => void, (v: ConsoleView) => 
 
 /**
  * /start (docs/SIGNIN-PAGE.md): the loading state until the viewer's own setup is known (the data
- * the Setup tab shows), then `/join` while it is not done, else `/ask`. A setup that cannot be read
+ * the Setup tab shows), then `/join` while it is not done, else `/team` (where Ask is). A setup that cannot be read
  * goes to /join, which says why.
  */
 function StartRedirect({ onKnown }: { onKnown: (v: ConsoleView) => void }) {
   const setup = useViewerSetup()
   const failed = setup.me.isError || setup.statuses.isError || setup.bounds.isError
-  const next: ConsoleView | null = failed ? 'join' : setup.known ? (setup.done === SETUP_STEPS ? 'ask' : 'join') : null
+  const next: ConsoleView | null = failed ? 'join' : setup.known ? (setup.done === SETUP_STEPS ? 'team' : 'join') : null
   useEffect(() => {
     if (next) onKnown(next)
   }, [next, onKnown])

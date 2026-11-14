@@ -2355,7 +2355,7 @@ async function status(d, afterSetup) {
       io.print(`  [ ] ${s.title} - ${s.todo}`);
     }
   }
-  io.print(`Ask the team: ${url}/ask`);
+  io.print(`Ask the team: ${url}/team`);
   if (afterSetup) {
     const toAccept = boundariesVersion > 0 && !hasAccepted(acceptedVersion, boundariesVersion);
     io.print("");

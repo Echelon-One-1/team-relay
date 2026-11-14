@@ -96,7 +96,7 @@ export function CopyCommand({ text, label }: { text: string; label: string }) {
 }
 
 /**
- * The setup line for someone who has never used Terminal: the line in a box and a big "Copy"
+ * A line to copy for someone new to all this (the plugin source): the line in a box and a big "Copy"
  * button beside it (below it on a phone), with the fallback box when the clipboard refuses.
  */
 export function BigCopyCommand({ text, label }: { text: string; label: string }) {

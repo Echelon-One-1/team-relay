@@ -3,14 +3,26 @@ import type { ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useJoin } from '@/hooks/queries'
-import { COME_BACK, OPEN_TERMINAL, PASTE_LINE, publicOrigin, setupCommand } from '@/lib/setup'
-import { BigCopyCommand } from './copy'
+import {
+  addPlugin,
+  COME_BACK,
+  joinPlugin,
+  joinSource,
+  NO_SOURCE,
+  OPEN_PLUGINS,
+  PASTE_SOURCE,
+  SETUP_COMMAND,
+  SETUP_PAGE,
+} from '@/lib/setup'
+import { BigCopyCommand, CopyCommand } from './copy'
 import { joinCardShows, useViewerSetup } from './setup'
 
 // M11-SPEC "Simpler joining": on the Setup page, above the steps, for a viewer who has not joined
 // yet (their Mac has never reported in, or they have never accepted the team's topic), one small
-// card with the three things to do. It goes once they have joined (lib/setup.ts hasJoined).
-// Nothing in it names a tool: it is for people who have never used Terminal.
+// card with the things to do. It goes once they have joined (lib/setup.ts hasJoined).
+// Joining is done in the Claude app (14 Nov 2026): add the plugin source, add the plugin, type
+// /team-relay:setup. It names nothing but the Claude app's own labels: it is for people who have
+// never used Terminal.
 
 function Item({ n, children }: { n: number; children: ReactNode }) {
   return (
@@ -55,7 +67,7 @@ export function JoinCard() {
   const join = useJoin()
   const show = useShowJoinCard()
   if (!show) return null
-  const origin = publicOrigin(window.location, join.data)
+  const source = joinSource(join.data)
   return (
     <section aria-labelledby="join-card-title" className="flex min-w-0 flex-col gap-3.5 rounded-lg bg-card px-4 py-4" data-join-card>
       <h2 id="join-card-title" className="text-base leading-[22px] font-semibold">
@@ -63,21 +75,29 @@ export function JoinCard() {
       </h2>
       <ol className="flex flex-col gap-3" aria-label="Steps to join">
         <Item n={1}>
-          <p>{OPEN_TERMINAL}</p>
+          <p>{OPEN_PLUGINS}</p>
         </Item>
         <Item n={2}>
-          {origin ? (
+          {source ? (
             <>
-              <p>{PASTE_LINE}</p>
-              <BigCopyCommand text={setupCommand(origin)} label="setup line" />
+              <p>{PASTE_SOURCE}</p>
+              <BigCopyCommand text={source} label="plugin source" />
             </>
           ) : join.isPending ? (
             <Skeleton className="h-9 w-full" />
           ) : (
-            <p data-no-command>Paste the setup line a team owner sent you, press Enter, then answer its questions.</p>
+            <p data-no-source>{NO_SOURCE}</p>
           )}
         </Item>
         <Item n={3}>
+          <p>{addPlugin(joinPlugin(join.data))}</p>
+        </Item>
+        <Item n={4}>
+          <p>Start a Code session and type this:</p>
+          <CopyCommand text={SETUP_COMMAND} label="setup command" />
+          <p>{SETUP_PAGE}</p>
+        </Item>
+        <Item n={5}>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <p className="min-w-0 flex-1">{COME_BACK}</p>
             <Button size="sm" variant="outline" onClick={goToAccept}>

@@ -7,7 +7,8 @@
 #   https://PUBLIC_HOST/v1/*, /healthz, /setup -> the relay (no IAP: the relay signs people in
 #                                         itself; /setup is the public setup script, M11-SPEC §5)
 #   https://PUBLIC_HOST/<everything else>  -> the console (IAP, custom OAuth client, IAP_ACCESS):
-#                                            /start, /team, /join, /ask, /settings, /admin, /api/*,
+#                                            /start, /team, /join, /settings, /admin, /api/*, /ask
+#                                            (an old link: the console shows /team),
 #                                            assets
 #   http://PUBLIC_HOST/*                 -> a redirect to https
 #   any other Host (the bare IP, ...)    -> a redirect to https://PUBLIC_HOST

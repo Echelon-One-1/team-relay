@@ -49,6 +49,33 @@ BUILD_BUCKET="${BUILD_BUCKET:-${PROJECT}-team-relay-build}"
 
 TEAM_CONFIG="${TEAM_CONFIG:-config/team.local.yaml}"
 
+# The plugin source the Setup page's join card and the invite message show (what the Claude
+# app's Customize > Plugins > "Add marketplace" takes): JOIN_MARKETPLACE (a GitHub owner/repo or
+# a plain https URL), else PLUGIN_MARKETPLACE (the owner/repo scripts/deploy.sh gives the relay).
+# Checked here as the console server checks it at start (plugin/src/console-app.ts
+# checkJoinMarketplace), so a bad value stops the deploy before anything is built.
+MARKETPLACE_RE='^[A-Za-z0-9]([A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$'
+SOURCE_URL_RE='^https://[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:[0-9]{1,5})?(/[A-Za-z0-9._~%+-]+)*/?$'
+if [[ -n "${JOIN_MARKETPLACE:-}" ]]; then
+  JOIN_SOURCE="$JOIN_MARKETPLACE"
+  JOIN_SOURCE_VAR="JOIN_MARKETPLACE"
+else
+  JOIN_SOURCE="${PLUGIN_MARKETPLACE:-}"
+  JOIN_SOURCE_VAR="PLUGIN_MARKETPLACE"
+fi
+if [[ -n "$JOIN_SOURCE" ]]; then
+  if [[ "/${JOIN_SOURCE}/" == */./* || "/${JOIN_SOURCE}/" == */../* || ${#JOIN_SOURCE} -gt 512 ]] \
+    || { [[ ! "$JOIN_SOURCE" =~ $MARKETPLACE_RE ]] \
+      && { [[ "$JOIN_SOURCE_VAR" != "JOIN_MARKETPLACE" ]] || [[ ! "$JOIN_SOURCE" =~ $SOURCE_URL_RE ]]; }; }; then
+    if [[ "$JOIN_SOURCE_VAR" == "JOIN_MARKETPLACE" ]]; then
+      echo "error: JOIN_MARKETPLACE must be a GitHub owner/repo, such as example-org/team-relay, or a plain https URL" >&2
+    else
+      echo "error: PLUGIN_MARKETPLACE must be a GitHub owner/repo, such as example-org/team-relay" >&2
+    fi
+    exit 1
+  fi
+fi
+
 if [[ -n "$(git status --porcelain -- plugin/dist plugin/Dockerfile.console plugin/cloudbuild.console.yaml)" ]]; then
   echo "error: the console bundle or its build files have uncommitted changes" >&2
   exit 1
@@ -103,6 +130,9 @@ DIGEST="$(gcloud artifacts docker images describe "$IMAGE" --project="$PROJECT" 
 CONSOLE_ENV="^;^CONSOLE_MODE=hosted;CONSOLE_PUBLIC_HOST=${URL#https://};IAP_AUDIENCE=${IAP_AUDIENCE};CONSOLE_PROXY_HOPS=${PROXY_HOPS};RELAY_URL=${RELAY_URL};RELAY_TEAM=${TEAM};RELAY_AUTH=metadata"
 if [[ -n "${JOIN_REPO_URL:-}" ]]; then
   CONSOLE_ENV="${CONSOLE_ENV};JOIN_REPO_URL=${JOIN_REPO_URL}"
+fi
+if [[ -n "$JOIN_SOURCE" ]]; then
+  CONSOLE_ENV="${CONSOLE_ENV};JOIN_MARKETPLACE=${JOIN_SOURCE}"
 fi
 
 SALT_SECRET="team-relay-console-ip-salt"

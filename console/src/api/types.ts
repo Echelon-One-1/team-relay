@@ -79,12 +79,20 @@ export interface Me {
 
 /**
  * GET /api/join: answered by the console server itself, never the relay (plugin/src/
- * console-app.ts). The console reads the relay's address from it (the local console's setup
- * line); the server's other fields are not used.
+ * console-app.ts). The console reads the relay's address from it (the invite link on the local
+ * console) and the plugin source and name the join card and the invite message show. The
+ * server's other fields are not used. Read defensively (lib/setup.ts joinSource, joinPlugin):
+ * an older server sends only the first two.
  */
 export interface Join {
   relay_url: string
   team: string
+  /** What the Claude app's "Add marketplace" takes: a GitHub owner/repo or an https URL; null when not configured. */
+  marketplace_source?: string | null
+  /** The marketplace's name. */
+  marketplace?: string
+  /** The plugin's name in the Claude app's list. */
+  plugin?: string
 }
 
 export type RosterRole = 'owner' | 'member'

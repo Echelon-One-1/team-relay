@@ -25,6 +25,9 @@ export const fixtureMe: Me = { team: 'demo', member: 'alice', teammates: ['bob',
 export const fixtureJoin: Join = {
   relay_url: 'https://relay.example.com',
   team: 'demo',
+  marketplace_source: 'example-org/team-relay',
+  marketplace: 'team-relay-dev',
+  plugin: 'team-relay',
 }
 
 /** GET /api/boundaries for `demo` (M10 §1, schema v3): the topic, set by alice, an owner. Synthetic. */

@@ -491,7 +491,7 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
       '  [ ] Set up your Mac',
       '      - You have not chosen the folders your Claude answers from yet. Run the setup line again and pick them.',
       `  [ ] Accept what the team shares - Open ${relay.url} and click Accept.`,
-      `Ask the team: ${relay.url}/ask`,
+      `Ask the team: ${relay.url}/team`,
     ]);
     relay.acceptances.set('bob', 1);
     relay.memberStatus.set('bob', seen());
@@ -501,7 +501,7 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
       'Your setup (bob, team demo): 2 of 2 done.',
       '  [x] Set up your Mac',
       '  [x] Accept what the team shares',
-      `Ask the team: ${relay.url}/ask`,
+      `Ask the team: ${relay.url}/team`,
     ]);
     // Whether the member has asked is not looked up (it is not a step).
     expect(relay.requests.some((r) => r.path.includes('/me/requests'))).toBe(false);
@@ -573,7 +573,7 @@ describe('status: two plain steps, then Ask the team (M11-SPEC "Simpler joining"
     const closing = async () => {
       const t = term();
       expect(await runSetup(['status', '--after-setup'], deps(t))).toBe(0);
-      expect(t.out.at(-3)).toBe(`Ask the team: ${relay.url}/ask`);
+      expect(t.out.at(-3)).toBe(`Ask the team: ${relay.url}/team`);
       expect(t.out.at(-2)).toBe('');
       return t.out.at(-1);
     };

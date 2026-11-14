@@ -489,7 +489,8 @@ async function status(d: SetupDeps, afterSetup: boolean): Promise<number> {
     }
   }
   // Always there, never a step: asking is what the setup is for.
-  io.print(`Ask the team: ${url}/ask`);
+  // Ask is on the Team page (14 Nov 2026; /ask still leads there).
+  io.print(`Ask the team: ${url}/team`);
   if (afterSetup) {
     // The setup line's last words: back to the browser, and Accept when there is something to accept.
     const toAccept = boundariesVersion > 0 && !hasAccepted(acceptedVersion, boundariesVersion);
