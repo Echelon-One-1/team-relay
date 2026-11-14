@@ -140,7 +140,8 @@ CONSOLE_ENV="^;^CONSOLE_MODE=hosted;CONSOLE_PUBLIC_HOST=${URL#https://};IAP_AUDI
 if [[ -n "${JOIN_REPO_URL:-}" ]]; then
   CONSOLE_ENV="${CONSOLE_ENV};JOIN_REPO_URL=${JOIN_REPO_URL}"
 fi
-# Without a source, a value an earlier deploy set is removed, so the page never shows a stale one.
+# Without a source, a JOIN_MARKETPLACE an earlier deploy set is removed (a JOIN_REPO_URL set earlier stays,
+# and the page derives the source from it).
 REMOVE_FLAG=()
 if [[ -n "$JOIN_SOURCE" ]]; then
   CONSOLE_ENV="${CONSOLE_ENV};JOIN_MARKETPLACE=${JOIN_SOURCE}"

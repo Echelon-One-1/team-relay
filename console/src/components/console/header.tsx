@@ -120,7 +120,7 @@ function InboxWaiting() {
       </TooltipTrigger>
       <TooltipContent side="bottom" className="max-w-72">
         Nothing on your Mac is answering right now. In Claude, type /team-relay:setup and leave Background answering
-        on; the questions reach your Mac then.
+        on, then click Done; the questions reach your Mac then.
       </TooltipContent>
     </Tooltip>
   )
