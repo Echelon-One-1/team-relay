@@ -4,7 +4,8 @@
 // 0. The relay is the configured one (RELAY_URL, else the plugin's default; never the
 //    model's choice, §9 item 1). A stored credential issued by a different relay is never
 //    replaced: the member signs out first (/team-relay:logout). Checked again just before
-//    the new credential is written.
+//    the new credential is written. The one exception is /team-relay:setup's: a stored sign-in
+//    that no longer works at its relay (a 404: relay-connect.ts staleSignIn), that very file only.
 // 1. A PKCE verifier (64 base64url chars) and its S256 challenge, a random state (32 bytes),
 //    and an HTTP listener on 127.0.0.1 only, on a free port, for at most 5 minutes.
 // 2. The browser is opened on {relay}/v1/login/start?... through a private redirect file (the
@@ -29,6 +30,7 @@ import {
   CredentialFileError,
   EMAIL_RE,
   normaliseRelayUrl,
+  credentialFingerprint,
   readCredential,
   writeCredential,
   type StoredCredential,
@@ -146,18 +148,25 @@ export function identityChange(stored: StoredCredential, replaced: Previous | nu
 
 /**
  * The credential a sign-in to `relayNorm` would replace. Refuses (LoginError) when the stored
- * one was issued by another relay, or cannot be read: the member signs out first.
+ * one was issued by another relay, or cannot be read: the member signs out first. The one
+ * exception: `staleFingerprint`, the fingerprint (credentialFingerprint) of the file
+ * /team-relay:setup found stale, when the file is still exactly that one.
  */
-export function replaceableCredential(credentialsFile: string, relayNorm: string): Previous | null {
+export function replaceableCredential(credentialsFile: string, relayNorm: string, staleFingerprint?: string): Previous | null {
   let existing: StoredCredential | null;
+  let unchanged = false;
   try {
+    const before = credentialFingerprint(credentialsFile);
     existing = readCredential(credentialsFile);
+    unchanged = staleFingerprint !== undefined && before === staleFingerprint && credentialFingerprint(credentialsFile) === staleFingerprint;
   } catch (err) {
     const why = err instanceof CredentialFileError ? err.message : 'it cannot be read';
     throw new LoginError(`the stored sign-in on this computer cannot be used (${why}); nothing was changed. Run /team-relay:logout, then /team-relay:login.`);
   }
   if (!existing) return null;
-  if (existing.relay_url !== relayNorm) {
+  // A sign-in from another relay is replaced only when it is the very file found stale (its relay
+  // answered 404 for it: /team-relay:setup), read unchanged on both sides of this read.
+  if (existing.relay_url !== relayNorm && !unchanged) {
     throw new LoginError(
       `this computer is signed in to another relay (${existing.relay_url}) than the one configured for this session (${relayNorm}); ` +
         'nothing was changed. To switch relays, run /team-relay:logout first, then /team-relay:login.',
@@ -171,6 +180,13 @@ export type LoginOptions = {
   relayUrl: string;
   /** Where the credential is stored (credentialsPath()). */
   credentialsFile: string;
+  /**
+   * /team-relay:setup: the fingerprint of the stored sign-in it found stale (relay-connect.ts
+   * staleSignIn). That file, and only while it is unchanged, may be replaced even though it is
+   * from another relay; it stays as it is until the new sign-in succeeds. Its credential is
+   * never read for anything but this check, and never sent anywhere.
+   */
+  replaceStale?: string;
   device?: string;
   timeoutMs?: number;
   /**
@@ -207,7 +223,7 @@ export async function startLogin(opts: LoginOptions): Promise<LoginFlow> {
   const log = opts.log ?? (() => {});
   const relay = parseRelayUrl(opts.relayUrl);
   const relayNorm = normaliseRelayUrl(opts.relayUrl);
-  replaceableCredential(opts.credentialsFile, relayNorm);
+  replaceableCredential(opts.credentialsFile, relayNorm, opts.replaceStale);
   const base = new URL(relay.toString());
   if (!base.pathname.endsWith('/')) base.pathname += '/';
   const device = opts.device ?? deviceLabel();
@@ -325,7 +341,7 @@ export async function startLogin(opts: LoginOptions): Promise<LoginFlow> {
     let replaced: Previous | null;
     try {
       // Again, now: a sign-in to another relay may have been stored meanwhile.
-      replaced = replaceableCredential(opts.credentialsFile, relayNorm);
+      replaced = replaceableCredential(opts.credentialsFile, relayNorm, opts.replaceStale);
     } catch (err) {
       discard(credential, team);
       return fail(`signed in, but nothing was stored: ${(err as Error).message}`);

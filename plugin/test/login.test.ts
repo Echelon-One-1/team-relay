@@ -25,6 +25,7 @@ import {
   credentialsPath,
   normaliseRelayUrl,
   parseStoredCredential,
+  credentialFingerprint,
   readCredential,
   removeCredential,
   writeCredential,
@@ -501,6 +502,52 @@ describe('never moving a stored sign-in to another relay (M5-SPEC §9 item 1; se
     expect(identityChange(stored, replaced)).toBe(
       'This is a different member than before: this computer was signed in as bob on team demo, and is now alice on team demo. If you did not mean to switch, run /team-relay:logout.',
     );
+  });
+});
+
+describe('a stale sign-in from another relay (/team-relay:setup, 15 Nov 2026)', () => {
+  // The setup tool found the stored sign-in's relay gone (relay-connect.ts staleSignIn) and names
+  // the very file it found so; only that file may then be replaced by a sign-in to the configured
+  // relay, and only once the new sign-in succeeds. The old credential is never sent anywhere.
+  it('the stale file is kept until the new sign-in succeeds, then replaced as a normal sign-in replaces one', async () => {
+    const old = sample({ relay_url: 'https://old-relay.example.com', team: 'oldteam', member: 'bob', credential: `trc_${'S'.repeat(43)}` });
+    writeCredential(credFile(), old);
+    const before = readFileSync(credFile(), 'utf8');
+    const flow = await startLogin({ relayUrl: relay.url, credentialsFile: credFile(), open: () => {}, replaceStale: credentialFingerprint(credFile())! });
+    // Waiting for the browser: the old file is untouched.
+    expect(readFileSync(credFile(), 'utf8')).toBe(before);
+    await browse(flow.url);
+    const { stored, replaced } = await flow.done;
+    expect(stored).toMatchObject({ relay_url: normaliseRelayUrl(relay.url), team: 'demo', member: 'alice' });
+    expect(replaced).toEqual({ relay_url: 'https://old-relay.example.com', team: 'oldteam', member: 'bob' });
+    expect(readCredential(credFile())?.relay_url).toBe(normaliseRelayUrl(relay.url));
+    // The old credential reached no relay.
+    expect(JSON.stringify(relay.requests)).not.toContain(old.credential);
+  });
+
+  it('a sign-in that fails leaves the stale file as it was', async () => {
+    writeCredential(credFile(), sample({ relay_url: 'https://old-relay.example.com' }));
+    const before = readFileSync(credFile(), 'utf8');
+    relay.loginRefusal = { status: 400, error: 'invalid_grant' };
+    const flow = await startLogin({ relayUrl: relay.url, credentialsFile: credFile(), open: () => {}, replaceStale: credentialFingerprint(credFile())! });
+    await browse(flow.url);
+    await expect(flow.done).rejects.toThrow(/refused the sign-in/);
+    expect(readFileSync(credFile(), 'utf8')).toBe(before);
+  });
+
+  it('another file than the one found stale (a sign-in stored since) is not replaced', async () => {
+    writeCredential(credFile(), sample({ relay_url: 'https://old-relay.example.com' }));
+    const staleFp = credentialFingerprint(credFile())!;
+    await expect(startLogin({ relayUrl: relay.url, credentialsFile: credFile(), open: () => {}, replaceStale: 'not-this-file' })).rejects.toThrow(
+      /signed in to another relay/,
+    );
+    const flow = await startLogin({ relayUrl: relay.url, credentialsFile: credFile(), open: () => {}, replaceStale: staleFp });
+    const other = sample({ relay_url: 'https://other-relay.example.com', credential: `trc_${'O'.repeat(43)}` });
+    await new Promise((r) => setTimeout(r, 20));
+    writeCredential(credFile(), other);
+    await browse(flow.url);
+    await expect(flow.done).rejects.toThrow(/signed in, but nothing was stored: this computer is signed in to another relay/);
+    expect(readCredential(credFile())?.credential).toBe(other.credential);
   });
 });
 

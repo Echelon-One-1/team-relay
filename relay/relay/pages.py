@@ -320,8 +320,9 @@ def _identity(email: str, device: str) -> str:
         f'<dt>Account</dt><dd class="mono">{escape(email)}</dd>'
         f'<dt>Device</dt><dd class="mono">{escape(device)}</dd>'
         "</dl>\n"
-        '<p class="warning">Only continue if you just ran '
-        '<span class="command">/team-relay:login</span> in your own Claude Code.</p>\n'
+        '<p class="warning">Only continue if you just started signing in from your own Claude '
+        '(<span class="command">/team-relay:setup</span> or '
+        '<span class="command">/team-relay:login</span>).</p>\n'
     )
 
 

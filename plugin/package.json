@@ -1,6 +1,6 @@
 {
   "name": "team-relay-plugin",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Claude Code plugin: team relay channel, capability server and answering-session launcher.",
   "type": "module",

@@ -97,7 +97,8 @@ async def test_the_whole_flow_yields_a_working_credential(api: Api, capsys):
     assert "alice@example.com" in r.text and DEVICE in r.text
     assert (
         re.sub(r"<[^>]+>", "", r.text).count(
-            "Only continue if you just ran /team-relay:login in your own Claude Code."
+            "Only continue if you just started signing in from your own Claude "
+            "(/team-relay:setup or /team-relay:login)."
         )
         == 1
     )

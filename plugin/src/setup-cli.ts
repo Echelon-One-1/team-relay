@@ -111,6 +111,8 @@ async function defaultConnect(env: NodeJS.ProcessEnv): Promise<{ client: RelayCl
   if (a.kind === 'connected') return { client: a.client, member: a.me.member, team: a.me.team };
   if (a.kind === 'not_signed_in') return { error: NOT_SIGNED_IN };
   if (a.kind === 'refused') return { error: 'Your sign-in to the team has ended (or you are no longer on the team). Run the setup line again to sign in.' };
+  if (a.kind === 'unreachable' && a.otherRelay) return { error: `${a.problem.charAt(0).toUpperCase()}${a.problem.slice(1)}.` };
+  if (a.kind === 'unreachable' && a.stale) return { error: 'Your saved sign-in no longer works at its team relay. In Claude Code, run /team-relay:setup to sign in again.' };
   return { error: `Could not reach your team just now (${a.problem}). Check your internet connection, then run the setup line again.` };
 }
 

@@ -14,6 +14,7 @@ import { CredentialFileError } from './credentials.js';
 import { SESSION_START_CLEANUP_CAP_MS, removeOldDriveSignInWithin } from './drive-token-cleanup.js';
 import { makeLogger } from './log.js';
 import { MEMBER_RE, NotConnected, RelayClient, RelayError, TEAM_RE, connectionFromEnv } from './relay-client.js';
+import { STALE_PROBLEM, configuredRelay, otherRelayProblem, otherRelayUnreachable, staleSignIn } from './relay-connect.js';
 import { answeringCommand, detectChannelSession, notChannelNote } from './channel-mode.js';
 import { readSummary, waitingSentence } from './waiting.js';
 import { invitationsSentence, readInvitations } from './invitations.js';
@@ -75,6 +76,9 @@ async function relayStatusLine(env: NodeJS.ProcessEnv): Promise<string> {
         : null;
     return `team-relay: you are ${me.member} in team ${me.team}; teammates: ${mates}. Use list_teammates, ask_question and invoke_capability to reach them.${waiting ? ` ${waiting}` : ''}${invited ? ` ${invited}` : ''}${bounded ? ` ${bounded}` : ''} ${TRUST}`;
   } catch (err) {
+    // 15 Nov 2026: a saved sign-in that no longer works at its relay (relay-connect.ts).
+    if (staleSignIn(err, conn, configuredRelay(env))) return `team-relay: Not connected: ${STALE_PROBLEM}.`;
+    if (otherRelayUnreachable(err, conn, configuredRelay(env))) return `team-relay: Not connected: ${otherRelayProblem(conn.url)}.`;
     if (err instanceof RelayError && err.status === 401 && conn.mode === 'credential') {
       return 'team-relay: Not connected: the relay refused your sign-in (signed out, expired, or no longer on the team); run /team-relay:login again.';
     }

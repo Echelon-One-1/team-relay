@@ -1280,6 +1280,41 @@ function makeLogger(component) {
   };
 }
 
+// src/tool-util.ts
+function isPlainObject(v) {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+// src/relay-connect.ts
+var STALE_PROBLEM = "your saved sign-in no longer works at its team relay; run /team-relay:setup to sign in again";
+function configuredRelay(env) {
+  return configValue(env.RELAY_URL) ?? defaultRelayUrl();
+}
+function staleSignIn(err, c, configured) {
+  if (c.mode !== "credential" || !(err instanceof RelayError) || err.status !== 404) return false;
+  return err.code === "not_found" || configured !== null && otherRelay(c.url, configured);
+}
+function otherRelay(url, configured) {
+  try {
+    return normaliseRelayUrl(url) !== normaliseRelayUrl(configured);
+  } catch {
+    return false;
+  }
+}
+function otherRelayUnreachable(err, c, configured) {
+  if (c.mode !== "credential" || !(err instanceof RelayNetworkError) || configured === null) return false;
+  return otherRelay(c.url, configured);
+}
+function otherRelayProblem(relayUrl) {
+  let host;
+  try {
+    host = new URL(relayUrl).host;
+  } catch {
+    host = "unknown";
+  }
+  return `this Mac is signed in to another team relay (${host}) that isn't answering right now; try again later, or run /team-relay:logout first to switch`;
+}
+
 // src/channel-mode.ts
 import { execFile as execFile3 } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -1427,11 +1462,6 @@ function notChannelNote(env) {
   return `This session was not started with the team-relay channel, so teammates' answers are not shown here. Start one with: ${channelCommand(env)}`;
 }
 
-// src/tool-util.ts
-function isPlainObject(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
 // src/waiting.ts
 var ANSWERING_ONLINE_MS = 45e3;
 var SUMMARY_CAP = 50;
@@ -1570,6 +1600,8 @@ async function relayStatusLine(env) {
     const bounded = boundaries?.boundaries && boundaries.team === me.team && accepted !== null ? boundariesSentence(boundaries.version, teamSettings2(env, me.team), accepted, consoleUrl(conn.url)) : null;
     return `team-relay: you are ${me.member} in team ${me.team}; teammates: ${mates}. Use list_teammates, ask_question and invoke_capability to reach them.${waiting ? ` ${waiting}` : ""}${invited ? ` ${invited}` : ""}${bounded ? ` ${bounded}` : ""} ${TRUST}`;
   } catch (err) {
+    if (staleSignIn(err, conn, configuredRelay(env))) return `team-relay: Not connected: ${STALE_PROBLEM}.`;
+    if (otherRelayUnreachable(err, conn, configuredRelay(env))) return `team-relay: Not connected: ${otherRelayProblem(conn.url)}.`;
     if (err instanceof RelayError && err.status === 401 && conn.mode === "credential") {
       return "team-relay: Not connected: the relay refused your sign-in (signed out, expired, or no longer on the team); run /team-relay:login again.";
     }

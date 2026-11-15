@@ -1588,16 +1588,19 @@ function identityChange(stored, replaced) {
   const what = member && team ? "a different member of a different team" : member ? "a different member" : "a different team";
   return `This is ${what} than before: this computer was signed in as ${replaced.member} on team ${replaced.team}, and is now ${stored.member} on team ${stored.team}. If you did not mean to switch, run /team-relay:logout.`;
 }
-function replaceableCredential(credentialsFile, relayNorm) {
+function replaceableCredential(credentialsFile, relayNorm, staleFingerprint) {
   let existing;
+  let unchanged = false;
   try {
+    const before = credentialFingerprint(credentialsFile);
     existing = readCredential(credentialsFile);
+    unchanged = staleFingerprint !== void 0 && before === staleFingerprint && credentialFingerprint(credentialsFile) === staleFingerprint;
   } catch (err) {
     const why = err instanceof CredentialFileError ? err.message : "it cannot be read";
     throw new LoginError(`the stored sign-in on this computer cannot be used (${why}); nothing was changed. Run /team-relay:logout, then /team-relay:login.`);
   }
   if (!existing) return null;
-  if (existing.relay_url !== relayNorm) {
+  if (existing.relay_url !== relayNorm && !unchanged) {
     throw new LoginError(
       `this computer is signed in to another relay (${existing.relay_url}) than the one configured for this session (${relayNorm}); nothing was changed. To switch relays, run /team-relay:logout first, then /team-relay:login.`
     );
@@ -1609,7 +1612,7 @@ async function startLogin(opts) {
   });
   const relay = parseRelayUrl(opts.relayUrl);
   const relayNorm = normaliseRelayUrl(opts.relayUrl);
-  replaceableCredential(opts.credentialsFile, relayNorm);
+  replaceableCredential(opts.credentialsFile, relayNorm, opts.replaceStale);
   const base = new URL(relay.toString());
   if (!base.pathname.endsWith("/")) base.pathname += "/";
   const device = opts.device ?? deviceLabel();
@@ -1718,7 +1721,7 @@ async function startLogin(opts) {
     };
     let replaced;
     try {
-      replaced = replaceableCredential(opts.credentialsFile, relayNorm);
+      replaced = replaceableCredential(opts.credentialsFile, relayNorm, opts.replaceStale);
     } catch (err) {
       discard(credential, team);
       return fail(`signed in, but nothing was stored: ${err.message}`);
@@ -1846,10 +1849,40 @@ async function connectOnce(env, opts = {}) {
     me = await client.me({ attempts: 1, timeoutMs: opts.timeoutMs ?? 15e3 });
   } catch (err) {
     if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused", fingerprint };
+    if (staleSignIn(err, c, configuredRelay(env))) return { kind: "unreachable", problem: STALE_PROBLEM, stale: true, fingerprint };
+    if (otherRelayUnreachable(err, c, configuredRelay(env))) return { kind: "unreachable", problem: otherRelayProblem(c.url), otherRelay: true, fingerprint };
     return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})`, fingerprint };
   }
   if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team", fingerprint };
   return { kind: "connected", client, me, connection: c, fingerprint };
+}
+var STALE_PROBLEM = "your saved sign-in no longer works at its team relay; run /team-relay:setup to sign in again";
+function configuredRelay(env) {
+  return configValue(env.RELAY_URL) ?? defaultRelayUrl();
+}
+function staleSignIn(err, c, configured) {
+  if (c.mode !== "credential" || !(err instanceof RelayError) || err.status !== 404) return false;
+  return err.code === "not_found" || configured !== null && otherRelay(c.url, configured);
+}
+function otherRelay(url, configured) {
+  try {
+    return normaliseRelayUrl(url) !== normaliseRelayUrl(configured);
+  } catch {
+    return false;
+  }
+}
+function otherRelayUnreachable(err, c, configured) {
+  if (c.mode !== "credential" || !(err instanceof RelayNetworkError) || configured === null) return false;
+  return otherRelay(c.url, configured);
+}
+function otherRelayProblem(relayUrl) {
+  let host;
+  try {
+    host = new URL(relayUrl).host;
+  } catch {
+    host = "unknown";
+  }
+  return `this Mac is signed in to another team relay (${host}) that isn't answering right now; try again later, or run /team-relay:logout first to switch`;
 }
 
 // src/setup-steps.ts
@@ -2050,6 +2083,8 @@ async function defaultConnect(env) {
   if (a.kind === "connected") return { client: a.client, member: a.me.member, team: a.me.team };
   if (a.kind === "not_signed_in") return { error: NOT_SIGNED_IN };
   if (a.kind === "refused") return { error: "Your sign-in to the team has ended (or you are no longer on the team). Run the setup line again to sign in." };
+  if (a.kind === "unreachable" && a.otherRelay) return { error: `${a.problem.charAt(0).toUpperCase()}${a.problem.slice(1)}.` };
+  if (a.kind === "unreachable" && a.stale) return { error: "Your saved sign-in no longer works at its team relay. In Claude Code, run /team-relay:setup to sign in again." };
   return { error: `Could not reach your team just now (${a.problem}). Check your internet connection, then run the setup line again.` };
 }
 var yes = (answer, byDefault) => {

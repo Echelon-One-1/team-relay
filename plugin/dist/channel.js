@@ -25950,10 +25950,40 @@ async function connectOnce(env, opts = {}) {
     me = await client.me({ attempts: 1, timeoutMs: opts.timeoutMs ?? 15e3 });
   } catch (err) {
     if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused", fingerprint };
+    if (staleSignIn(err, c, configuredRelay(env))) return { kind: "unreachable", problem: STALE_PROBLEM, stale: true, fingerprint };
+    if (otherRelayUnreachable(err, c, configuredRelay(env))) return { kind: "unreachable", problem: otherRelayProblem(c.url), otherRelay: true, fingerprint };
     return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})`, fingerprint };
   }
   if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team", fingerprint };
   return { kind: "connected", client, me, connection: c, fingerprint };
+}
+var STALE_PROBLEM = "your saved sign-in no longer works at its team relay; run /team-relay:setup to sign in again";
+function configuredRelay(env) {
+  return configValue(env.RELAY_URL) ?? defaultRelayUrl();
+}
+function staleSignIn(err, c, configured) {
+  if (c.mode !== "credential" || !(err instanceof RelayError) || err.status !== 404) return false;
+  return err.code === "not_found" || configured !== null && otherRelay(c.url, configured);
+}
+function otherRelay(url, configured) {
+  try {
+    return normaliseRelayUrl(url) !== normaliseRelayUrl(configured);
+  } catch {
+    return false;
+  }
+}
+function otherRelayUnreachable(err, c, configured) {
+  if (c.mode !== "credential" || !(err instanceof RelayNetworkError) || configured === null) return false;
+  return otherRelay(c.url, configured);
+}
+function otherRelayProblem(relayUrl) {
+  let host;
+  try {
+    host = new URL(relayUrl).host;
+  } catch {
+    host = "unknown";
+  }
+  return `this Mac is signed in to another team relay (${host}) that isn't answering right now; try again later, or run /team-relay:logout first to switch`;
 }
 function hostConnection(c, env, credentialsFile) {
   return {
@@ -26125,16 +26155,19 @@ function identityChange(stored, replaced) {
   const what = member && team ? "a different member of a different team" : member ? "a different member" : "a different team";
   return `This is ${what} than before: this computer was signed in as ${replaced.member} on team ${replaced.team}, and is now ${stored.member} on team ${stored.team}. If you did not mean to switch, run /team-relay:logout.`;
 }
-function replaceableCredential(credentialsFile, relayNorm) {
+function replaceableCredential(credentialsFile, relayNorm, staleFingerprint) {
   let existing;
+  let unchanged = false;
   try {
+    const before = credentialFingerprint(credentialsFile);
     existing = readCredential(credentialsFile);
+    unchanged = staleFingerprint !== void 0 && before === staleFingerprint && credentialFingerprint(credentialsFile) === staleFingerprint;
   } catch (err) {
     const why = err instanceof CredentialFileError ? err.message : "it cannot be read";
     throw new LoginError(`the stored sign-in on this computer cannot be used (${why}); nothing was changed. Run /team-relay:logout, then /team-relay:login.`);
   }
   if (!existing) return null;
-  if (existing.relay_url !== relayNorm) {
+  if (existing.relay_url !== relayNorm && !unchanged) {
     throw new LoginError(
       `this computer is signed in to another relay (${existing.relay_url}) than the one configured for this session (${relayNorm}); nothing was changed. To switch relays, run /team-relay:logout first, then /team-relay:login.`
     );
@@ -26146,7 +26179,7 @@ async function startLogin(opts) {
   });
   const relay = parseRelayUrl(opts.relayUrl);
   const relayNorm = normaliseRelayUrl(opts.relayUrl);
-  replaceableCredential(opts.credentialsFile, relayNorm);
+  replaceableCredential(opts.credentialsFile, relayNorm, opts.replaceStale);
   const base2 = new URL(relay.toString());
   if (!base2.pathname.endsWith("/")) base2.pathname += "/";
   const device = opts.device ?? deviceLabel();
@@ -26255,7 +26288,7 @@ async function startLogin(opts) {
     };
     let replaced;
     try {
-      replaced = replaceableCredential(opts.credentialsFile, relayNorm);
+      replaced = replaceableCredential(opts.credentialsFile, relayNorm, opts.replaceStale);
     } catch (err) {
       discard(credential, team);
       return fail2(`signed in, but nothing was stored: ${err.message}`);
@@ -39113,7 +39146,7 @@ var SetupPages = class {
     if (r && !r.stopping && r.member === live.member && r.team === live.team) {
       this.openUrl(r.url);
       this.touch(r);
-      return { url: r.url, reused: true };
+      return { url: r.url, reused: true, done: r.done };
     }
     if (r) await this.stop();
     this.starting = this.start(live);
@@ -39148,11 +39181,27 @@ var SetupPages = class {
         uninstall: () => uninstallBackground({ env, uid: uid3, ...launchctl })
       },
       onDone: () => {
-        if (running) this.finish(running);
+        if (running) this.finish(running, summary());
       },
       log: log2
     };
-    const local = createLocalSetup({ ...base2, ...this.o.localDeps?.(live) ?? {} });
+    const deps = { ...base2, ...this.o.localDeps?.(live) ?? {} };
+    const summary = () => {
+      let folders;
+      try {
+        folders = readTeamSettings(memberFoldersPath(env), env, live.team).folders.length;
+      } catch {
+        folders = null;
+      }
+      let background = false;
+      try {
+        background = deps.background.installed();
+      } catch {
+        background = false;
+      }
+      return { kind: "done", team: live.team, folders, background };
+    };
+    const local = createLocalSetup(deps);
     const app = createConsoleServer({
       backend: relayBackend(client),
       key,
@@ -39164,16 +39213,18 @@ var SetupPages = class {
     });
     const port = await app.listen(0);
     const url = `http://127.0.0.1:${port}/join#k=${key}`;
+    let settle2;
+    const done = new Promise((resolve) => settle2 = resolve);
     running = { app, url, member: live.member, team: live.team, cancelIdle: () => {
     }, cancelDone: () => {
-    }, stopping: false, closed: false };
+    }, stopping: false, closed: false, done, settle: settle2 };
     this.running = running;
     const r = running;
     app.server.on("request", () => this.touch(r));
     this.touch(r);
     log2(`setup page: serving on 127.0.0.1:${port}`);
     this.openUrl(url);
-    return { url, reused: false };
+    return { url, reused: false, done };
   }
   openUrl(url) {
     if (this.o.open) return this.o.open(url);
@@ -39189,9 +39240,10 @@ var SetupPages = class {
     }, SETUP_IDLE_MS);
   }
   /** Done: no longer the page to reopen; it closes after SETUP_DONE_STOP_MS (its last answer first). */
-  finish(r) {
+  finish(r, summary) {
     if (r.stopping) return;
     r.stopping = true;
+    r.settle(summary);
     r.cancelIdle();
     if (this.running === r) this.running = null;
     this.finishing.add(r);
@@ -39201,6 +39253,7 @@ var SetupPages = class {
     if (r.closed) return;
     r.closed = true;
     r.stopping = true;
+    r.settle({ kind: "closed" });
     r.cancelIdle();
     r.cancelDone();
     this.finishing.delete(r);
@@ -39217,42 +39270,85 @@ var SetupPages = class {
 // src/setup-tool.ts
 var SETUP_TOOL = {
   name: "setup",
-  description: "Set up the team relay on this Mac without Terminal (/team-relay:setup). Takes no arguments. Signs in first when needed (the browser opens on the relay's Google sign-in), then opens the setup page on this Mac in the browser, where the user accepts the team's boundaries, picks the folders their Claude answers from and turns background answering on. Returns at once.",
+  description: "Set up the team relay on this Mac without Terminal (/team-relay:setup). Takes no arguments. Signs in first when needed (the browser opens on the relay's Google sign-in), then opens the setup page on this Mac in the browser, where the user accepts the team's boundaries, picks the folders their Claude answers from and turns background answering on. Waits (up to 10 minutes) until they press Done there, then returns one line saying how setup ended.",
   inputSchema: { type: "object", properties: {}, additionalProperties: false }
 };
 var SETUP_OPEN = "The setup page is open in your browser. Come back here when it says Done.";
+var SETUP_STALE = "Your saved sign-in no longer works at its team relay, so you're signing in again.";
+var SETUP_STILL_OPEN = "The setup page is still open in your browser. Finish it there; run /team-relay:setup again if you closed it.";
+var SETUP_CLOSED = "The setup page closed before Done was pressed. Run /team-relay:setup again to finish setting up.";
+var SETUP_CANCELLED = "Stopped waiting for the setup page. It stays open in your browser until you press Done or close it.";
+var SETUP_DONE_WAIT_MS = 10 * 60 * 1e3;
+function setupDoneLine(d) {
+  const folders = d.folders === null ? "" : ` ${d.folders} folder${d.folders === 1 ? "" : "s"},`;
+  return `Setup is done: team ${d.team},${folders} background answering ${d.background ? "on" : "off"}.`;
+}
 var SETUP_OPEN_SIGN_IN = "No browser tab could be opened for the sign-in. Show the user sign_in_url as the rule says; once they have signed in there, run /team-relay:setup again to open the setup page.";
 var SETUP_SIGN_IN_WAIT_MS = 5 * 60 * 1e3;
 var SETUP_CONNECT_WAIT_MS = 5e3;
 var realSleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
 async function setupTool(args, deps, progress = () => {
-}) {
+}, signal) {
   if (unknownKey(args, [])) return toolError("setup takes no arguments");
   let live = deps.live();
-  if (!live && deps.stored?.() === "present") {
+  let stored = live ? null : deps.stored?.() ?? "none";
+  if (!live && stored === "present") {
     const sleep2 = deps.sleep ?? realSleep2;
-    for (let waited = 0; !live && waited < SETUP_CONNECT_WAIT_MS; waited += 100) {
+    for (let waited = 0; !live && stored === "present" && waited < SETUP_CONNECT_WAIT_MS; waited += 100) {
       await sleep2(100);
       live = deps.live();
+      stored = live ? null : deps.stored?.() ?? "none";
     }
-    if (!live) return toolError(`${deps.notConnected?.() ?? "Not connected yet."} Run /team-relay:setup again in a moment.`);
+    if (!live && stored === "present") return toolError(`${deps.notConnected?.() ?? "Not connected yet."} Run /team-relay:setup again in a moment.`);
   }
+  if (!live && stored === "elsewhere") return toolError(`${deps.notConnected?.() ?? "Not connected: signed in to another team relay that is not answering right now"}.`);
+  const stale = !live && stored === "stale";
+  const said = (text) => stale ? `${SETUP_STALE} ${text}` : text;
+  if (signal?.aborted) return toolError(SETUP_CANCELLED);
   if (!live) {
+    if (stale) progress(SETUP_STALE);
     progress("signing in: finish in the browser");
-    const why = await deps.signIn(SETUP_SIGN_IN_WAIT_MS, progress);
+    const why = await deps.signIn(SETUP_SIGN_IN_WAIT_MS, progress, signal);
+    if (why !== null && typeof why === "object" && "cancelled" in why) return toolError(SETUP_CANCELLED);
     if (why !== null && typeof why === "object") {
-      return toolJson({ status: "waiting_for_browser", sign_in_url: why.signInUrl, sign_in_url_rule: SIGN_IN_URL_RULE, message: SETUP_OPEN_SIGN_IN });
+      return toolJson({ status: "waiting_for_browser", sign_in_url: why.signInUrl, sign_in_url_rule: SIGN_IN_URL_RULE, message: said(SETUP_OPEN_SIGN_IN) });
     }
-    if (why !== null) return toolError(`${why} Then run /team-relay:setup again.`);
+    if (why !== null) return toolError(said(`${why} Then run /team-relay:setup again.`));
     live = deps.live();
-    if (!live) return toolError("The sign-in finished, but this session is not connected yet. Run /team-relay:setup again in a moment.");
+    if (!live) return toolError(said("The sign-in finished, but this session is not connected yet. Run /team-relay:setup again in a moment."));
+    if (signal?.aborted) return toolError(SETUP_CANCELLED);
   }
+  let page2;
   try {
-    await deps.pages.open(live);
+    page2 = await deps.pages.open(live);
   } catch (err) {
-    return toolError(`The setup page could not start (${describeError(err)}). Run /team-relay:setup again.`);
+    return toolError(said(`The setup page could not start (${describeError(err)}). Run /team-relay:setup again.`));
   }
-  return toolJson({ message: SETUP_OPEN });
+  progress(SETUP_OPEN);
+  const ended = await waitForDone(page2.done, deps.doneWaitMs ?? SETUP_DONE_WAIT_MS, progress, signal);
+  if (ended === "cancelled") return toolError(SETUP_CANCELLED);
+  if (ended === "timeout") return toolJson({ message: said(SETUP_STILL_OPEN) });
+  if (ended.kind === "closed") return toolJson({ message: said(SETUP_CLOSED) });
+  return toolJson({ message: said(setupDoneLine(ended)) });
+}
+function waitForDone(done, ms, progress, signal) {
+  return new Promise((resolve) => {
+    let finished = false;
+    const timer = setTimeout(() => end("timeout"), ms);
+    const tick = setInterval(() => progress("waiting for Done on the setup page"), 15e3);
+    const onAbort = () => end("cancelled");
+    function end(v) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      clearInterval(tick);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(v);
+    }
+    if (signal?.aborted) return end("cancelled");
+    signal?.addEventListener("abort", onAbort, { once: true });
+    done.then(end, () => end({ kind: "closed" }));
+  });
 }
 
 // src/channel.ts
@@ -39639,6 +39735,10 @@ var AskerConnection = class {
   live = null;
   problem = null;
   refusedAt = void 0;
+  /** The credential file whose relay answered 404 for it (relay-connect.ts staleSignIn), if any. */
+  staleAt = void 0;
+  /** The credential file for another relay that is not answering (otherRelayUnreachable), if any. */
+  elsewhereAt = void 0;
   /** How the last attempt to connect ended (null: none yet). */
   lastAttempt = null;
   lastLogged = "";
@@ -39746,6 +39846,8 @@ var AskerConnection = class {
   async tryConnect() {
     const attempt = await connectOnce(this.env);
     this.lastAttempt = attempt.kind;
+    this.staleAt = attempt.kind === "unreachable" && attempt.stale && attempt.fingerprint !== null ? attempt.fingerprint : void 0;
+    this.elsewhereAt = attempt.kind === "unreachable" && attempt.otherRelay && attempt.fingerprint !== null ? attempt.fingerprint : void 0;
     const fp = attempt.fingerprint;
     switch (attempt.kind) {
       case "not_signed_in":
@@ -39816,7 +39918,11 @@ var AskerConnection = class {
     return 2e3;
   }
   // -- the tools ------------------------------------------------------------------------
-  async login(args) {
+  /**
+   * The login tool. `replaceStale` (only /team-relay:setup's own call, never the tool's
+   * arguments): the fingerprint of a stored sign-in found stale, which this sign-in may replace.
+   */
+  async login(args, replaceStale) {
     if (Object.keys(args).length > 0) {
       return toolError(
         "login takes no arguments: it signs in to the relay this plugin is configured for. Another relay is set only by RELAY_URL in the environment Claude Code starts with."
@@ -39835,7 +39941,7 @@ var AskerConnection = class {
     this.lastOutcome = null;
     let flow;
     try {
-      flow = await startLogin({ relayUrl, credentialsFile: this.path, log });
+      flow = await startLogin({ relayUrl, credentialsFile: this.path, log, ...replaceStale !== void 0 ? { replaceStale } : {} });
     } catch (err) {
       return toolError(err instanceof LoginError ? `not signed in: ${err.message}` : `could not start the sign-in: ${describeError(err)}`);
     }
@@ -39967,13 +40073,17 @@ var AskerConnection = class {
   }
   /**
    * /team-relay:setup: whether this session has a sign-in to wait for. 'none': no stored sign-in
-   * (or none the connection could use); 'refused': the relay refused the stored one; 'present':
-   * one is stored and the connection is (re)trying it.
+   * (or none the connection could use); 'refused': the relay refused the stored one; 'stale':
+   * the stored one's relay answered 404 for it; 'elsewhere': the stored one is for another relay
+   * than the configured one, and that relay is not answering; 'present': one is stored and the
+   * connection is (re)trying it.
    */
   storedSignIn() {
     const fp = credentialFingerprint(this.path);
     if (fp === null) return "none";
     if (this.refusedAt !== void 0 && this.refusedAt === fp) return "refused";
+    if (this.staleAt !== void 0 && this.staleAt === fp) return "stale";
+    if (this.elsewhereAt !== void 0 && this.elsewhereAt === fp) return "elsewhere";
     const a = this.lastAttempt;
     return a === null || a === "unreachable" || a === "connected" ? "present" : "none";
   }
@@ -39982,13 +40092,22 @@ var AskerConnection = class {
    * `waitMs`), until this session is connected as the new member. Null once connected; the
    * sign-in URL when no browser could be opened on it (the user opens it themselves); else why not.
    */
-  async signInAndWait(waitMs, progress) {
-    const started = await this.login({});
+  async signInAndWait(waitMs, progress, signal) {
+    if (signal?.aborted) return { cancelled: true };
+    const fp = credentialFingerprint(this.path);
+    const stale = fp !== null && this.staleAt === fp ? fp : void 0;
+    const started = await this.login({}, stale);
     if (started.isError) return started.content.map((c) => c.text).join("");
     const flow = this.pending;
     const deadline = Date.now() + waitMs;
     const tick = setInterval(() => progress("waiting for the sign-in in the browser"), 15e3);
     const noBrowser = /* @__PURE__ */ Symbol("no browser");
+    const cancelled = /* @__PURE__ */ Symbol("cancelled");
+    let onAbort;
+    const aborted2 = new Promise((resolve) => {
+      onAbort = () => resolve(cancelled);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
     const unopened = flow ? flow.opened.then((ok) => ok ? new Promise(() => {
     }) : noBrowser) : new Promise(() => {
     });
@@ -40001,10 +40120,15 @@ var AskerConnection = class {
         const result = await Promise.race([
           current,
           unopened,
+          aborted2,
           new Promise((resolve) => {
             timer = setTimeout(() => resolve(timedOut), Math.max(0, deadline - Date.now()));
           })
         ]).finally(() => clearTimeout(timer));
+        if (result === cancelled) {
+          log("setup: stopped waiting for the sign-in (the call was cancelled); the sign-in goes on");
+          return { cancelled: true };
+        }
         if (result === noBrowser) return { signInUrl: flow.url };
         if (result === timedOut) return `The sign-in did not finish within ${Math.round(waitMs / 6e4)} minutes.`;
         if (!result.ok) {
@@ -40024,6 +40148,7 @@ var AskerConnection = class {
       return this.live ? null : "No sign-in is waiting.";
     } finally {
       clearInterval(tick);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
     }
   }
   async whoami(args) {
@@ -40216,10 +40341,11 @@ async function main() {
               live: () => connection.setupLive(),
               stored: () => connection.storedSignIn(),
               notConnected: () => connection.notConnected(),
-              signIn: (ms, p) => connection.signInAndWait(ms, p),
+              signIn: (ms, p, sig) => connection.signInAndWait(ms, p, sig),
               pages: setupPages
             },
-            progress
+            progress,
+            extra.signal
           );
         }
         if (name === "folders") {
