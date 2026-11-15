@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FakeRelay, TOKEN_OF } from './helpers/fake-relay.js';
 import { DIST, PLUGIN_ROOT } from './helpers/mcp.js';
+import { writeCredential } from '../src/credentials.js';
 
 const REPO_ROOT = join(PLUGIN_ROOT, '..');
 
@@ -136,6 +138,39 @@ describe('SessionStart hook', () => {
     expect(refused.stdout.trimEnd().split('\n')).toHaveLength(1);
     expect(refused.stdout).toMatch(/relay refused this session \(401 unauthenticated\)/);
     expect(refused.stdout).not.toContain('tok-bad-secret-123');
+  });
+
+  // 15 Nov 2026, a real Mac: a saved sign-in for a relay and team that no longer exist gave
+  // "the relay refused this session (404 http_404); check the relay URL, team and token".
+  it('a saved sign-in whose relay no longer answers (404): says plainly to run /team-relay:setup to sign in again', async () => {
+    const xdg = mkdtempSync(join(tmpdir(), 'team-relay-session-start-'));
+    try {
+      const credential = relay.mintCredential('bob');
+      writeCredential(join(xdg, 'team-relay', 'credentials.json'), { relay_url: relay.url, team: 'gone', member: 'bob', credential, expires_at: null });
+      const r = await run({ XDG_CONFIG_HOME: xdg, RELAY_URL: relay.url });
+      expect(r.status).toBe(0);
+      expect(r.stdout.trimEnd().split('\n')).toHaveLength(1);
+      expect(r.stdout.trimEnd()).toBe(
+        "team-relay: Not connected: your saved sign-in was for a team relay that no longer answers; run /team-relay:setup to sign in again.",
+      );
+      expect(r.stdout).not.toContain('check the relay URL');
+      expect(r.stdout + r.stderr).not.toContain(credential);
+    } finally {
+      rmSync(xdg, { recursive: true, force: true });
+    }
+  });
+
+  it('a saved sign-in the configured relay refuses (401) keeps its own line', async () => {
+    const xdg = mkdtempSync(join(tmpdir(), 'team-relay-session-start-'));
+    try {
+      writeCredential(join(xdg, 'team-relay', 'credentials.json'), { relay_url: relay.url, team: 'demo', member: 'bob', credential: `trc_${'Z'.repeat(43)}`, expires_at: null });
+      const r = await run({ XDG_CONFIG_HOME: xdg, RELAY_URL: relay.url });
+      expect(r.stdout.trimEnd()).toBe(
+        'team-relay: Not connected: the relay refused your sign-in (signed out, expired, or no longer on the team); run /team-relay:login again.',
+      );
+    } finally {
+      rmSync(xdg, { recursive: true, force: true });
+    }
   });
 
   it('in a session without the channel, the same one line also says answers are not shown and how to start one', async () => {

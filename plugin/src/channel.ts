@@ -548,6 +548,8 @@ class AskerConnection {
   private live: (Live & { stopper: Stopper; fingerprint: string | null; mode: AuthMode }) | null = null;
   private problem: string | null = null;
   private refusedAt: string | null | undefined = undefined;
+  /** The credential file whose relay no longer answers for it (relay-connect.ts staleSignIn), if any. */
+  private staleAt: string | undefined = undefined;
   /** How the last attempt to connect ended (null: none yet). */
   private lastAttempt: ConnectAttempt['kind'] | null = null;
   private lastLogged = '';
@@ -678,6 +680,7 @@ class AskerConnection {
   private async tryConnect(): Promise<number> {
     const attempt = await connectOnce(this.env);
     this.lastAttempt = attempt.kind;
+    this.staleAt = attempt.kind === 'unreachable' && attempt.stale && attempt.fingerprint !== null ? attempt.fingerprint : undefined;
     // The file the attempt read, not the one looked at before it: a sign-in stored in between
     // would otherwise look like a new one at the next look, and drop this connection for it.
     const fp = attempt.fingerprint;
@@ -756,7 +759,11 @@ class AskerConnection {
 
   // -- the tools ------------------------------------------------------------------------
 
-  async login(args: Record<string, unknown>): Promise<ToolResult> {
+  /**
+   * The login tool. `replaceStale` (only /team-relay:setup's own call, never the tool's
+   * arguments): the fingerprint of a stored sign-in found stale, which this sign-in may replace.
+   */
+  async login(args: Record<string, unknown>, replaceStale?: string): Promise<ToolResult> {
     // M5-SPEC §9 item 1: the relay is not the model's to choose.
     if (Object.keys(args).length > 0) {
       return toolError(
@@ -776,7 +783,7 @@ class AskerConnection {
     this.lastOutcome = null;
     let flow: LoginFlow;
     try {
-      flow = await startLogin({ relayUrl, credentialsFile: this.path, log });
+      flow = await startLogin({ relayUrl, credentialsFile: this.path, log, ...(replaceStale !== undefined ? { replaceStale } : {}) });
     } catch (err) {
       return toolError(err instanceof LoginError ? `not signed in: ${err.message}` : `could not start the sign-in: ${describeError(err)}`);
     }
@@ -924,13 +931,15 @@ class AskerConnection {
 
   /**
    * /team-relay:setup: whether this session has a sign-in to wait for. 'none': no stored sign-in
-   * (or none the connection could use); 'refused': the relay refused the stored one; 'present':
-   * one is stored and the connection is (re)trying it.
+   * (or none the connection could use); 'refused': the relay refused the stored one; 'stale':
+   * the stored one's relay no longer answers for it (a 404, or another relay than the configured
+   * one that cannot be reached); 'present': one is stored and the connection is (re)trying it.
    */
   storedSignIn(): StoredSignIn {
     const fp = credentialFingerprint(this.path);
     if (fp === null) return 'none';
     if (this.refusedAt !== undefined && this.refusedAt === fp) return 'refused';
+    if (this.staleAt !== undefined && this.staleAt === fp) return 'stale';
     // Waiting is worth it only while the connection has not tried yet, is connected, or the
     // relay did not answer. A file it found no usable sign-in in (expired, unreadable, corrupt:
     // not_signed_in or config) or one for another team (wrong_team) needs a new sign-in.
@@ -944,7 +953,10 @@ class AskerConnection {
    * sign-in URL when no browser could be opened on it (the user opens it themselves); else why not.
    */
   async signInAndWait(waitMs: number, progress: (message: string) => void): Promise<SignInWait> {
-    const started = await this.login({});
+    // A stale sign-in (that very file) may be replaced by this one, once it succeeds.
+    const fp = credentialFingerprint(this.path);
+    const stale = fp !== null && this.staleAt === fp ? fp : undefined;
+    const started = await this.login({}, stale);
     if (started.isError) return started.content.map((c) => c.text).join('');
     const flow = this.pending;
     const deadline = Date.now() + waitMs;
@@ -1040,7 +1052,7 @@ export function autoAnswer(env: NodeJS.ProcessEnv): boolean {
 export type SignInWait = null | string | { signInUrl: string };
 
 /** Whether a sign-in is stored for this session (AskerConnection.storedSignIn). */
-export type StoredSignIn = 'none' | 'refused' | 'present';
+export type StoredSignIn = 'none' | 'refused' | 'stale' | 'present';
 
 type LoginOutcome =
   | { ok: true; member: string; team: string; email?: string | undefined; changed: string | null }
@@ -1201,7 +1213,7 @@ async function main(): Promise<void> {
     return noted(result);
   });
 
-  type Extra = { _meta?: { progressToken?: string | number }; sendNotification: (n: { method: 'notifications/progress'; params: { progressToken: string | number; progress: number; message?: string } }) => Promise<void> };
+  type Extra = { signal?: AbortSignal; _meta?: { progressToken?: string | number }; sendNotification: (n: { method: 'notifications/progress'; params: { progressToken: string | number; progress: number; message?: string } }) => Promise<void> };
   async function callTool(name: string, args: Record<string, unknown>, extra: Extra): Promise<ToolResult> {
     try {
       if (role === 'asker') {
@@ -1233,6 +1245,7 @@ async function main(): Promise<void> {
               pages: setupPages,
             },
             progress,
+            extra.signal,
           );
         }
         if (name === 'folders') {

@@ -10,7 +10,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as credentials from '../src/credentials.js';
-import { connectOnce } from '../src/relay-connect.js';
+import { connectOnce, staleSignIn } from '../src/relay-connect.js';
+import { RelayError, RelayNetworkError, type Connection } from '../src/relay-client.js';
 import { FakeRelay } from './helpers/fake-relay.js';
 
 // The real module, with credentialFingerprint observable: a test can store a sign-in right
@@ -103,5 +104,63 @@ describe('connectOnce: the fingerprint of the credential file it read', () => {
     expect(a.kind).toBe('config');
     if (a.kind === 'config') expect(a.problem).toMatch(/kept changing while it was read/);
     expect(relay.requests).toEqual([]);
+  });
+});
+
+// 15 Nov 2026, a real Mac: the stored sign-in named a relay and a team that no longer exist, and
+// /team-relay:setup dead-ended on the 404. Such a sign-in is "stale": setup signs in again
+// against the configured relay. Only a 404, or a relay other than the configured one that cannot
+// be reached; never a 401/403 or a network error at the configured relay.
+describe('connectOnce: a stale sign-in', () => {
+  it('a team the relay does not know (404): unreachable and stale, with the fingerprint of that file', async () => {
+    credentials.writeCredential(credFile(), { relay_url: relay.url, team: 'gone', member: 'bob', credential: relay.mintCredential('bob'), expires_at: null });
+    const a = await connectOnce({ ...env(), RELAY_URL: relay.url });
+    expect(a).toMatchObject({ kind: 'unreachable', stale: true, fingerprint: realFingerprint(credFile()) });
+  });
+
+  it('a 401 at the configured relay is refused, not stale', async () => {
+    credentials.writeCredential(credFile(), { relay_url: relay.url, team: 'demo', member: 'bob', credential: `trc_${'Z'.repeat(43)}`, expires_at: null });
+    const a = await connectOnce({ ...env(), RELAY_URL: relay.url });
+    expect(a.kind).toBe('refused');
+    expect('stale' in a).toBe(false);
+  });
+
+  it('the configured relay not answering is not stale', async () => {
+    relay.fail(() => true, 503);
+    store('alice');
+    const a = await connectOnce({ ...env(), RELAY_URL: relay.url });
+    expect(a.kind).toBe('unreachable');
+    expect('stale' in a).toBe(false);
+  });
+});
+
+describe('staleSignIn', () => {
+  const cred = (url: string): Connection => ({ mode: 'credential', url, team: 'demo', member: 'bob', token: { get: async () => 'x' } } as unknown as Connection);
+  const configured = 'https://relay.example.com';
+  const net = new RelayNetworkError('relay unreachable (ENOTFOUND)');
+
+  it('a 404 from the stored relay, whichever it is', () => {
+    expect(staleSignIn(new RelayError(404, 'not_found', ''), cred(configured), configured)).toBe(true);
+    expect(staleSignIn(new RelayError(404, 'http_404', ''), cred('https://old.example.com'), configured)).toBe(true);
+  });
+
+  it('another relay than the configured one that cannot be reached', () => {
+    expect(staleSignIn(net, cred('https://old.example.com'), configured)).toBe(true);
+    expect(staleSignIn(net, cred('https://old.example.com'), null)).toBe(false);
+  });
+
+  it('never a network error at the configured relay, a 401, a 403 or a 5xx', () => {
+    expect(staleSignIn(net, cred(configured), configured)).toBe(false);
+    expect(staleSignIn(net, cred(`${configured}/`), configured)).toBe(false);
+    for (const status of [401, 403, 500, 503]) {
+      expect(staleSignIn(new RelayError(status, 'x', ''), cred(configured), configured)).toBe(false);
+      expect(staleSignIn(new RelayError(status, 'x', ''), cred('https://old.example.com'), configured)).toBe(false);
+    }
+  });
+
+  it('only a device credential from /team-relay:login', () => {
+    const token = { ...cred('https://old.example.com'), mode: 'token' } as Connection;
+    expect(staleSignIn(new RelayError(404, 'not_found', ''), token, configured)).toBe(false);
+    expect(staleSignIn(net, token, configured)).toBe(false);
   });
 });

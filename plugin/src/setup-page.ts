@@ -3,7 +3,8 @@
 // routes (local-setup.ts), opened in the browser on its Setup view (/join) by way of the private
 // redirect file (console-open.ts: the key is in no process's arguments).
 //
-// At most one runs: a second /team-relay:setup while it runs opens the same page again. It stops
+// At most one runs: a second /team-relay:setup while it runs opens the same page again (and waits
+// for the same Done: `done` says how the page ended, to every call waiting on it). It stops
 // 3 s after the member presses Done (from that moment it is no longer the page a new
 // /team-relay:setup opens: that one gets a fresh server), after 30 minutes without a request, or
 // when the MCP server exits (stop()).
@@ -20,6 +21,7 @@ import { createConsoleServer, joinInfo, relayBackend, type ConsoleServer } from 
 import { openInBrowser, type OpenOptions } from './console-open.js';
 import { pluginRef } from './channel-mode.js';
 import { createLocalSetup, type LocalSetupDeps } from './local-setup.js';
+import { memberFoldersPath, readTeamSettings } from './member-folders.js';
 import type { RelayClient } from './relay-client.js';
 import type { FetchPinnedNode } from './locate.js';
 import { backgroundAvailability, backgroundInstalled, backgroundNode, chooserAvailable, currentUid, findClaude, installBackground, osascriptChooser, uninstallBackground } from './setup-steps.js';
@@ -32,6 +34,16 @@ export const SETUP_DONE_STOP_MS = 3000;
 
 /** Who the page is for: the signed-in member's relay client and who they are. */
 export type SetupLive = { client: RelayClient; member: string; team: string; email: string | null };
+
+/**
+ * How a setup page ended: Done pressed (the team, how many folders the member's Claude answers
+ * from, null when the file cannot be read, and whether background answering is installed), or
+ * the page closed without Done (30 minutes idle, replaced for another member, the server stopping).
+ */
+export type SetupDone = { kind: 'done'; team: string; folders: number | null; background: boolean } | { kind: 'closed' };
+
+/** What open() gives: the page's URL, whether it was the one already running, and how it ends. */
+export type OpenedPage = { url: string; reused: boolean; done: Promise<SetupDone> };
 
 /** Runs `fn` after `ms`; returns what cancels it. */
 export type Schedule = (fn: () => void, ms: number) => () => void;
@@ -75,13 +87,16 @@ type Running = {
   /** Done was pressed or a stop began: never reused. */
   stopping: boolean;
   closed: boolean;
+  /** Settles once: at Done, or 'closed' when the page stops without it. */
+  done: Promise<SetupDone>;
+  settle: (d: SetupDone) => void;
 };
 
 export class SetupPages {
   private running: Running | null = null;
   /** Pages whose member pressed Done: they close shortly (or at stop()). */
   private readonly finishing = new Set<Running>();
-  private starting: Promise<{ url: string; reused: boolean }> | null = null;
+  private starting: Promise<OpenedPage> | null = null;
   private readonly schedule: Schedule;
   private readonly platform: NodeJS.Platform;
 
@@ -96,13 +111,13 @@ export class SetupPages {
   }
 
   /** Opens the setup page for `live`: the one running (reopened), else a new one. */
-  async open(live: SetupLive): Promise<{ url: string; reused: boolean }> {
+  async open(live: SetupLive): Promise<OpenedPage> {
     if (this.starting) await this.starting.catch(() => undefined);
     const r = this.running;
     if (r && !r.stopping && r.member === live.member && r.team === live.team) {
       this.openUrl(r.url);
       this.touch(r);
-      return { url: r.url, reused: true };
+      return { url: r.url, reused: true, done: r.done };
     }
     if (r) await this.stop();
     this.starting = this.start(live);
@@ -113,7 +128,7 @@ export class SetupPages {
     }
   }
 
-  private async start(live: SetupLive): Promise<{ url: string; reused: boolean }> {
+  private async start(live: SetupLive): Promise<OpenedPage> {
     const { env, log } = this.o;
     const platform = this.platform;
     const key = randomBytes(32).toString('base64url');
@@ -138,11 +153,28 @@ export class SetupPages {
         uninstall: () => uninstallBackground({ env, uid, ...launchctl }),
       },
       onDone: () => {
-        if (running) this.finish(running);
+        if (running) this.finish(running, summary());
       },
       log,
     };
-    const local = createLocalSetup({ ...base, ...(this.o.localDeps?.(live) ?? {}) });
+    const deps: LocalSetupDeps = { ...base, ...(this.o.localDeps?.(live) ?? {}) };
+    // What the setup tool says at Done: counts and on/off only, never a folder's path.
+    const summary = (): SetupDone => {
+      let folders: number | null;
+      try {
+        folders = readTeamSettings(memberFoldersPath(env), env, live.team).folders.length;
+      } catch {
+        folders = null;
+      }
+      let background = false;
+      try {
+        background = deps.background.installed();
+      } catch {
+        background = false;
+      }
+      return { kind: 'done', team: live.team, folders, background };
+    };
+    const local = createLocalSetup(deps);
     const app = createConsoleServer({
       backend: relayBackend(client),
       key,
@@ -154,14 +186,16 @@ export class SetupPages {
     });
     const port = await app.listen(0);
     const url = `http://127.0.0.1:${port}/join#k=${key}`;
-    running = { app, url, member: live.member, team: live.team, cancelIdle: () => {}, cancelDone: () => {}, stopping: false, closed: false };
+    let settle!: (d: SetupDone) => void;
+    const done = new Promise<SetupDone>((resolve) => (settle = resolve));
+    running = { app, url, member: live.member, team: live.team, cancelIdle: () => {}, cancelDone: () => {}, stopping: false, closed: false, done, settle };
     this.running = running;
     const r = running;
     app.server.on('request', () => this.touch(r));
     this.touch(r);
     log(`setup page: serving on 127.0.0.1:${port}`);
     this.openUrl(url);
-    return { url, reused: false };
+    return { url, reused: false, done };
   }
 
   private openUrl(url: string): void {
@@ -180,9 +214,10 @@ export class SetupPages {
   }
 
   /** Done: no longer the page to reopen; it closes after SETUP_DONE_STOP_MS (its last answer first). */
-  private finish(r: Running): void {
+  private finish(r: Running, summary: SetupDone): void {
     if (r.stopping) return;
     r.stopping = true;
+    r.settle(summary);
     r.cancelIdle();
     if (this.running === r) this.running = null;
     this.finishing.add(r);
@@ -193,6 +228,8 @@ export class SetupPages {
     if (r.closed) return;
     r.closed = true;
     r.stopping = true;
+    // After Done this does nothing (a promise settles once).
+    r.settle({ kind: 'closed' });
     r.cancelIdle();
     r.cancelDone();
     this.finishing.delete(r);

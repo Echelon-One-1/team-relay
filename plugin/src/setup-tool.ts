@@ -1,29 +1,56 @@
 // /team-relay:setup: the `setup` tool of a working session's relay server. Setting up without
 // Terminal: it signs the member in when they are not (the same sign-in as `login`, waited for as
 // `login_wait` does, up to 5 minutes), then opens the setup page on their own Mac (setup-page.ts)
-// and returns at once. Everything else happens on the page, where the member decides.
+// and waits, up to 10 minutes, for the member to press Done there; then it says in one line how
+// it ended (the team, how many folders, background answering on or off). Everything else
+// happens on the page, where the member decides. A cancelled call stops waiting at once and
+// leaves the page to its own life (it stops after Done, 30 minutes idle, or with the server).
 //
 // A sign-in that is stored but not connected yet (the session is starting, or reconnecting after
 // the relay did not answer) is waited for briefly, never replaced by a new Google sign-in: only
-// with no stored sign-in, or one the relay refused, does it sign in again. When no browser could
-// be opened on the sign-in, the result carries the sign-in URL for the user to open themselves
-// (as the login tool's does, under the same rule).
+// with no stored sign-in, one the relay refused, or a stale one (its relay no longer answers for
+// it: a 404, or another relay than the configured one that cannot be reached; relay-connect.ts
+// staleSignIn) does it sign in again. A stale sign-in stays stored until the new one succeeds,
+// which then replaces it. When no browser could be opened on the sign-in, the result carries the
+// sign-in URL for the user to open themselves (as the login tool's does, under the same rule).
 
 import { SIGN_IN_URL_RULE } from './login.js';
 import { describeError, toolError, toolJson, unknownKey, type ToolResult } from './tool-util.js';
-import type { SetupLive } from './setup-page.js';
+import type { OpenedPage, SetupDone, SetupLive } from './setup-page.js';
 
 export const SETUP_TOOL = {
   name: 'setup',
   description:
     'Set up the team relay on this Mac without Terminal (/team-relay:setup). Takes no arguments. Signs in first when needed ' +
     "(the browser opens on the relay's Google sign-in), then opens the setup page on this Mac in the browser, where the user " +
-    "accepts the team's boundaries, picks the folders their Claude answers from and turns background answering on. Returns at once.",
+    "accepts the team's boundaries, picks the folders their Claude answers from and turns background answering on. " +
+    'Waits (up to 10 minutes) until they press Done there, then returns one line saying how setup ended.',
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
 } as const;
 
-/** What the tool says once the page is open. */
+/** What the tool says (as progress) once the page is open. */
 export const SETUP_OPEN = 'The setup page is open in your browser. Come back here when it says Done.';
+
+/** Said first when the stored sign-in's relay no longer answers for it. */
+export const SETUP_STALE = "Your saved sign-in was for a team relay that no longer answers, so you're signing in again.";
+
+/** What the tool says when Done was not pressed within the wait. */
+export const SETUP_STILL_OPEN = 'The setup page is still open in your browser. Finish it there; run /team-relay:setup again if you closed it.';
+
+/** What the tool says when the page closed without Done. */
+export const SETUP_CLOSED = 'The setup page closed before Done was pressed. Run /team-relay:setup again to finish setting up.';
+
+/** What the tool says when its call was cancelled while waiting for Done. */
+export const SETUP_CANCELLED = 'Stopped waiting for the setup page. It stays open in your browser until you press Done or close it.';
+
+/** How long the tool waits for Done on the page (Claude Code's per-call limit for a stdio server is 30 minutes idle). */
+export const SETUP_DONE_WAIT_MS = 10 * 60 * 1000;
+
+/** "Setup is done: team demo, 4 folders, background answering on." Counts and on/off only. */
+export function setupDoneLine(d: Extract<SetupDone, { kind: 'done' }>): string {
+  const folders = d.folders === null ? '' : ` ${d.folders} folder${d.folders === 1 ? '' : 's'},`;
+  return `Setup is done: team ${d.team},${folders} background answering ${d.background ? 'on' : 'off'}.`;
+}
 
 /** What the tool says when no browser could be opened on the sign-in. */
 export const SETUP_OPEN_SIGN_IN =
@@ -40,10 +67,11 @@ export type SetupToolDeps = {
   /** The signed-in member now (null: not signed in). */
   live: () => SetupLive | null;
   /**
-   * Whether a sign-in is stored: 'none' (or none usable), 'refused' (the relay refused it), or
-   * 'present' (the session is connecting with it). Without it: as 'none'.
+   * Whether a sign-in is stored: 'none' (or none usable), 'refused' (the relay refused it),
+   * 'stale' (its relay no longer answers for it), or 'present' (the session is connecting with
+   * it). Without it: as 'none'.
    */
-  stored?: () => 'none' | 'refused' | 'present';
+  stored?: () => 'none' | 'refused' | 'stale' | 'present';
   /** Why the session is not connected, in one sentence (the whoami tool's). */
   notConnected?: () => string;
   /**
@@ -51,39 +79,84 @@ export type SetupToolDeps = {
    * in; the sign-in URL when no browser could be opened on it; else why not, in one sentence.
    */
   signIn: (waitMs: number, progress: (message: string) => void) => Promise<null | string | { signInUrl: string }>;
-  pages: { open(live: SetupLive): Promise<{ url: string; reused: boolean }> };
+  pages: { open(live: SetupLive): Promise<OpenedPage> };
   /** Tests: the wait between looks at the connection. */
   sleep?: (ms: number) => Promise<void>;
+  /** Tests: how long to wait for Done (default SETUP_DONE_WAIT_MS). */
+  doneWaitMs?: number;
 };
 
 const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-export async function setupTool(args: Record<string, unknown>, deps: SetupToolDeps, progress: (message: string) => void = () => {}): Promise<ToolResult> {
+export async function setupTool(
+  args: Record<string, unknown>,
+  deps: SetupToolDeps,
+  progress: (message: string) => void = () => {},
+  signal?: AbortSignal,
+): Promise<ToolResult> {
   if (unknownKey(args, [])) return toolError('setup takes no arguments');
   let live = deps.live();
-  if (!live && deps.stored?.() === 'present') {
-    // Signed in already, not connected yet: give the connection a moment.
+  let stored = live ? null : (deps.stored?.() ?? 'none');
+  if (!live && stored === 'present') {
+    // Signed in already, not connected yet: give the connection a moment (unless it turns out stale).
     const sleep = deps.sleep ?? realSleep;
-    for (let waited = 0; !live && waited < SETUP_CONNECT_WAIT_MS; waited += 100) {
+    for (let waited = 0; !live && stored === 'present' && waited < SETUP_CONNECT_WAIT_MS; waited += 100) {
       await sleep(100);
       live = deps.live();
+      stored = live ? null : (deps.stored?.() ?? 'none');
     }
-    if (!live) return toolError(`${deps.notConnected?.() ?? 'Not connected yet.'} Run /team-relay:setup again in a moment.`);
+    if (!live && stored === 'present') return toolError(`${deps.notConnected?.() ?? 'Not connected yet.'} Run /team-relay:setup again in a moment.`);
   }
+  const stale = !live && stored === 'stale';
+  const said = (text: string) => (stale ? `${SETUP_STALE} ${text}` : text);
+  if (signal?.aborted) return toolError(SETUP_CANCELLED);
   if (!live) {
+    if (stale) progress(SETUP_STALE);
     progress('signing in: finish in the browser');
     const why = await deps.signIn(SETUP_SIGN_IN_WAIT_MS, progress);
     if (why !== null && typeof why === 'object') {
-      return toolJson({ status: 'waiting_for_browser', sign_in_url: why.signInUrl, sign_in_url_rule: SIGN_IN_URL_RULE, message: SETUP_OPEN_SIGN_IN });
+      return toolJson({ status: 'waiting_for_browser', sign_in_url: why.signInUrl, sign_in_url_rule: SIGN_IN_URL_RULE, message: said(SETUP_OPEN_SIGN_IN) });
     }
-    if (why !== null) return toolError(`${why} Then run /team-relay:setup again.`);
+    if (why !== null) return toolError(said(`${why} Then run /team-relay:setup again.`));
     live = deps.live();
-    if (!live) return toolError('The sign-in finished, but this session is not connected yet. Run /team-relay:setup again in a moment.');
+    if (!live) return toolError(said('The sign-in finished, but this session is not connected yet. Run /team-relay:setup again in a moment.'));
+    if (signal?.aborted) return toolError(SETUP_CANCELLED);
   }
+  let page: OpenedPage;
   try {
-    await deps.pages.open(live);
+    page = await deps.pages.open(live);
   } catch (err) {
-    return toolError(`The setup page could not start (${describeError(err)}). Run /team-relay:setup again.`);
+    return toolError(said(`The setup page could not start (${describeError(err)}). Run /team-relay:setup again.`));
   }
-  return toolJson({ message: SETUP_OPEN });
+  progress(SETUP_OPEN);
+  const ended = await waitForDone(page.done, deps.doneWaitMs ?? SETUP_DONE_WAIT_MS, progress, signal);
+  if (ended === 'cancelled') return toolError(SETUP_CANCELLED);
+  if (ended === 'timeout') return toolJson({ message: said(SETUP_STILL_OPEN) });
+  if (ended.kind === 'closed') return toolJson({ message: said(SETUP_CLOSED) });
+  return toolJson({ message: said(setupDoneLine(ended)) });
+}
+
+/**
+ * How the page ended, or 'timeout' after `ms`, or 'cancelled' when `signal` aborts. Its timers
+ * and the abort listener are removed whichever comes first; the page is not touched.
+ */
+function waitForDone(done: Promise<SetupDone>, ms: number, progress: (message: string) => void, signal?: AbortSignal): Promise<SetupDone | 'timeout' | 'cancelled'> {
+  return new Promise((resolve) => {
+    let finished = false;
+    const timer = setTimeout(() => end('timeout'), ms);
+    // Progress keeps the call alive in a client that times idle tool calls out.
+    const tick = setInterval(() => progress('waiting for Done on the setup page'), 15_000);
+    const onAbort = () => end('cancelled');
+    function end(v: SetupDone | 'timeout' | 'cancelled') {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      clearInterval(tick);
+      signal?.removeEventListener('abort', onAbort);
+      resolve(v);
+    }
+    if (signal?.aborted) return end('cancelled');
+    signal?.addEventListener('abort', onAbort, { once: true });
+    done.then(end, () => end({ kind: 'closed' }));
+  });
 }

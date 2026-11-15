@@ -26443,10 +26443,25 @@ async function connectOnce(env2, opts = {}) {
     me = await client.me({ attempts: 1, timeoutMs: opts.timeoutMs ?? 15e3 });
   } catch (err) {
     if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused", fingerprint };
+    if (staleSignIn(err, c, configuredRelay(env2))) return { kind: "unreachable", problem: STALE_PROBLEM, stale: true, fingerprint };
     return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})`, fingerprint };
   }
   if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team", fingerprint };
   return { kind: "connected", client, me, connection: c, fingerprint };
+}
+var STALE_PROBLEM = "your saved sign-in was for a team relay that no longer answers; run /team-relay:setup to sign in again";
+function configuredRelay(env2) {
+  return configValue(env2.RELAY_URL) ?? defaultRelayUrl();
+}
+function staleSignIn(err, c, configured) {
+  if (c.mode !== "credential") return false;
+  if (err instanceof RelayError) return err.status === 404;
+  if (!(err instanceof RelayNetworkError) || configured === null) return false;
+  try {
+    return normaliseRelayUrl(c.url) !== normaliseRelayUrl(configured);
+  } catch {
+    return false;
+  }
 }
 function hostConnection(c, env2, credentialsFile) {
   return {

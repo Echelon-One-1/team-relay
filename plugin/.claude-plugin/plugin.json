@@ -1,7 +1,7 @@
 {
   "name": "team-relay",
   "displayName": "Team relay",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Ask teammates' Claude sessions questions and run named, parameterised operations for each other; answers are pushed into your session.",
   "author": {
     "name": "Team relay maintainers"
