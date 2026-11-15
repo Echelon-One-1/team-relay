@@ -4,7 +4,7 @@
 // the same page; the page stops after Done or 30 minutes without a request, and with the server.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:net';
 import { request as httpRequest } from 'node:http';
@@ -27,9 +27,9 @@ import {
 } from '../src/setup-tool.js';
 import { SIGN_IN_URL_RULE } from '../src/login.js';
 import { redirectHtml } from '../src/console-open.js';
-import { readCredential, writeCredential } from '../src/credentials.js';
+import { normaliseRelayUrl, readCredential, writeCredential } from '../src/credentials.js';
 import { FakeRelay, TOKEN_OF } from './helpers/fake-relay.js';
-import { FIXTURES, PLUGIN_ROOT, spawnServer, textOf, waitFor, type Spawned } from './helpers/mcp.js';
+import { DIST, FIXTURES, PLUGIN_ROOT, spawnServer, textOf, waitFor, type Spawned } from './helpers/mcp.js';
 
 const NO_UI = join(tmpdir(), 'team-relay-no-such-console');
 
@@ -63,17 +63,6 @@ function post(port: number, path: string, key: string): Promise<{ status: number
     r.on('error', reject);
     r.end('{}');
   });
-}
-
-/** Polls an async check until it gives a value (waitFor takes a sync one). */
-async function until<T>(fn: () => Promise<T | null>, what: string, timeoutMs = 20_000): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const v = await fn();
-    if (v !== null) return v;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 50));
-  }
 }
 
 const parse = (url: string) => {
@@ -212,8 +201,8 @@ describe('setupTool', () => {
 
   // 15 Nov 2026, a real Mac: the saved sign-in named a relay and team that no longer exist; setup
   // dead-ended on the 404. A stale sign-in is treated as signed out: setup signs in again.
-  it('a stale sign-in (its relay no longer answers): signs in again at once and says so in one sentence', async () => {
-    expect(SETUP_STALE).toBe("Your saved sign-in was for a team relay that no longer answers, so you're signing in again.");
+  it('a stale sign-in (it no longer works at its relay): signs in again at once and says so in one sentence', async () => {
+    expect(SETUP_STALE).toBe("Your saved sign-in no longer works at its team relay, so you're signing in again.");
     let now: SetupLive | null = null;
     let slept = 0;
     const said: string[] = [];
@@ -261,6 +250,45 @@ describe('setupTool', () => {
     expect(r.isError).toBe(true);
     expect(textOf(r)).toBe(`${SETUP_STALE} The sign-in did not complete: x. Then run /team-relay:setup again.`);
     expect(opened).toEqual([]);
+  });
+
+  // Security review, 15 Nov 2026: signed in to another relay that is not answering is an outage,
+  // not a reason to switch: setup stops at once and says so, and signs nobody in.
+  it('signed in to another relay that is not answering: stops at once, says why, signs nobody in', async () => {
+    let signIns = 0;
+    let slept = 0;
+    const opened: SetupLive[] = [];
+    const why = "Not connected: this Mac is signed in to another team relay (old.example.com) that isn't answering right now; try again later, or run /team-relay:logout first to switch";
+    const r = await setupTool({}, {
+      live: () => null,
+      stored: () => 'elsewhere',
+      notConnected: () => why,
+      signIn: async () => (signIns++, null),
+      pages: { open: async (l) => (opened.push(l), page()) },
+      sleep: async () => void slept++,
+    });
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toBe(`${why}.`);
+    expect(textOf(r)).not.toContain(SETUP_STALE);
+    expect(signIns).toBe(0);
+    expect(slept).toBe(0);
+    expect(opened).toEqual([]);
+  });
+
+  it('found to be another relay not answering while setup waits for its connection: stops, signs nobody in', async () => {
+    let state: 'present' | 'elsewhere' = 'present';
+    let signIns = 0;
+    const r = await setupTool({}, {
+      live: () => null,
+      stored: () => state,
+      notConnected: () => 'Not connected: x',
+      signIn: async () => (signIns++, null),
+      pages: { open: async () => page() },
+      sleep: async () => void (state = 'elsewhere'),
+    });
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toBe('Not connected: x.');
+    expect(signIns).toBe(0);
   });
 
   it('a sign-in the relay refused (401) is not called stale', async () => {
@@ -314,6 +342,32 @@ describe('setupTool', () => {
       expect(Date.now() - started).toBeLessThan(5000);
       expect(r.isError).toBe(true);
       expect(textOf(r)).toBe(SETUP_CANCELLED);
+    });
+
+    it('cancelled during the sign-in: the signal reaches the sign-in wait, and the call returns at once without opening the page', async () => {
+      const ac = new AbortController();
+      const opened: SetupLive[] = [];
+      let got: AbortSignal | undefined;
+      const call = setupTool(
+        {},
+        {
+          live: () => null,
+          signIn: (_ms, _p, signal) => {
+            got = signal;
+            return new Promise((resolve) => signal?.addEventListener('abort', () => resolve({ cancelled: true })));
+          },
+          pages: { open: async (l) => (opened.push(l), page()) },
+        },
+        () => {},
+        ac.signal,
+      );
+      await new Promise((r) => setTimeout(r, 20));
+      expect(got).toBe(ac.signal);
+      ac.abort();
+      const r = await call;
+      expect(r.isError).toBe(true);
+      expect(textOf(r)).toBe(SETUP_CANCELLED);
+      expect(opened).toEqual([]);
     });
 
     it('already cancelled: opens nothing', async () => {
@@ -563,7 +617,7 @@ describe('the setup tool in the relay server', () => {
     expect(r.isError).toBe(true);
     expect(textOf(r)).toMatch(/^Not connected: the relay did not answer \(.*\) Run \/team-relay:setup again in a moment\.$/);
     // The configured relay not answering is not a stale sign-in: no new sign-in.
-    expect(textOf(r)).not.toContain('no longer answers');
+    expect(textOf(r)).not.toContain('no longer works');
     expect(entries()).toEqual([]);
   });
 
@@ -604,11 +658,11 @@ describe('the setup tool in the relay server', () => {
     const oldCredential = relay.mintCredential('bob');
     writeCredential(credFile, { relay_url: relay.url, team: 'gone', member: 'bob', credential: oldCredential, expires_at: null });
     const s = await server();
-    const said = await until(async () => {
+    const said = await waitFor(async () => {
       const t = textOf(await s.client.callTool({ name: 'whoami', arguments: {} }));
-      return /no longer answers/.test(t) ? t : null;
-    }, 'a first attempt');
-    expect(JSON.parse(said).message).toBe('Not connected: your saved sign-in was for a team relay that no longer answers; run /team-relay:setup to sign in again');
+      return /no longer works/.test(t) ? t : null;
+    }, 20_000, 'a first attempt');
+    expect(JSON.parse(said).message).toBe('Not connected: your saved sign-in no longer works at its team relay; run /team-relay:setup to sign in again');
     const setup = s.client.callTool({ name: 'setup', arguments: {} });
     const page = await waitFor(() => entries().find((e) => /\/join#k=/.test(e.url)), 20_000, 'the setup page to open');
     expect(entries()[0]!.url.startsWith(`${relay.url}/v1/login/start?port=`)).toBe(true);
@@ -620,16 +674,139 @@ describe('the setup tool in the relay server', () => {
     expect(readCredential(credFile)).toMatchObject({ team: 'demo', member: 'alice' });
   });
 
+  it('a saved sign-in for another relay that is not answering: not stale; setup stops with one sentence, no sign-in, the file kept', async () => {
+    const closed = await new Promise<number>((resolve) => {
+      const srv = createServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const port = (srv.address() as { port: number }).port;
+        srv.close(() => resolve(port));
+      });
+    });
+    const credFile = join(xdg, 'team-relay', 'credentials.json');
+    writeCredential(credFile, { relay_url: `http://127.0.0.1:${closed}`, team: 'demo', member: 'bob', credential: relay.mintCredential('bob'), expires_at: null });
+    const before = readFileSync(credFile, 'utf8');
+    // No RELAY_URL: the configured relay is the plugin's default, another one.
+    const s = await server({ RELAY_URL: '' });
+    await waitFor(async () => (/isn't answering right now/.test(textOf(await s.client.callTool({ name: 'whoami', arguments: {} }))) ? true : null), 20_000, 'a first attempt');
+    const r = await s.client.callTool({ name: 'setup', arguments: {} });
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toBe(
+      `Not connected: this Mac is signed in to another team relay (127.0.0.1:${closed}) that isn't answering right now; try again later, or run /team-relay:logout first to switch.`,
+    );
+    expect(entries()).toEqual([]);
+    expect(readFileSync(credFile, 'utf8')).toBe(before);
+  });
+
+  // The cross-relay exception (reviewer, 15 Nov 2026): the saved sign-in names another relay than
+  // the configured one (the plugin's default, here a copy of the bundle beside its own
+  // relay.default.json), and that relay answers 404 for everything (a deleted Cloud Run service:
+  // not the relay's own not_found). Setup signs in to the configured relay and the new sign-in
+  // replaces the stale file; the old credential reaches neither relay.
+  describe('a saved sign-in for another relay that is gone', () => {
+    let gone: FakeRelay;
+    let dist: string;
+    let credFile: string;
+    let oldCredential: string;
+    beforeEach(async () => {
+      gone = await new FakeRelay().start();
+      gone.fail(() => true, 404, 1_000_000, {});
+      dist = join(xdg, 'plugin', 'dist');
+      mkdirSync(dist, { recursive: true });
+      copyFileSync(join(DIST, 'channel.js'), join(dist, 'channel.js'));
+      writeFileSync(join(xdg, 'plugin', 'relay.default.json'), JSON.stringify({ relay_url: relay.url }));
+      credFile = join(xdg, 'team-relay', 'credentials.json');
+      oldCredential = gone.mintCredential('bob');
+      writeCredential(credFile, { relay_url: gone.url, team: 'demo', member: 'bob', credential: oldCredential, expires_at: null });
+    });
+    afterEach(async () => {
+      while (open.length) await open.pop()!.close();
+      await gone.stop();
+    });
+    const spawn = async (extra: Record<string, string> = {}) => {
+      const s = await spawnServer(
+        'channel.js',
+        { RELAY_ROLE: 'asker', RELAY_AUTH: '', XDG_CONFIG_HOME: xdg, TEAM_RELAY_OPEN_COMMAND: join(FIXTURES, 'fake-browser.mjs'), FAKE_BROWSER_LOG: browserLog, ...extra },
+        dist,
+      );
+      open.push(s);
+      await waitFor(async () => (/no longer works/.test(textOf(await s.client.callTool({ name: 'whoami', arguments: {} }))) ? true : null), 20_000, 'a first attempt');
+      return s;
+    };
+
+    it('signs in to the configured relay, replaces the stale file, and the old credential reaches neither relay', async () => {
+      const s = await spawn();
+      const setup = s.client.callTool({ name: 'setup', arguments: {} });
+      const page = await waitFor(() => entries().find((e) => /\/join#k=/.test(e.url)), 20_000, 'the setup page to open');
+      expect(entries()[0]!.url.startsWith(`${relay.url}/v1/login/start?port=`)).toBe(true);
+      const { port, key } = parse(page.url);
+      await post(port, '/api/local/done', key);
+      const r = await setup;
+      expect(r.isError, textOf(r)).toBeFalsy();
+      expect(JSON.parse(textOf(r)).message.startsWith(`${SETUP_STALE} Setup is done: team demo, `)).toBe(true);
+      const now = readCredential(credFile);
+      expect(now?.relay_url).toBe(normaliseRelayUrl(relay.url));
+      expect(now).toMatchObject({ team: 'demo', member: 'alice' });
+      const seen = (r: FakeRelay) => r.requests.map((q) => `${JSON.stringify(q.headers)} ${q.raw} ${q.path}`).join('\n');
+      expect(seen(relay)).not.toContain(oldCredential);
+      // At the gone relay only its own GET /me ever carried it (the connection's attempts).
+      expect(gone.requests.every((q) => q.method === 'GET' && q.path.endsWith('/me'))).toBe(true);
+    });
+
+    it('the stale file rewritten during the sign-in: the new sign-in is refused and the rewritten file kept', async () => {
+      const s = await spawn({ FAKE_BROWSER_MODE: 'ignore' });
+      const setup = s.client.callTool({ name: 'setup', arguments: {} });
+      const first = await waitFor(() => entries()[0], 20_000, 'the sign-in to open');
+      // Another sign-in for the gone relay lands meanwhile (a new file: another fingerprint).
+      const other = `trc_${'R'.repeat(43)}`;
+      writeCredential(credFile, { relay_url: gone.url, team: 'demo', member: 'carol', credential: other, expires_at: null });
+      const before = readFileSync(credFile, 'utf8');
+      const dir = mkdtempSync(join(xdg, 'open-'));
+      writeFileSync(join(dir, 'console.html'), redirectHtml(first.url));
+      await new Promise<void>((resolve, reject) =>
+        execFile(process.execPath, [join(FIXTURES, 'fake-browser.mjs'), join(dir, 'console.html')], { env: { ...process.env, FAKE_BROWSER_LOG: browserLog } }, (err) => (err ? reject(err) : resolve())),
+      );
+      const r = await setup;
+      expect(r.isError).toBe(true);
+      expect(textOf(r)).toMatch(/signed in, but nothing was stored: this computer is signed in to another relay/);
+      expect(readFileSync(credFile, 'utf8')).toBe(before);
+    });
+  });
+
+  it('cancelled while the sign-in waits: the call ends at once, the sign-in goes on and still signs the session in', async () => {
+    const s = await server({ FAKE_BROWSER_MODE: 'ignore' });
+    const ac = new AbortController();
+    const setup = s.client.callTool({ name: 'setup', arguments: {} }, undefined, { signal: ac.signal }).then(
+      () => 'returned',
+      () => 'rejected',
+    );
+    const first = await waitFor(() => entries()[0], 20_000, 'the sign-in to open');
+    ac.abort();
+    expect(await setup).toBe('rejected');
+    // The server stopped waiting at once (before the sign-in finished), and says so in its log.
+    await waitFor(() => s.stderr().includes('setup: stopped waiting for the sign-in (the call was cancelled)'), 10_000, 'the wait to stop');
+    // Its next call is answered (no page opened, still not signed in).
+    const who = JSON.parse(textOf(await s.client.callTool({ name: 'whoami', arguments: {} })));
+    expect(who).toMatchObject({ connected: false, sign_in_pending: true });
+    expect(entries().filter((e) => /\/join#k=/.test(e.url))).toEqual([]);
+    // The sign-in itself was left running: finishing it in the browser signs this session in.
+    const dir = mkdtempSync(join(xdg, 'open-'));
+    writeFileSync(join(dir, 'console.html'), redirectHtml(first.url));
+    await new Promise<void>((resolve, reject) =>
+      execFile(process.execPath, [join(FIXTURES, 'fake-browser.mjs'), join(dir, 'console.html')], { env: { ...process.env, FAKE_BROWSER_LOG: browserLog } }, (err) => (err ? reject(err) : resolve())),
+    );
+    await waitFor(async () => JSON.parse(textOf(await s.client.callTool({ name: 'whoami', arguments: {} }))).connected === true || null, 10_000, 'connected');
+  });
+
   it('a saved sign-in the relay refuses (401): signs in again without calling it stale', async () => {
     writeCredential(join(xdg, 'team-relay', 'credentials.json'), { relay_url: relay.url, team: 'demo', member: 'bob', credential: `trc_${'Z'.repeat(43)}`, expires_at: null });
     const s = await server();
-    await until(async () => (/sign in again|signed out/i.test(textOf(await s.client.callTool({ name: 'whoami', arguments: {} }))) ? true : null), 'a first attempt');
+    await waitFor(async () => (/sign in again|signed out/i.test(textOf(await s.client.callTool({ name: 'whoami', arguments: {} }))) ? true : null), 20_000, 'a first attempt');
     const setup = s.client.callTool({ name: 'setup', arguments: {} });
     const page = await waitFor(() => entries().find((e) => /\/join#k=/.test(e.url)), 20_000, 'the setup page to open');
     const { port, key } = parse(page.url);
     await post(port, '/api/local/done', key);
     const r = await setup;
     expect(JSON.parse(textOf(r)).message).toMatch(/^Setup is done: team demo, /);
-    expect(textOf(r)).not.toContain('no longer answers');
+    expect(textOf(r)).not.toContain('no longer works');
   });
 });

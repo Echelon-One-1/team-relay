@@ -5,7 +5,7 @@
 //    model's choice, §9 item 1). A stored credential issued by a different relay is never
 //    replaced: the member signs out first (/team-relay:logout). Checked again just before
 //    the new credential is written. The one exception is /team-relay:setup's: a stored sign-in
-//    whose relay no longer answers for it (relay-connect.ts staleSignIn), that very file only.
+//    that no longer works at its relay (a 404: relay-connect.ts staleSignIn), that very file only.
 // 1. A PKCE verifier (64 base64url chars) and its S256 challenge, a random state (32 bytes),
 //    and an HTTP listener on 127.0.0.1 only, on a free port, for at most 5 minutes.
 // 2. The browser is opened on {relay}/v1/login/start?... through a private redirect file (the
@@ -165,7 +165,7 @@ export function replaceableCredential(credentialsFile: string, relayNorm: string
   }
   if (!existing) return null;
   // A sign-in from another relay is replaced only when it is the very file found stale (its relay
-  // no longer answers for it: /team-relay:setup), read unchanged on both sides of this read.
+  // answered 404 for it: /team-relay:setup), read unchanged on both sides of this read.
   if (existing.relay_url !== relayNorm && !unchanged) {
     throw new LoginError(
       `this computer is signed in to another relay (${existing.relay_url}) than the one configured for this session (${relayNorm}); ` +

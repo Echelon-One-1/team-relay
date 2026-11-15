@@ -3,6 +3,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const DIST = fileURLToPath(new URL('../../dist/', import.meta.url));
@@ -42,10 +43,10 @@ export function baseEnv(env: Record<string, string>): Record<string, string> {
   return { ...out, ...env };
 }
 
-export async function spawnServer(bundle: 'channel.js' | 'capabilities.js', env: Record<string, string>): Promise<Spawned> {
+export async function spawnServer(bundle: 'channel.js' | 'capabilities.js', env: Record<string, string>, dist: string = DIST): Promise<Spawned> {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [DIST + bundle],
+    args: [join(dist, bundle)],
     env: baseEnv(env),
     stderr: 'pipe',
   });
@@ -70,10 +71,18 @@ export async function spawnServer(bundle: 'channel.js' | 'capabilities.js', env:
   };
 }
 
-export async function waitFor<T>(fn: () => T | undefined | false | null, timeoutMs = 10_000, what = 'condition'): Promise<T> {
+/**
+ * Polls `fn` (sync or async: a returned promise is awaited and its value used) every 20 ms until
+ * it gives a truthy value, or throws after `timeoutMs`.
+ */
+export async function waitFor<T>(
+  fn: () => T | undefined | false | null | Promise<T | undefined | false | null>,
+  timeoutMs = 10_000,
+  what = 'condition',
+): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const v = fn();
+    const v = await fn();
     if (v) return v;
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await new Promise((r) => setTimeout(r, 20));

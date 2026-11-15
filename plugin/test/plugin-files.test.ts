@@ -142,7 +142,7 @@ describe('SessionStart hook', () => {
 
   // 15 Nov 2026, a real Mac: a saved sign-in for a relay and team that no longer exist gave
   // "the relay refused this session (404 http_404); check the relay URL, team and token".
-  it('a saved sign-in whose relay no longer answers (404): says plainly to run /team-relay:setup to sign in again', async () => {
+  it('a saved sign-in that no longer works at its relay (404): says plainly to run /team-relay:setup to sign in again', async () => {
     const xdg = mkdtempSync(join(tmpdir(), 'team-relay-session-start-'));
     try {
       const credential = relay.mintCredential('bob');
@@ -151,10 +151,23 @@ describe('SessionStart hook', () => {
       expect(r.status).toBe(0);
       expect(r.stdout.trimEnd().split('\n')).toHaveLength(1);
       expect(r.stdout.trimEnd()).toBe(
-        "team-relay: Not connected: your saved sign-in was for a team relay that no longer answers; run /team-relay:setup to sign in again.",
+        "team-relay: Not connected: your saved sign-in no longer works at its team relay; run /team-relay:setup to sign in again.",
       );
       expect(r.stdout).not.toContain('check the relay URL');
       expect(r.stdout + r.stderr).not.toContain(credential);
+    } finally {
+      rmSync(xdg, { recursive: true, force: true });
+    }
+  });
+
+  it('a saved sign-in for another relay that is not answering: says so and how to switch, never "sign in again"', async () => {
+    const xdg = mkdtempSync(join(tmpdir(), 'team-relay-session-start-'));
+    try {
+      writeCredential(join(xdg, 'team-relay', 'credentials.json'), { relay_url: 'http://127.0.0.1:9', team: 'demo', member: 'bob', credential: `trc_${'Z'.repeat(43)}`, expires_at: null });
+      const r = await run({ XDG_CONFIG_HOME: xdg });
+      expect(r.stdout.trimEnd()).toBe(
+        "team-relay: Not connected: this Mac is signed in to another team relay (127.0.0.1:9) that isn't answering right now; try again later, or run /team-relay:logout first to switch.",
+      );
     } finally {
       rmSync(xdg, { recursive: true, force: true });
     }

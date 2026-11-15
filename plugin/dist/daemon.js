@@ -26444,24 +26444,39 @@ async function connectOnce(env2, opts = {}) {
   } catch (err) {
     if (err instanceof RelayError && err.status === 401 && c.mode === "credential") return { kind: "refused", fingerprint };
     if (staleSignIn(err, c, configuredRelay(env2))) return { kind: "unreachable", problem: STALE_PROBLEM, stale: true, fingerprint };
+    if (otherRelayUnreachable(err, c, configuredRelay(env2))) return { kind: "unreachable", problem: otherRelayProblem(c.url), otherRelay: true, fingerprint };
     return { kind: "unreachable", problem: `the relay did not answer (${describeError(err)})`, fingerprint };
   }
   if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: "wrong_team", problem: "the relay answered for a different team", fingerprint };
   return { kind: "connected", client, me, connection: c, fingerprint };
 }
-var STALE_PROBLEM = "your saved sign-in was for a team relay that no longer answers; run /team-relay:setup to sign in again";
+var STALE_PROBLEM = "your saved sign-in no longer works at its team relay; run /team-relay:setup to sign in again";
 function configuredRelay(env2) {
   return configValue(env2.RELAY_URL) ?? defaultRelayUrl();
 }
 function staleSignIn(err, c, configured) {
-  if (c.mode !== "credential") return false;
-  if (err instanceof RelayError) return err.status === 404;
-  if (!(err instanceof RelayNetworkError) || configured === null) return false;
+  if (c.mode !== "credential" || !(err instanceof RelayError) || err.status !== 404) return false;
+  return err.code === "not_found" || configured !== null && otherRelay(c.url, configured);
+}
+function otherRelay(url, configured) {
   try {
-    return normaliseRelayUrl(c.url) !== normaliseRelayUrl(configured);
+    return normaliseRelayUrl(url) !== normaliseRelayUrl(configured);
   } catch {
     return false;
   }
+}
+function otherRelayUnreachable(err, c, configured) {
+  if (c.mode !== "credential" || !(err instanceof RelayNetworkError) || configured === null) return false;
+  return otherRelay(c.url, configured);
+}
+function otherRelayProblem(relayUrl) {
+  let host;
+  try {
+    host = new URL(relayUrl).host;
+  } catch {
+    host = "unknown";
+  }
+  return `this Mac is signed in to another team relay (${host}) that isn't answering right now; try again later, or run /team-relay:logout first to switch`;
 }
 function hostConnection(c, env2, credentialsFile) {
   return {

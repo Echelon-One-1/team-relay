@@ -20,10 +20,12 @@ export type ConnectAttempt = (
   | { kind: 'refused' }
   /**
    * The relay did not answer (or refused a sign-in that is not a device credential). `stale`:
-   * the stored device credential's relay no longer answers for it (staleSignIn), so a new
-   * sign-in to the configured relay is what helps, not waiting.
+   * the stored device credential no longer works at its relay (a 404: staleSignIn), so a new sign-in to the
+   * configured relay is what helps, not waiting. `otherRelay`: the stored device credential is
+   * for another relay than the configured one, and that relay cannot be reached
+   * (otherRelayUnreachable): never stale, since an outage is no reason to switch relays.
    */
-  | { kind: 'unreachable'; problem: string; stale?: true }
+  | { kind: 'unreachable'; problem: string; stale?: true; otherRelay?: true }
   /** The relay answered for another team (or with a member id that is not one). */
   | { kind: 'wrong_team'; problem: string }
 ) & {
@@ -78,6 +80,7 @@ export async function connectOnce(env: NodeJS.ProcessEnv, opts: { timeoutMs?: nu
   } catch (err) {
     if (err instanceof RelayError && err.status === 401 && c.mode === 'credential') return { kind: 'refused', fingerprint };
     if (staleSignIn(err, c, configuredRelay(env))) return { kind: 'unreachable', problem: STALE_PROBLEM, stale: true, fingerprint };
+    if (otherRelayUnreachable(err, c, configuredRelay(env))) return { kind: 'unreachable', problem: otherRelayProblem(c.url), otherRelay: true, fingerprint };
     return { kind: 'unreachable', problem: `the relay did not answer (${describeError(err)})`, fingerprint };
   }
   if (me.team !== client.team || !MEMBER_RE.test(me.member)) return { kind: 'wrong_team', problem: 'the relay answered for a different team', fingerprint };
@@ -85,7 +88,7 @@ export async function connectOnce(env: NodeJS.ProcessEnv, opts: { timeoutMs?: nu
 }
 
 /** Why a stale sign-in is not connected, in the words whoami and the session-start line use. */
-export const STALE_PROBLEM = 'your saved sign-in was for a team relay that no longer answers; run /team-relay:setup to sign in again';
+export const STALE_PROBLEM = 'your saved sign-in no longer works at its team relay; run /team-relay:setup to sign in again';
 
 /** The relay a sign-in goes to (login): RELAY_URL, else the plugin's default; null when neither is usable. */
 export function configuredRelay(env: NodeJS.ProcessEnv): string | null {
@@ -94,20 +97,46 @@ export function configuredRelay(env: NodeJS.ProcessEnv): string | null {
 
 /**
  * Whether `err`, from GET /me with the stored device credential `c`, means that sign-in is stale:
- * the relay answered 404 (a team it does not know, or the relay or its route gone), or `c` names
- * another relay than the configured one and that relay cannot be reached. Never a 401 or 403,
- * a 5xx, or a network error at the configured relay itself: those keep their own handling. Only a
- * device credential (/team-relay:login); a sign-in from the environment is the environment's.
+ * it no longer works at its relay. From the configured relay (`configured`, configuredRelay) only
+ * the relay's own JSON 404 (`not_found`: a team it does not know) counts, never a 404 from
+ * something in front of it. From a saved relay other than the configured one any 404 counts (a
+ * deleted Cloud Run service answers Google's HTML 404). Never a network error (wherever the relay
+ * is: a short outage must not let setup replace a working sign-in), a 401 or 403, or a 5xx. Only
+ * a device credential (/team-relay:login); a sign-in from the environment is the environment's.
  */
 export function staleSignIn(err: unknown, c: Connection, configured: string | null): boolean {
-  if (c.mode !== 'credential') return false;
-  if (err instanceof RelayError) return err.status === 404;
-  if (!(err instanceof RelayNetworkError) || configured === null) return false;
+  if (c.mode !== 'credential' || !(err instanceof RelayError) || err.status !== 404) return false;
+  return err.code === 'not_found' || (configured !== null && otherRelay(c.url, configured));
+}
+
+/** Whether `url` is another relay than `configured` (false when either cannot be read). */
+function otherRelay(url: string, configured: string): boolean {
   try {
-    return normaliseRelayUrl(c.url) !== normaliseRelayUrl(configured);
+    return normaliseRelayUrl(url) !== normaliseRelayUrl(configured);
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether `err` is a network error at the stored device credential's relay, and that relay is
+ * another than the configured one (`configured`, configuredRelay). Setup then stops and says so:
+ * switching relays is the member's choice (/team-relay:logout first), never an outage's.
+ */
+export function otherRelayUnreachable(err: unknown, c: Connection, configured: string | null): boolean {
+  if (c.mode !== 'credential' || !(err instanceof RelayNetworkError) || configured === null) return false;
+  return otherRelay(c.url, configured);
+}
+
+/** Why a sign-in for another relay that is not answering is not connected (the relay's host only, from the credential). */
+export function otherRelayProblem(relayUrl: string): string {
+  let host: string;
+  try {
+    host = new URL(relayUrl).host;
+  } catch {
+    host = 'unknown';
+  }
+  return `this Mac is signed in to another team relay (${host}) that isn't answering right now; try again later, or run /team-relay:logout first to switch`;
 }
 
 /** How an answer host's own servers reach the relay: the same way this process does. */

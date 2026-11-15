@@ -548,8 +548,10 @@ class AskerConnection {
   private live: (Live & { stopper: Stopper; fingerprint: string | null; mode: AuthMode }) | null = null;
   private problem: string | null = null;
   private refusedAt: string | null | undefined = undefined;
-  /** The credential file whose relay no longer answers for it (relay-connect.ts staleSignIn), if any. */
+  /** The credential file whose relay answered 404 for it (relay-connect.ts staleSignIn), if any. */
   private staleAt: string | undefined = undefined;
+  /** The credential file for another relay that is not answering (otherRelayUnreachable), if any. */
+  private elsewhereAt: string | undefined = undefined;
   /** How the last attempt to connect ended (null: none yet). */
   private lastAttempt: ConnectAttempt['kind'] | null = null;
   private lastLogged = '';
@@ -681,6 +683,7 @@ class AskerConnection {
     const attempt = await connectOnce(this.env);
     this.lastAttempt = attempt.kind;
     this.staleAt = attempt.kind === 'unreachable' && attempt.stale && attempt.fingerprint !== null ? attempt.fingerprint : undefined;
+    this.elsewhereAt = attempt.kind === 'unreachable' && attempt.otherRelay && attempt.fingerprint !== null ? attempt.fingerprint : undefined;
     // The file the attempt read, not the one looked at before it: a sign-in stored in between
     // would otherwise look like a new one at the next look, and drop this connection for it.
     const fp = attempt.fingerprint;
@@ -932,14 +935,16 @@ class AskerConnection {
   /**
    * /team-relay:setup: whether this session has a sign-in to wait for. 'none': no stored sign-in
    * (or none the connection could use); 'refused': the relay refused the stored one; 'stale':
-   * the stored one's relay no longer answers for it (a 404, or another relay than the configured
-   * one that cannot be reached); 'present': one is stored and the connection is (re)trying it.
+   * the stored one's relay answered 404 for it; 'elsewhere': the stored one is for another relay
+   * than the configured one, and that relay is not answering; 'present': one is stored and the
+   * connection is (re)trying it.
    */
   storedSignIn(): StoredSignIn {
     const fp = credentialFingerprint(this.path);
     if (fp === null) return 'none';
     if (this.refusedAt !== undefined && this.refusedAt === fp) return 'refused';
     if (this.staleAt !== undefined && this.staleAt === fp) return 'stale';
+    if (this.elsewhereAt !== undefined && this.elsewhereAt === fp) return 'elsewhere';
     // Waiting is worth it only while the connection has not tried yet, is connected, or the
     // relay did not answer. A file it found no usable sign-in in (expired, unreadable, corrupt:
     // not_signed_in or config) or one for another team (wrong_team) needs a new sign-in.
@@ -952,7 +957,10 @@ class AskerConnection {
    * `waitMs`), until this session is connected as the new member. Null once connected; the
    * sign-in URL when no browser could be opened on it (the user opens it themselves); else why not.
    */
-  async signInAndWait(waitMs: number, progress: (message: string) => void): Promise<SignInWait> {
+  async signInAndWait(waitMs: number, progress: (message: string) => void, signal?: AbortSignal): Promise<SignInWait> {
+    // The setup call cancelled: stop waiting at once. A sign-in already started goes on (the
+    // member may finish it in the browser); none is started for a call already cancelled.
+    if (signal?.aborted) return { cancelled: true };
     // A stale sign-in (that very file) may be replaced by this one, once it succeeds.
     const fp = credentialFingerprint(this.path);
     const stale = fp !== null && this.staleAt === fp ? fp : undefined;
@@ -962,6 +970,12 @@ class AskerConnection {
     const deadline = Date.now() + waitMs;
     const tick = setInterval(() => progress('waiting for the sign-in in the browser'), 15_000);
     const noBrowser = Symbol('no browser');
+    const cancelled = Symbol('cancelled');
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<typeof cancelled>((resolve) => {
+      onAbort = () => resolve(cancelled);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
     // Resolves only when the browser could not be opened.
     const unopened = flow ? flow.opened.then((ok) => (ok ? new Promise<never>(() => {}) : noBrowser)) : new Promise<never>(() => {});
     try {
@@ -973,10 +987,15 @@ class AskerConnection {
         const result = await Promise.race([
           current,
           unopened,
+          aborted,
           new Promise<typeof timedOut>((resolve) => {
             timer = setTimeout(() => resolve(timedOut), Math.max(0, deadline - Date.now()));
           }),
         ]).finally(() => clearTimeout(timer));
+        if (result === cancelled) {
+          log('setup: stopped waiting for the sign-in (the call was cancelled); the sign-in goes on');
+          return { cancelled: true };
+        }
         if (result === noBrowser) return { signInUrl: flow!.url };
         if (result === timedOut) return `The sign-in did not finish within ${Math.round(waitMs / 60_000)} minutes.`;
         if (!result.ok) {
@@ -999,6 +1018,7 @@ class AskerConnection {
       return this.live ? null : 'No sign-in is waiting.';
     } finally {
       clearInterval(tick);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
     }
   }
 
@@ -1049,10 +1069,10 @@ export function autoAnswer(env: NodeJS.ProcessEnv): boolean {
 }
 
 /** What /team-relay:setup's sign-in came to: null (connected), the URL to show, or why not. */
-export type SignInWait = null | string | { signInUrl: string };
+export type SignInWait = null | string | { signInUrl: string } | { cancelled: true };
 
 /** Whether a sign-in is stored for this session (AskerConnection.storedSignIn). */
-export type StoredSignIn = 'none' | 'refused' | 'stale' | 'present';
+export type StoredSignIn = 'none' | 'refused' | 'stale' | 'elsewhere' | 'present';
 
 type LoginOutcome =
   | { ok: true; member: string; team: string; email?: string | undefined; changed: string | null }
@@ -1241,7 +1261,7 @@ async function main(): Promise<void> {
               live: () => connection.setupLive(),
               stored: () => connection.storedSignIn(),
               notConnected: () => connection.notConnected(),
-              signIn: (ms, p) => connection.signInAndWait(ms, p),
+              signIn: (ms, p, sig) => connection.signInAndWait(ms, p, sig),
               pages: setupPages,
             },
             progress,

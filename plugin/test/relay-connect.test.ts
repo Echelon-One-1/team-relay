@@ -10,7 +10,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as credentials from '../src/credentials.js';
-import { connectOnce, staleSignIn } from '../src/relay-connect.js';
+import { connectOnce, otherRelayProblem, otherRelayUnreachable, staleSignIn } from '../src/relay-connect.js';
+import { createServer } from 'node:net';
 import { RelayError, RelayNetworkError, type Connection } from '../src/relay-client.js';
 import { FakeRelay } from './helpers/fake-relay.js';
 
@@ -118,6 +119,14 @@ describe('connectOnce: a stale sign-in', () => {
     expect(a).toMatchObject({ kind: 'unreachable', stale: true, fingerprint: realFingerprint(credFile()) });
   });
 
+  it('a 404 at the configured relay that is not its own answer (no not_found): not stale', async () => {
+    store('alice');
+    relay.fail(() => true, 404, 1, {});
+    const a = await connectOnce({ ...env(), RELAY_URL: relay.url });
+    expect(a.kind).toBe('unreachable');
+    expect('stale' in a).toBe(false);
+  });
+
   it('a 401 at the configured relay is refused, not stale', async () => {
     credentials.writeCredential(credFile(), { relay_url: relay.url, team: 'demo', member: 'bob', credential: `trc_${'Z'.repeat(43)}`, expires_at: null });
     const a = await connectOnce({ ...env(), RELAY_URL: relay.url });
@@ -134,24 +143,57 @@ describe('connectOnce: a stale sign-in', () => {
   });
 });
 
-describe('staleSignIn', () => {
+describe('connectOnce: signed in to another relay that is not answering', () => {
+  it('not stale: unreachable, saying it is signed in to another team relay (its host) and how to switch', async () => {
+    const port = await new Promise<number>((resolve) => {
+      const srv = createServer();
+      srv.listen(0, '127.0.0.1', () => {
+        const p = (srv.address() as { port: number }).port;
+        srv.close(() => resolve(p));
+      });
+    });
+    credentials.writeCredential(credFile(), { relay_url: `http://127.0.0.1:${port}`, team: 'demo', member: 'bob', credential: `trc_${'Q'.repeat(43)}`, expires_at: null });
+    // No RELAY_URL: the configured relay is the plugin's default, another one.
+    const a = await connectOnce(env());
+    expect(a).toMatchObject({ kind: 'unreachable', otherRelay: true, problem: otherRelayProblem(`http://127.0.0.1:${port}`) });
+    expect('stale' in a).toBe(false);
+    expect(otherRelayProblem(`http://127.0.0.1:${port}`)).toBe(
+      `this Mac is signed in to another team relay (127.0.0.1:${port}) that isn't answering right now; try again later, or run /team-relay:logout first to switch`,
+    );
+  });
+});
+
+describe('staleSignIn: only a 404 from the saved relay', () => {
   const cred = (url: string): Connection => ({ mode: 'credential', url, team: 'demo', member: 'bob', token: { get: async () => 'x' } } as unknown as Connection);
   const configured = 'https://relay.example.com';
   const net = new RelayNetworkError('relay unreachable (ENOTFOUND)');
 
-  it('a 404 from the stored relay, whichever it is', () => {
+  it('the configured relay: only its own JSON 404 (not_found), never another 404 (a proxy, a host in front of it)', () => {
     expect(staleSignIn(new RelayError(404, 'not_found', ''), cred(configured), configured)).toBe(true);
+    expect(staleSignIn(new RelayError(404, 'not_found', ''), cred(`${configured}/`), configured)).toBe(true);
+    expect(staleSignIn(new RelayError(404, 'http_404', ''), cred(configured), configured)).toBe(false);
+    expect(staleSignIn(new RelayError(404, 'page_missing', ''), cred(configured), configured)).toBe(false);
+  });
+
+  // The real case, 15 Nov 2026: a deleted Cloud Run service answers Google's HTML 404 (http_404).
+  it('a saved relay other than the configured one: any 404', () => {
     expect(staleSignIn(new RelayError(404, 'http_404', ''), cred('https://old.example.com'), configured)).toBe(true);
+    expect(staleSignIn(new RelayError(404, 'not_found', ''), cred('https://old.example.com'), configured)).toBe(true);
   });
 
-  it('another relay than the configured one that cannot be reached', () => {
-    expect(staleSignIn(net, cred('https://old.example.com'), configured)).toBe(true);
-    expect(staleSignIn(net, cred('https://old.example.com'), null)).toBe(false);
+  it('no configured relay to compare with: only the relay\'s own not_found', () => {
+    expect(staleSignIn(new RelayError(404, 'not_found', ''), cred('https://old.example.com'), null)).toBe(true);
+    expect(staleSignIn(new RelayError(404, 'http_404', ''), cred('https://old.example.com'), null)).toBe(false);
   });
 
-  it('never a network error at the configured relay, a 401, a 403 or a 5xx', () => {
+  // Security review, 15 Nov 2026: a short outage must not let setup replace a working sign-in
+  // for another relay without the member choosing to switch.
+  it('never a network error, at the configured relay or another one', () => {
     expect(staleSignIn(net, cred(configured), configured)).toBe(false);
-    expect(staleSignIn(net, cred(`${configured}/`), configured)).toBe(false);
+    expect(staleSignIn(net, cred('https://old.example.com'), configured)).toBe(false);
+  });
+
+  it('never a 401, a 403 or a 5xx', () => {
     for (const status of [401, 403, 500, 503]) {
       expect(staleSignIn(new RelayError(status, 'x', ''), cred(configured), configured)).toBe(false);
       expect(staleSignIn(new RelayError(status, 'x', ''), cred('https://old.example.com'), configured)).toBe(false);
@@ -161,6 +203,20 @@ describe('staleSignIn', () => {
   it('only a device credential from /team-relay:login', () => {
     const token = { ...cred('https://old.example.com'), mode: 'token' } as Connection;
     expect(staleSignIn(new RelayError(404, 'not_found', ''), token, configured)).toBe(false);
-    expect(staleSignIn(net, token, configured)).toBe(false);
+  });
+});
+
+describe('otherRelayUnreachable', () => {
+  const cred = (url: string): Connection => ({ mode: 'credential', url, team: 'demo', member: 'bob', token: { get: async () => 'x' } } as unknown as Connection);
+  const configured = 'https://relay.example.com';
+  const net = new RelayNetworkError('relay unreachable (ENOTFOUND)');
+
+  it('a network error at a saved relay other than the configured one', () => {
+    expect(otherRelayUnreachable(net, cred('https://old.example.com'), configured)).toBe(true);
+    expect(otherRelayUnreachable(net, cred(configured), configured)).toBe(false);
+    expect(otherRelayUnreachable(net, cred(`${configured}/`), configured)).toBe(false);
+    expect(otherRelayUnreachable(net, cred('https://old.example.com'), null)).toBe(false);
+    expect(otherRelayUnreachable(new RelayError(404, 'not_found', ''), cred('https://old.example.com'), configured)).toBe(false);
+    expect(otherRelayUnreachable(net, { ...cred('https://old.example.com'), mode: 'token' } as Connection, configured)).toBe(false);
   });
 });

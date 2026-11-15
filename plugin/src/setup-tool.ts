@@ -8,10 +8,11 @@
 //
 // A sign-in that is stored but not connected yet (the session is starting, or reconnecting after
 // the relay did not answer) is waited for briefly, never replaced by a new Google sign-in: only
-// with no stored sign-in, one the relay refused, or a stale one (its relay no longer answers for
-// it: a 404, or another relay than the configured one that cannot be reached; relay-connect.ts
-// staleSignIn) does it sign in again. A stale sign-in stays stored until the new one succeeds,
-// which then replaces it. When no browser could be opened on the sign-in, the result carries the
+// with no stored sign-in, one the relay refused, or a stale one (its relay answered 404 for it;
+// relay-connect.ts staleSignIn) does it sign in again. A stale sign-in stays stored until the new
+// one succeeds, which then replaces it. A sign-in for another relay than the configured one that
+// is not answering is never stale (an outage is no reason to switch relays): setup stops and says
+// so, and switching stays the member's choice (/team-relay:logout first). When no browser could be opened on the sign-in, the result carries the
 // sign-in URL for the user to open themselves (as the login tool's does, under the same rule).
 
 import { SIGN_IN_URL_RULE } from './login.js';
@@ -31,8 +32,8 @@ export const SETUP_TOOL = {
 /** What the tool says (as progress) once the page is open. */
 export const SETUP_OPEN = 'The setup page is open in your browser. Come back here when it says Done.';
 
-/** Said first when the stored sign-in's relay no longer answers for it. */
-export const SETUP_STALE = "Your saved sign-in was for a team relay that no longer answers, so you're signing in again.";
+/** Said first when the stored sign-in no longer works at its relay (a 404). */
+export const SETUP_STALE = "Your saved sign-in no longer works at its team relay, so you're signing in again.";
 
 /** What the tool says when Done was not pressed within the wait. */
 export const SETUP_STILL_OPEN = 'The setup page is still open in your browser. Finish it there; run /team-relay:setup again if you closed it.';
@@ -68,17 +69,19 @@ export type SetupToolDeps = {
   live: () => SetupLive | null;
   /**
    * Whether a sign-in is stored: 'none' (or none usable), 'refused' (the relay refused it),
-   * 'stale' (its relay no longer answers for it), or 'present' (the session is connecting with
-   * it). Without it: as 'none'.
+   * 'stale' (its relay answered 404 for it), 'elsewhere' (it is for another relay than the
+   * configured one, which is not answering), or 'present' (the session is connecting with it).
+   * Without it: as 'none'.
    */
-  stored?: () => 'none' | 'refused' | 'stale' | 'present';
+  stored?: () => 'none' | 'refused' | 'stale' | 'elsewhere' | 'present';
   /** Why the session is not connected, in one sentence (the whoami tool's). */
   notConnected?: () => string;
   /**
    * Signs in (as `login`) and waits for it (as `login_wait`, at most `waitMs`): null once signed
-   * in; the sign-in URL when no browser could be opened on it; else why not, in one sentence.
+   * in; the sign-in URL when no browser could be opened on it; `cancelled` at once when `signal`
+   * aborts (the sign-in itself goes on in the browser); else why not, in one sentence.
    */
-  signIn: (waitMs: number, progress: (message: string) => void) => Promise<null | string | { signInUrl: string }>;
+  signIn: (waitMs: number, progress: (message: string) => void, signal?: AbortSignal) => Promise<null | string | { signInUrl: string } | { cancelled: true }>;
   pages: { open(live: SetupLive): Promise<OpenedPage> };
   /** Tests: the wait between looks at the connection. */
   sleep?: (ms: number) => Promise<void>;
@@ -107,13 +110,16 @@ export async function setupTool(
     }
     if (!live && stored === 'present') return toolError(`${deps.notConnected?.() ?? 'Not connected yet.'} Run /team-relay:setup again in a moment.`);
   }
+  // Signed in to another relay that is not answering: what to do is in the sentence; never a new sign-in.
+  if (!live && stored === 'elsewhere') return toolError(`${deps.notConnected?.() ?? 'Not connected: signed in to another team relay that is not answering right now'}.`);
   const stale = !live && stored === 'stale';
   const said = (text: string) => (stale ? `${SETUP_STALE} ${text}` : text);
   if (signal?.aborted) return toolError(SETUP_CANCELLED);
   if (!live) {
     if (stale) progress(SETUP_STALE);
     progress('signing in: finish in the browser');
-    const why = await deps.signIn(SETUP_SIGN_IN_WAIT_MS, progress);
+    const why = await deps.signIn(SETUP_SIGN_IN_WAIT_MS, progress, signal);
+    if (why !== null && typeof why === 'object' && 'cancelled' in why) return toolError(SETUP_CANCELLED);
     if (why !== null && typeof why === 'object') {
       return toolJson({ status: 'waiting_for_browser', sign_in_url: why.signInUrl, sign_in_url_rule: SIGN_IN_URL_RULE, message: said(SETUP_OPEN_SIGN_IN) });
     }
