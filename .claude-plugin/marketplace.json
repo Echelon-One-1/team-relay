@@ -10,7 +10,7 @@
       "source": "./plugin",
       "description": "Ask teammates' Claude sessions questions and run named, parameterised operations for each other; answers are pushed into your session.",
       "license": "MIT",
-      "version": "0.2.2"
+      "version": "0.2.3"
     }
   ]
 }
