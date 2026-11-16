@@ -17,7 +17,7 @@ import { MockRelay, mockStatus } from '@/mock/relay'
 import { renderWithClient } from './render'
 
 const KEY = 'j01nj01nj01nj01nj01nj01nj01nj01n'
-const SOURCE = 'example-org/team-relay'
+const SOURCE = 'https://github.com/example-org/team-relay'
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })

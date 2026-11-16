@@ -179,15 +179,17 @@ const PLUGIN_RE = /^[a-z0-9][a-z0-9-]{0,63}$/
 export const DEFAULT_PLUGIN = 'team-relay'
 
 /**
- * What the Claude app's "Add marketplace" takes (GET /api/join's marketplace_source): a GitHub
- * owner/repo or a plain https URL, as the console server checks it. Anything else is null (the
+ * What the Claude app's "Add marketplace" takes (GET /api/join's marketplace_source): a plain
+ * https URL, as the console server checks it. A GitHub owner/repo is shown as its full
+ * https://github.com/ address, the form the app is known to take. Anything else is null (the
  * page then says to ask a team owner).
  */
 export function joinSource(join: Join | null | undefined): string | null {
   const v = typeof join?.marketplace_source === 'string' ? join.marketplace_source.trim() : ''
   if (!v || v.length > 512) return null
   if ((`/${v}/`).includes('/./') || (`/${v}/`).includes('/../')) return null
-  return GITHUB_REPO_RE.test(v) || SOURCE_URL_RE.test(v) ? v : null
+  if (GITHUB_REPO_RE.test(v)) return `https://github.com/${v}`
+  return SOURCE_URL_RE.test(v) ? v : null
 }
 
 /** The plugin's name in the Claude app's list (GET /api/join's plugin), else team-relay. */

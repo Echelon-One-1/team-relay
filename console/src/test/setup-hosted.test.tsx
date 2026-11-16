@@ -25,7 +25,7 @@ describe('the hosted Setup view', () => {
     })
     renderWithClient(<App />)
     const card = await screen.findByRole('region', { name: 'Join in 2 minutes' })
-    await waitFor(() => expect(card.querySelector('[data-command="plugin source"]')).toHaveTextContent('example-org/team-relay'))
+    await waitFor(() => expect(card.querySelector('[data-command="plugin source"]')).toHaveTextContent('https://github.com/example-org/team-relay'))
     expect(card.querySelector('[data-command="setup command"]')).toHaveTextContent('/team-relay:setup')
     const panel = await screen.findByRole('region', { name: 'Your setup' })
     expect(panel.querySelector('[data-setup-step="mac"] [data-setup-see-card]')).not.toBeNull()

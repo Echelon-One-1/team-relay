@@ -299,6 +299,9 @@ decisions; where they differ from §5 and §6, these win.
   2. Paste this and click Sync: the plugin source (`GET /api/join`'s `marketplace_source`, a
      GitHub owner/repo or a plain https URL, checked again in the browser), with a big Copy
      button. Without one: "Ask a team owner for the plugin source, paste it and click Sync."
+     Correction (16 Nov 2026): a GitHub owner/repo is shown, copied and put in the invite message
+     as its full `https://github.com/<owner>/<repo>` address, the form the Claude app is known to
+     take; `/api/join` still carries the owner/repo.
   3. Find "team-relay" (`/api/join`'s `plugin`, else team-relay) in the list and click Add.
   4. Start a Code session and type `/team-relay:setup` (copyable). A page opens: sign in, pick
      your team, choose the folders your Claude may read, then click Done.
