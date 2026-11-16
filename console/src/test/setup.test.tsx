@@ -21,7 +21,7 @@ import { MockRelay, mockStatus } from '@/mock/relay'
 import { renderWithClient, setHidden } from './render'
 
 const KEY = 's3tup-s3tup-s3tup-s3tup-s3tup-s3'
-const SOURCE = 'example-org/team-relay'
+const SOURCE = 'https://github.com/example-org/team-relay'
 
 type Call = { method: string; path: string; team: string | null; body: unknown }
 

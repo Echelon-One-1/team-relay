@@ -198,9 +198,9 @@ describe('the plugin source and the invite message', () => {
     expect(publicOrigin({ hostname: 'localhost', origin: 'http://localhost:4545' }, { ...join, relay_url: 'not a url' })).toBeNull()
   })
   it('reads the plugin source and the plugin name defensively', () => {
-    expect(joinSource({ ...join, marketplace_source: 'example-org/team-relay' })).toBe('example-org/team-relay')
+    expect(joinSource({ ...join, marketplace_source: 'example-org/team-relay' })).toBe('https://github.com/example-org/team-relay')
     expect(joinSource({ ...join, marketplace_source: 'https://git.example.com/tools/team-relay.git' })).toBe('https://git.example.com/tools/team-relay.git')
-    expect(joinSource({ ...join, marketplace_source: '  example-org/team-relay ' })).toBe('example-org/team-relay')
+    expect(joinSource({ ...join, marketplace_source: '  example-org/team-relay ' })).toBe('https://github.com/example-org/team-relay')
     for (const bad of [null, undefined, '', 42, 'not a source', 'example-org/..', 'example-org/.', 'http://git.example.com/x', 'https://u:p@git.example.com/x', 'https://git.example.com/x?y=1', 'a/b; rm -rf ~', 'x'.repeat(600)]) {
       expect(joinSource({ ...join, marketplace_source: bad } as unknown as Join)).toBeNull()
     }
@@ -215,7 +215,7 @@ describe('the plugin source and the invite message', () => {
   })
 
   it('the plain-text message: the link first, then the same five steps as the join card, through the Claude app', () => {
-    const message = inviteMessage('Demo\nteam', 'https://team.example.com', 'example-org/team-relay', 'team-relay')
+    const message = inviteMessage('Demo\nteam', 'https://team.example.com', 'https://github.com/example-org/team-relay', 'team-relay')
     expect(message).toBe(
       [
         "You're invited to the team Demo team on Team relay.",
@@ -226,7 +226,7 @@ describe('the plugin source and the invite message', () => {
         '',
         '1. Open the Claude app. Click Customize, then Plugins, then "+ Add", then "Add marketplace".',
         '2. Paste this and click Sync:',
-        'example-org/team-relay',
+        'https://github.com/example-org/team-relay',
         '3. Find "team-relay" in the list and click Add.',
         '4. Start a Code session and type /team-relay:setup. A page opens: sign in, pick your team, choose the folders your Claude may read, then click Done.',
         '5. Come back to the page. If it still asks, click Accept.',
